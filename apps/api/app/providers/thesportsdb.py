@@ -10,8 +10,7 @@ import httpx
 from redis.asyncio import Redis
 from redis.exceptions import RedisError
 
-from ..config import get_settings
-from ..config import Settings
+from ..config import Settings, get_settings
 from ..schemas import (
     EventBundle,
     ExternalEvent,

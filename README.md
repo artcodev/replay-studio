@@ -157,9 +157,11 @@ Match settings are project-scoped. The root video scene owns the canonical
 snapshot; segment and multi-pass scenes receive the same effective binding with
 `scope`, `projectSceneId`, and `inherited` metadata. Bind/import/refresh requests
 may use the active shot ID, but the API validates and updates the complete video
-project atomically. Startup migration promotes the richest compatible legacy
-child snapshot to the project and queues identity rebuilds only where the
-semantic roster changed.
+project atomically. Reconstruction remains scene-scoped: only an explicitly
+requested single-pass shot may be queued, while a request from the root video
+queues no child shots. Startup migration promotes the richest compatible legacy
+snapshot but never creates hidden reconstruction jobs; affected shots are
+rebuilt only when the user opens and explicitly reconstructs them.
 
 The opt-in labelled-crop harness evaluates both workers without loading model
 runtimes into the API or claiming accuracy from synthetic tests. Its manifest,

@@ -1104,9 +1104,9 @@ def queue_reconstruction(
         "progress": _queued_progress(len(input_frames)),
     }
     if not persist:
-        # Project-level match updates prepare every affected run first, then
-        # commit all scene documents in one store transaction. Persisting here
-        # would expose a partially updated project between sibling writes.
+        # Project-level match updates prepare the explicitly requested run,
+        # then commit it together with project-wide metadata in one store
+        # transaction. Persisting here would expose a partially updated project.
         video["reconstruction"] = {
             **(video.get("reconstruction") or {}),
             "status": "queued",

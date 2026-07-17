@@ -222,7 +222,8 @@ def test_search_resolves_team_pair_then_uses_head_to_head(monkeypatch) -> None:
 
     assert events[0].id == "12345"
     assert events[0].provider == "api-football"
-    assert ("fixtures/headtohead", {"h2h": "1-2", "last": 40}) in calls
+    assert ("fixtures/headtohead", {"h2h": "1-2"}) in calls
+    assert all("last" not in params for endpoint, params in calls if endpoint == "fixtures/headtohead")
 
 
 def test_search_requires_an_unambiguous_team_pair() -> None:

@@ -181,8 +181,11 @@ POST /api/scenes/{sceneId}/match-binding/import
 Content-Type: application/json
 ```
 
-Both routes use the same reconstruction lock, full-document revision,
-fingerprint CAS and queued rebuild as the ordinary match-binding endpoint.
+Both routes use the same reconstruction lock, full-document revision and
+fingerprint CAS as the ordinary match-binding endpoint. Match metadata is
+updated project-wide, but reconstruction is queued only when `sceneId` is the
+explicitly requested single-pass shot. Calling either route on the root video
+does not enqueue any child scene.
 The project includes a validated full Spain–Belgium 2026 fixture at
 `data/matches/spain-belgium-2026-qf.json` as an importable example.
 

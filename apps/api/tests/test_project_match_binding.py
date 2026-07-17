@@ -159,6 +159,34 @@ def _manual_binding(player_count: int = 52) -> dict:
     }
 
 
+def _manual_import_body() -> dict:
+    return {
+        "event": {
+            "id": "manual-event",
+            "name": "Spain vs Belgium",
+            "date": "2026-07-17",
+        },
+        "teams": {
+            "home": {"id": "spain", "name": "Spain"},
+            "away": {"id": "belgium", "name": "Belgium"},
+        },
+        "players": [
+            {
+                "id": "spain-player",
+                "name": "Spain Player",
+                "team_id": "spain",
+                "lineup_role": "starter",
+            },
+            {
+                "id": "belgium-player",
+                "name": "Belgium Player",
+                "team_id": "belgium",
+                "lineup_role": "starter",
+            },
+        ],
+    }
+
+
 async def _async_request(method: str, path: str, **kwargs):
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
@@ -182,7 +210,7 @@ def isolated_store(monkeypatch) -> SceneStore:
     return SceneStore()
 
 
-def test_binding_from_child_updates_root_and_every_sibling_atomically(
+def test_binding_from_child_updates_project_but_rebuilds_only_requested_child(
     isolated_store: SceneStore,
     monkeypatch,
 ) -> None:
@@ -224,8 +252,94 @@ def test_binding_from_child_updates_root_and_every_sibling_atomically(
         assert scene["payload"]["teams"][0]["name"] == "Spain"
         assert scene["payload"]["teams"][1]["name"] == "Belgium"
     assert saved_first["payload"]["videoAsset"]["reconstruction"]["status"] == "queued"
-    assert saved_second["payload"]["videoAsset"]["reconstruction"]["status"] == "queued"
-    assert set(background_runs) == {"shot-1", "shot-2"}
+    assert saved_second["payload"]["videoAsset"]["reconstruction"]["status"] == "ready"
+    assert background_runs == ["shot-1"]
+
+
+def test_binding_from_root_updates_project_without_rebuilding_any_shot(
+    isolated_store: SceneStore,
+    monkeypatch,
+) -> None:
+    root = isolated_store.put(_root())
+    first = isolated_store.put(_child("shot-1", "segment-1"))
+    second = isolated_store.put(_child("shot-2", "segment-2"))
+    background_runs: list[str] = []
+
+    async def event_bundle(_event_id: str):
+        return _bundle()
+
+    monkeypatch.setattr("app.main.sports_provider.event_bundle", event_bundle)
+    monkeypatch.setattr(
+        "app.main.reconstruct_scene_by_id",
+        lambda scene_id, *_: background_runs.append(scene_id),
+    )
+    monkeypatch.setattr("app.reconstruction._frame_paths", lambda _: [("frame", 0.0)])
+
+    response = _request(
+        "POST",
+        "/api/scenes/project-root/match-binding",
+        json={"event_id": "event-spain-belgium"},
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["scene"]["id"] == root["id"]
+    for scene_id in (root["id"], first["id"], second["id"]):
+        saved = isolated_store.get(scene_id)
+        assert saved["payload"]["matchBinding"]["eventId"] == "event-spain-belgium"
+    assert (
+        isolated_store.get(first["id"])["payload"]["videoAsset"]["reconstruction"][
+            "status"
+        ]
+        == "ready"
+    )
+    assert (
+        isolated_store.get(second["id"])["payload"]["videoAsset"]["reconstruction"][
+            "status"
+        ]
+        == "ready"
+    )
+    assert background_runs == []
+
+
+def test_manual_import_updates_project_but_rebuilds_only_requested_child(
+    isolated_store: SceneStore,
+    monkeypatch,
+) -> None:
+    root = isolated_store.put(_root())
+    requested = isolated_store.put(_child("shot-1", "segment-1"))
+    sibling = isolated_store.put(_child("shot-2", "segment-2"))
+    background_runs: list[str] = []
+
+    monkeypatch.setattr(
+        "app.main.reconstruct_scene_by_id",
+        lambda scene_id, *_: background_runs.append(scene_id),
+    )
+    monkeypatch.setattr("app.reconstruction._frame_paths", lambda _: [("frame", 0.0)])
+
+    response = _request(
+        "POST",
+        f"/api/scenes/{requested['id']}/match-binding/import",
+        json=_manual_import_body(),
+    )
+
+    assert response.status_code == 200, response.text
+    for scene_id in (root["id"], requested["id"], sibling["id"]):
+        binding = isolated_store.get(scene_id)["payload"]["matchBinding"]
+        assert binding["source"] == "manual"
+        assert binding["eventId"] == "manual-event"
+    assert (
+        isolated_store.get(requested["id"])["payload"]["videoAsset"][
+            "reconstruction"
+        ]["status"]
+        == "queued"
+    )
+    assert (
+        isolated_store.get(sibling["id"])["payload"]["videoAsset"][
+            "reconstruction"
+        ]["status"]
+        == "ready"
+    )
+    assert background_runs == [requested["id"]]
 
 
 def test_project_binding_never_queues_multi_pass_as_single_pass(
@@ -263,6 +377,39 @@ def test_project_binding_never_queues_multi_pass_as_single_pass(
     assert video["multiPass"]["warnings"]
     assert background_runs == ["shot-1"]
     assert saved_multi["payload"]["matchBinding"]["projectSceneId"] == root["id"]
+
+
+def test_binding_requested_on_multi_pass_only_marks_it_for_explicit_refresh(
+    isolated_store: SceneStore,
+    monkeypatch,
+) -> None:
+    isolated_store.put(_root())
+    shot = isolated_store.put(_child("shot-1", "segment-1"))
+    multi = isolated_store.put(_multi_pass_child())
+    background_runs: list[str] = []
+
+    async def event_bundle(_event_id: str):
+        return _bundle()
+
+    monkeypatch.setattr("app.main.sports_provider.event_bundle", event_bundle)
+    monkeypatch.setattr(
+        "app.main.reconstruct_scene_by_id",
+        lambda scene_id, *_: background_runs.append(scene_id),
+    )
+
+    response = _request(
+        "POST",
+        f"/api/scenes/{multi['id']}/match-binding",
+        json={"event_id": "event-spain-belgium"},
+    )
+
+    assert response.status_code == 200, response.text
+    saved_multi = isolated_store.get(multi["id"])
+    saved_shot = isolated_store.get(shot["id"])
+    assert saved_multi["payload"]["videoAsset"]["reconstruction"]["status"] == "ready"
+    assert saved_multi["payload"]["videoAsset"]["multiPass"]["matchBindingState"] == "stale"
+    assert saved_shot["payload"]["videoAsset"]["reconstruction"]["status"] == "ready"
+    assert background_runs == []
 
 
 def test_single_pass_reconstruct_endpoint_and_queue_reject_multi_pass(
@@ -346,7 +493,11 @@ def test_refresh_on_legacy_child_promotes_event_to_project_root(
         return _bundle()
 
     monkeypatch.setattr("app.main.sports_provider.event_bundle", event_bundle)
-    monkeypatch.setattr("app.main.reconstruct_scene_by_id", lambda *_: None)
+    background_runs: list[str] = []
+    monkeypatch.setattr(
+        "app.main.reconstruct_scene_by_id",
+        lambda scene_id, *_: background_runs.append(scene_id),
+    )
     monkeypatch.setattr("app.reconstruction._frame_paths", lambda _: [("frame", 0.0)])
 
     response = _request(
@@ -361,6 +512,19 @@ def test_refresh_on_legacy_child_promotes_event_to_project_root(
         assert binding["eventId"] == "event-spain-belgium"
         assert binding["projectSceneId"] == root["id"]
         assert binding["inherited"] is (scene_id != root["id"])
+    assert (
+        isolated_store.get("shot-legacy")["payload"]["videoAsset"]["reconstruction"][
+            "status"
+        ]
+        == "queued"
+    )
+    assert (
+        isolated_store.get("shot-sibling")["payload"]["videoAsset"]["reconstruction"][
+            "status"
+        ]
+        == "ready"
+    )
+    assert background_runs == ["shot-legacy"]
 
 
 def test_put_many_rolls_back_every_scene_when_one_revision_is_stale(
@@ -407,7 +571,7 @@ def test_put_many_rolls_back_project_when_a_sibling_has_an_active_lease(
     assert isolated_store.get(leased["id"])["title"] == "shot-leased"
 
 
-def test_startup_migration_promotes_full_manual_child_and_rebuilds_stale_siblings(
+def test_startup_migration_promotes_metadata_without_hidden_rebuilds(
     isolated_store: SceneStore,
     monkeypatch,
 ) -> None:
@@ -459,17 +623,17 @@ def test_startup_migration_promotes_full_manual_child_and_rebuilds_stale_sibling
         isolated_store.get("shot-partial")["payload"]["videoAsset"]["reconstruction"][
             "status"
         ]
-        == "queued"
+        == "ready"
     )
     assert (
         isolated_store.get("shot-unbound")["payload"]["videoAsset"]["reconstruction"][
             "status"
         ]
-        == "queued"
+        == "ready"
     )
 
 
-def test_startup_repair_requeues_only_segments_and_restores_last_good_multi_pass(
+def test_startup_repair_never_requeues_segments_and_restores_multi_pass_display(
     isolated_store: SceneStore,
     monkeypatch,
 ) -> None:
@@ -551,8 +715,8 @@ def test_startup_repair_requeues_only_segments_and_restores_last_good_multi_pass
     repaired_segment_reconstruction = repaired_segment["payload"]["videoAsset"][
         "reconstruction"
     ]
-    assert repaired_segment_reconstruction["status"] == "queued"
-    assert repaired_segment_reconstruction["runId"] != old_segment_run_id
+    assert repaired_segment_reconstruction["status"] == "failed"
+    assert repaired_segment_reconstruction["runId"] == old_segment_run_id
     assert repaired_segment_reconstruction["inputFingerprint"] == (
         reconstruction_input_fingerprint(repaired_segment)
     )
@@ -585,7 +749,7 @@ def test_startup_repair_requeues_only_segments_and_restores_last_good_multi_pass
             isolated_store.list_recoverable_reconstruction_runs()
         )
     }
-    assert recoverable_ids == {segment["id"]}
+    assert recoverable_ids == set()
 
 
 def test_new_segment_and_multi_pass_inherit_project_binding(

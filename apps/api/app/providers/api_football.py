@@ -282,7 +282,11 @@ class ApiFootballProvider:
             return []
         data = await self._get(
             "fixtures/headtohead",
-            {"h2h": f"{home_id}-{away_id}", "last": 40},
+            # ``h2h`` is available on the Free plan, while the otherwise
+            # useful ``last`` filter is plan-gated. Fetch the provider's
+            # complete head-to-head response and filter/sort it locally so a
+            # valid free credential does not fail match search.
+            {"h2h": f"{home_id}-{away_id}"},
             ttl=600,
         )
         expected_team_ids = {home_id, away_id}

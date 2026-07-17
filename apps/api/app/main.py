@@ -1188,10 +1188,11 @@ def _migrate_legacy_project_match_bindings() -> list[str]:
     Older builds stored Match Data independently.  Migration runs before
     reconstruction recovery, prefers an explicit full manual import (the
     common 52-player project roster) over capped provider snapshots, and
-    queues only single-pass scenes whose *semantic* roster actually changed.
-    It also repairs the exact fingerprint failure produced when an old API
-    monitor raced this migration. Multi-pass composites are never put into the
-    single-pass queue. A project with an active lease or an ambiguous
+    never queues reconstruction: startup has no explicitly selected/current
+    scene, so it may repair project metadata but must not manufacture hidden
+    background work. It also repairs multi-pass presentation residue produced
+    when an old API monitor raced this migration. Multi-pass composites remain
+    explicit multi-angle jobs. A project with an active lease or an ambiguous
     equal-ranked conflict is left untouched.
     """
 
@@ -1234,7 +1235,6 @@ def _migrate_legacy_project_match_bindings() -> list[str]:
 
         source_teams = source_scene.get("payload", {}).get("teams") or []
         changed_semantic_ids: set[str] = set()
-        repairable_segment_ids: set[str] = set()
         needs_write = False
         for scene in scenes:
             current_binding = scene.get("payload", {}).get("matchBinding")
@@ -1321,24 +1321,11 @@ def _migrate_legacy_project_match_bindings() -> list[str]:
                     mark_multi_pass_match_binding_stale(scene)
                     needs_write = True
                 continue
-            if (
-                fingerprint_failure_is_compatible
-                and is_single_pass_reconstruction_scene(scene)
-            ):
-                repairable_segment_ids.add(scene["id"])
-                needs_write = True
-
         if not needs_write:
             continue
         try:
-            for scene in scenes:
-                if (
-                    scene["id"] in changed_semantic_ids
-                    or scene["id"] in repairable_segment_ids
-                ) and is_single_pass_reconstruction_scene(scene):
-                    queue_reconstruction(scene, persist=False)
             scene_store.put_many(scenes)
-        except (SceneRevisionConflict, ReconstructionError):
+        except SceneRevisionConflict:
             # Another API/worker process owns the project; a later restart or
             # explicit match mutation will retry without a partial migration.
             continue
@@ -1482,7 +1469,15 @@ def _persist_match_binding_bundle(
     *,
     provenance: dict | None = None,
 ) -> dict:
-    """Atomically persist one canonical project binding and rebuild children."""
+    """Persist project metadata and rebuild only the explicitly requested scene.
+
+    Match data is project-scoped, so every member receives the same canonical
+    snapshot. Reconstruction is scene-scoped: a bind/import/refresh request may
+    queue the URL's ``scene_id`` only when it is a single-pass shot. Requesting
+    the root video therefore updates metadata without starting every shot, and
+    multi-pass composites remain available through their explicit analysis
+    endpoint.
+    """
 
     snapshot = _match_binding_snapshot(bundle, provenance=provenance)
     for scene in scenes:
@@ -1520,7 +1515,7 @@ def _persist_match_binding_bundle(
             if semantic_binding_changed:
                 mark_multi_pass_match_binding_stale(scene)
             continue
-        if is_single_pass_reconstruction_scene(scene):
+        if scene["id"] == scene_id and is_single_pass_reconstruction_scene(scene):
             try:
                 queue_reconstruction(
                     scene,
