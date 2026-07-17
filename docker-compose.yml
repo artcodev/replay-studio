@@ -1,0 +1,208 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: replay_studio
+      POSTGRES_USER: replay
+      POSTGRES_PASSWORD: replay
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U replay -d replay_studio"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    command: redis-server --save 60 1
+    volumes:
+      - redis-data:/data
+
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: replay
+      MINIO_ROOT_PASSWORD: replay-studio
+    ports:
+      - "9001:9001"
+    volumes:
+      - minio-data:/data
+
+  calibration-worker:
+    # The pinned SoccerNet/OpenMMLab stack has reliable x86_64 wheels only.
+    # Docker Desktop runs these through Rosetta on Apple Silicon.
+    platform: ${ML_WORKER_PLATFORM:-linux/amd64}
+    build: ./services/calibration-worker
+    environment:
+      PNLCALIB_DEVICE: cpu
+      PNLCALIB_BATCH_SIZE: 2
+      PNLCALIB_PRELOAD: 1
+      PNLCALIB_CACHE_MAX_ENTRIES: 512
+      PNLCALIB_CACHE_TTL_SECONDS: 3600
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8090/health/ready', timeout=10)"]
+      interval: 15s
+      timeout: 12s
+      retries: 20
+      start_period: 90s
+    ports:
+      - "8090:8090"
+
+  identity-worker:
+    platform: ${ML_WORKER_PLATFORM:-linux/amd64}
+    build:
+      context: ./services/identity-worker
+      args:
+        SOCCERNET_COMMIT: 1c958345067218297d221e45e1a6405f975f83e0
+        REID_DOWNLOAD_MODELS: ${REID_DOWNLOAD_MODELS:-1}
+    environment:
+      REID_DEVICE: ${REID_DEVICE:-cpu}
+      REID_BATCH_SIZE: ${REID_BATCH_SIZE:-8}
+      REID_PRELOAD: ${REID_PRELOAD:-1}
+      REID_MIN_CROP_WIDTH: ${REID_MIN_CROP_WIDTH:-16}
+      REID_MIN_CROP_HEIGHT: ${REID_MIN_CROP_HEIGHT:-30}
+      REID_MIN_SHARPNESS: ${REID_MIN_SHARPNESS:-12}
+      REID_CACHE_MAX_ENTRIES: ${REID_CACHE_MAX_ENTRIES:-4096}
+      REID_CACHE_TTL_SECONDS: ${REID_CACHE_TTL_SECONDS:-86400}
+      REID_CACHE_WAIT_TIMEOUT_SECONDS: ${REID_CACHE_WAIT_TIMEOUT_SECONDS:-900}
+      SOCCERNET_COMMIT: 1c958345067218297d221e45e1a6405f975f83e0
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8091/health/ready', timeout=10)"]
+      interval: 15s
+      timeout: 12s
+      retries: 20
+      start_period: 90s
+    ports:
+      - "8091:8091"
+
+  jersey-ocr-worker:
+    platform: ${ML_WORKER_PLATFORM:-linux/amd64}
+    build:
+      context: ./services/jersey-ocr-worker
+      args:
+        JERSEY_OCR_PROVIDER: ${JERSEY_OCR_PROVIDER:-mmocr}
+        JERSEY_OCR_DOWNLOAD_MODELS: ${JERSEY_OCR_DOWNLOAD_MODELS:-1}
+    environment:
+      JERSEY_OCR_PROVIDER: ${JERSEY_OCR_PROVIDER:-mmocr}
+      JERSEY_OCR_DEVICE: ${JERSEY_OCR_DEVICE:-cpu}
+      JERSEY_OCR_PRELOAD: ${JERSEY_OCR_PRELOAD:-1}
+      JERSEY_OCR_MODEL_BATCH_SIZE: ${JERSEY_OCR_MODEL_BATCH_SIZE:-32}
+      JERSEY_OCR_MIN_CROP_WIDTH: ${JERSEY_OCR_MIN_CROP_WIDTH:-20}
+      JERSEY_OCR_MIN_CROP_HEIGHT: ${JERSEY_OCR_MIN_CROP_HEIGHT:-36}
+      JERSEY_OCR_MIN_SHARPNESS: ${JERSEY_OCR_MIN_SHARPNESS:-5}
+      JERSEY_OCR_MIN_CONTRAST: ${JERSEY_OCR_MIN_CONTRAST:-4}
+      JERSEY_OCR_MIN_CONFIDENCE: ${JERSEY_OCR_MIN_CONFIDENCE:-0.25}
+      JERSEY_OCR_AMBIGUITY_MARGIN: ${JERSEY_OCR_AMBIGUITY_MARGIN:-0.05}
+      JERSEY_OCR_CACHE_MAX_ENTRIES: ${JERSEY_OCR_CACHE_MAX_ENTRIES:-4096}
+      JERSEY_OCR_CACHE_TTL_SECONDS: ${JERSEY_OCR_CACHE_TTL_SECONDS:-86400}
+      JERSEY_OCR_ALLOW_RUNTIME_DOWNLOADS: 0
+      EASYOCR_MODULE_PATH: /models/easyocr
+      TORCH_HOME: /models/torch
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8093/health/ready', timeout=15)"]
+      interval: 20s
+      timeout: 18s
+      retries: 20
+      start_period: 120s
+    ports:
+      - "8093:8093"
+
+  ball-worker:
+    profiles: ["challengers"]
+    build:
+      context: ./services/ball-worker
+      args:
+        TORCH_VERSION: 2.2.2
+        TORCH_INDEX_URL: ${WASB_TORCH_INDEX_URL:-https://download.pytorch.org/whl/cpu}
+    environment:
+      WASB_DEVICE: ${WASB_DEVICE:-cpu}
+      WASB_PRELOAD: ${WASB_PRELOAD:-1}
+      WASB_WEIGHTS: /models/wasb-soccer-best.pth.tar
+      WASB_HRNET_SOURCE: /opt/wasb-reference/hrnet.py
+      WASB_SCORE_THRESHOLD: ${WASB_SCORE_THRESHOLD:-0.5}
+    volumes:
+      - ./models/wasb-soccer-best.pth.tar:/models/wasb-soccer-best.pth.tar:ro
+      - ./.references/WASB-SBDT/src/models/hrnet.py:/opt/wasb-reference/hrnet.py:ro
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8092/health/ready', timeout=15)"]
+      interval: 20s
+      timeout: 18s
+      retries: 20
+      start_period: 120s
+    ports:
+      - "8092:8092"
+
+  api:
+    build: ./apps/api
+    environment:
+      DATABASE_URL: postgresql+psycopg://replay:replay@postgres:5432/replay_studio
+      REDIS_URL: redis://redis:6379/0
+      MATCH_DATA_PROVIDER: ${MATCH_DATA_PROVIDER:-api-football}
+      API_FOOTBALL_API_KEY: ${API_FOOTBALL_API_KEY:-}
+      API_FOOTBALL_BASE_URL: ${API_FOOTBALL_BASE_URL:-https://v3.football.api-sports.io}
+      SPORTSDB_API_KEY: ${SPORTSDB_API_KEY:-123}
+      SPORTSDB_BASE_URL: ${SPORTSDB_BASE_URL:-https://www.thesportsdb.com/api/v1/json}
+      CORS_ORIGINS: http://localhost:5188,http://localhost:8080
+      MEDIA_ROOT: /data/media
+      CALIBRATION_WORKER_URL: http://calibration-worker:8090
+      CALIBRATION_WORKER_TIMEOUT: 900
+      CALIBRATION_WORKER_BATCH_SIZE: 2
+      IDENTITY_WORKER_URL: http://identity-worker:8091
+      IDENTITY_WORKER_TIMEOUT: 900
+      IDENTITY_WORKER_BATCH_SIZE: 4
+      JERSEY_OCR_WORKER_URL: http://jersey-ocr-worker:8093
+      JERSEY_OCR_WORKER_TIMEOUT: 900
+      JERSEY_OCR_WORKER_BATCH_SIZE: 32
+      RECONSTRUCTION_FRAME_RATE: 10
+      RECONSTRUCTION_MODEL: yolo26m.pt
+      RECONSTRUCTION_LEASE_TTL_SECONDS: 180
+      RECONSTRUCTION_LEASE_HEARTBEAT_SECONDS: 15
+      RECONSTRUCTION_RECOVERY_POLL_SECONDS: 5
+      RECONSTRUCTION_RECOVERY_MAX_WORKERS: 2
+      BALL_DETECTION_BACKEND: ${BALL_DETECTION_BACKEND:-dedicated-ultralytics}
+      BALL_DETECTION_MODEL: /app/models/football-ball-detection.pt
+      BALL_DETECTION_CONFIDENCE: ${BALL_DETECTION_CONFIDENCE:-0.05}
+      BALL_DETECTION_IMAGE_SIZE: 640
+      BALL_DETECTION_TILE_SIZE: 640
+      BALL_DETECTION_TILE_OVERLAP: 0.20
+      BALL_DETECTION_INFERENCE_BATCH_SIZE: ${BALL_DETECTION_INFERENCE_BATCH_SIZE:-8}
+      BALL_DETECTION_NMS_IOU: 0.10
+      BALL_DETECTION_MAX_CANDIDATES: 12
+      BALL_ANALYSIS_FRAME_RATE: ${BALL_ANALYSIS_FRAME_RATE:-25}
+      BALL_WASB_WORKER_URL: http://ball-worker:8092/detect
+      BALL_WASB_TIMEOUT: 120
+      BALL_DETECTION_FAILURE_POLICY: fallback
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+      calibration-worker:
+        condition: service_healthy
+      identity-worker:
+        # Missing ReID assets must remain observable, but must not prevent the
+        # API from serving calibration/editor workflows.
+        condition: service_started
+      jersey-ocr-worker:
+        # OCR is identity evidence, not a prerequisite for the editor/API.
+        # A failed model remains visible through /api/health.
+        condition: service_started
+    ports:
+      - "8000:8000"
+    volumes:
+      - media-data:/data/media
+
+  web:
+    build: ./apps/web
+    depends_on:
+      - api
+    ports:
+      - "8080:80"
+
+volumes:
+  postgres-data:
+  redis-data:
+  minio-data:
+  media-data:

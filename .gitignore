@@ -1,0 +1,44 @@
+# Node / frontend
+node_modules/
+dist/
+.vite/
+*.tsbuildinfo
+
+# Python
+*.egg-info/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+.coverage
+htmlcov/
+
+# Environment / local state
+.env
+*.db
+.DS_Store
+
+# Model weights — re-obtainable, checksummed downloads; never commit.
+# yolo26*.pt are auto-downloaded by ultralytics; the rest come from
+# provisioning scripts (see services/identity-worker/scripts/fetch_models.py).
+*.pt
+*.pth
+*.pth.tar
+*.part
+/models/
+apps/api/models/
+# PnLCalib checkpoints have no file extension, so match the directory.
+services/calibration-worker/models/
+services/identity-worker/models/
+
+# Local source footage and generated media artifacts.
+# data/matches/ stays versioned: it holds the bundled match fixture
+# referenced by README and tests.
+videos/
+data/media/
+
+# Unversioned reference clones (contain nested .git directories).
+.references/
+
+# Scratch
+tmp/

@@ -1,0 +1,79 @@
+{
+  "$schema": "../../manifest.schema.json",
+  "schemaVersion": "football-model-validation-manifest.v1",
+  "dataset": {
+    "name": "harness-logic-only",
+    "version": "fixture-v1",
+    "license": "synthetic-test-fixture",
+    "source": "generated colour blocks; not model-validation data"
+  },
+  "crops": [
+    {
+      "id": "p8-a",
+      "path": "crops/player-8-a.ppm",
+      "personId": "person-8",
+      "role": "player",
+      "jerseyLabel": { "readable": true, "number": "8" }
+    },
+    {
+      "id": "p8-b",
+      "path": "crops/player-8-b.ppm",
+      "personId": "person-8",
+      "role": "player",
+      "jerseyLabel": { "readable": true, "number": "8" }
+    },
+    {
+      "id": "gk1",
+      "path": "crops/goalkeeper-1.ppm",
+      "personId": "goalkeeper-1",
+      "role": "goalkeeper",
+      "jerseyLabel": { "readable": true, "number": "1" }
+    },
+    {
+      "id": "ref-hidden",
+      "path": "crops/referee-hidden.ppm",
+      "personId": "referee-1",
+      "role": "referee",
+      "jerseyLabel": { "readable": false, "number": null }
+    }
+  ],
+  "identityPairs": [
+    {
+      "id": "same-p8",
+      "leftCropId": "p8-a",
+      "rightCropId": "p8-b",
+      "samePerson": true
+    },
+    {
+      "id": "different-p8-gk",
+      "leftCropId": "p8-a",
+      "rightCropId": "gk1",
+      "samePerson": false
+    },
+    {
+      "id": "different-p8-ref",
+      "leftCropId": "p8-b",
+      "rightCropId": "ref-hidden",
+      "samePerson": false
+    }
+  ],
+  "thresholds": {
+    "identity": {
+      "normalizationTolerance": 0.0001,
+      "minimumUsableCropRatio": 1.0,
+      "minimumPairCoverage": 1.0,
+      "maximumSamePersonDistanceP95": 0.05,
+      "minimumDifferentPersonDistanceP05": 0.5,
+      "minimumMedianDistanceSeparation": 0.5,
+      "minimumRoleAccuracy": 1.0
+    },
+    "jerseyOcr": {
+      "minimumUsableCropRatio": 1.0,
+      "minimumReadableExactAccuracy": 1.0,
+      "minimumExpectedAbstentionAccuracy": 1.0,
+      "maximumReadableAbstentionRate": 0.0,
+      "maximumSubstitutionRate": 0.0,
+      "maximumConflictGroupRate": 0.0
+    }
+  }
+}

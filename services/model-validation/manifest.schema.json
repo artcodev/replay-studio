@@ -1,0 +1,142 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://replay-studio.local/schemas/football-model-validation-manifest.v1.json",
+  "title": "Football model validation manifest v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "dataset", "crops", "identityPairs", "thresholds"],
+  "properties": {
+    "$schema": { "type": "string" },
+    "schemaVersion": { "const": "football-model-validation-manifest.v1" },
+    "dataset": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "version", "license", "source"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "version": { "type": "string", "minLength": 1 },
+        "license": { "type": "string", "minLength": 1 },
+        "source": { "type": "string", "minLength": 1 }
+      }
+    },
+    "crops": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 5000,
+      "items": { "$ref": "#/$defs/crop" }
+    },
+    "identityPairs": {
+      "type": "array",
+      "minItems": 2,
+      "maxItems": 100000,
+      "items": { "$ref": "#/$defs/identityPair" }
+    },
+    "thresholds": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["identity", "jerseyOcr"],
+      "properties": {
+        "identity": { "$ref": "#/$defs/identityThresholds" },
+        "jerseyOcr": { "$ref": "#/$defs/jerseyThresholds" }
+      }
+    }
+  },
+  "$defs": {
+    "crop": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "path", "personId", "role", "jerseyLabel"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "path": { "type": "string", "minLength": 1 },
+        "personId": { "type": "string", "minLength": 1 },
+        "role": {
+          "enum": ["ball", "goalkeeper", "other", "player", "referee"]
+        },
+        "jerseyLabel": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["readable", "number"],
+          "properties": {
+            "readable": { "type": "boolean" },
+            "number": {
+              "oneOf": [
+                { "type": "string", "pattern": "^[0-9]{1,2}$" },
+                { "type": "null" }
+              ]
+            }
+          },
+          "allOf": [
+            {
+              "if": {
+                "properties": { "readable": { "const": true } },
+                "required": ["readable"]
+              },
+              "then": {
+                "properties": {
+                  "number": { "type": "string", "pattern": "^[0-9]{1,2}$" }
+                }
+              },
+              "else": {
+                "properties": { "number": { "type": "null" } }
+              }
+            }
+          ]
+        }
+      }
+    },
+    "identityPair": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "leftCropId", "rightCropId", "samePerson"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "leftCropId": { "type": "string", "minLength": 1 },
+        "rightCropId": { "type": "string", "minLength": 1 },
+        "samePerson": { "type": "boolean" }
+      }
+    },
+    "identityThresholds": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "normalizationTolerance",
+        "minimumUsableCropRatio",
+        "minimumPairCoverage",
+        "maximumSamePersonDistanceP95",
+        "minimumDifferentPersonDistanceP05",
+        "minimumMedianDistanceSeparation",
+        "minimumRoleAccuracy"
+      ],
+      "properties": {
+        "normalizationTolerance": { "type": "number", "minimum": 0, "maximum": 0.1 },
+        "minimumUsableCropRatio": { "type": "number", "minimum": 0, "maximum": 1 },
+        "minimumPairCoverage": { "type": "number", "minimum": 0, "maximum": 1 },
+        "maximumSamePersonDistanceP95": { "type": "number", "minimum": 0, "maximum": 2 },
+        "minimumDifferentPersonDistanceP05": { "type": "number", "minimum": 0, "maximum": 2 },
+        "minimumMedianDistanceSeparation": { "type": "number", "minimum": 0, "maximum": 2 },
+        "minimumRoleAccuracy": { "type": "number", "minimum": 0, "maximum": 1 }
+      }
+    },
+    "jerseyThresholds": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "minimumUsableCropRatio",
+        "minimumReadableExactAccuracy",
+        "minimumExpectedAbstentionAccuracy",
+        "maximumReadableAbstentionRate",
+        "maximumSubstitutionRate",
+        "maximumConflictGroupRate"
+      ],
+      "properties": {
+        "minimumUsableCropRatio": { "type": "number", "minimum": 0, "maximum": 1 },
+        "minimumReadableExactAccuracy": { "type": "number", "minimum": 0, "maximum": 1 },
+        "minimumExpectedAbstentionAccuracy": { "type": "number", "minimum": 0, "maximum": 1 },
+        "maximumReadableAbstentionRate": { "type": "number", "minimum": 0, "maximum": 1 },
+        "maximumSubstitutionRate": { "type": "number", "minimum": 0, "maximum": 1 },
+        "maximumConflictGroupRate": { "type": "number", "minimum": 0, "maximum": 1 }
+      }
+    }
+  }
+}

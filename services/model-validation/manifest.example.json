@@ -1,0 +1,66 @@
+{
+  "$schema": "./manifest.schema.json",
+  "schemaVersion": "football-model-validation-manifest.v1",
+  "dataset": {
+    "name": "replace-with-labelled-dataset-name",
+    "version": "replace-with-immutable-version",
+    "license": "replace-with-dataset-license",
+    "source": "replace-with-source-and-labelling-provenance"
+  },
+  "crops": [
+    {
+      "id": "player-8-view-a",
+      "path": "crops/player-8-view-a.jpg",
+      "personId": "player-8",
+      "role": "player",
+      "jerseyLabel": { "readable": true, "number": "8" }
+    },
+    {
+      "id": "player-8-view-b",
+      "path": "crops/player-8-view-b.jpg",
+      "personId": "player-8",
+      "role": "player",
+      "jerseyLabel": { "readable": true, "number": "8" }
+    },
+    {
+      "id": "goalkeeper-view-a",
+      "path": "crops/goalkeeper-view-a.jpg",
+      "personId": "goalkeeper-1",
+      "role": "goalkeeper",
+      "jerseyLabel": { "readable": false, "number": null }
+    }
+  ],
+  "identityPairs": [
+    {
+      "id": "same-player-8",
+      "leftCropId": "player-8-view-a",
+      "rightCropId": "player-8-view-b",
+      "samePerson": true
+    },
+    {
+      "id": "different-player-goalkeeper",
+      "leftCropId": "player-8-view-a",
+      "rightCropId": "goalkeeper-view-a",
+      "samePerson": false
+    }
+  ],
+  "thresholds": {
+    "identity": {
+      "normalizationTolerance": 0.0001,
+      "minimumUsableCropRatio": 0.8,
+      "minimumPairCoverage": 0.8,
+      "maximumSamePersonDistanceP95": 0.35,
+      "minimumDifferentPersonDistanceP05": 0.2,
+      "minimumMedianDistanceSeparation": 0.05,
+      "minimumRoleAccuracy": 0.7
+    },
+    "jerseyOcr": {
+      "minimumUsableCropRatio": 0.7,
+      "minimumReadableExactAccuracy": 0.6,
+      "minimumExpectedAbstentionAccuracy": 0.8,
+      "maximumReadableAbstentionRate": 0.35,
+      "maximumSubstitutionRate": 0.1,
+      "maximumConflictGroupRate": 0.1
+    }
+  }
+}

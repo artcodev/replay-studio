@@ -1,0 +1,13 @@
+fastapi==0.115.14
+uvicorn[standard]==0.34.3
+python-multipart==0.0.20
+numpy==1.26.4
+Pillow==11.3.0
+opencv-python-headless==4.11.0.86
+scikit-image==0.24.0
+albumentations==1.3.1
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch==1.13.1+cpu
+torchvision==0.14.1+cpu
+prtreid @ git+https://github.com/VlSomers/prtreid@30617a75967e84d5d516959c4b84cbeea6f56493
+torchreid @ git+https://github.com/VlSomers/bpbreid@02570d5c893977685de7a547a58c0aa87fa4788c

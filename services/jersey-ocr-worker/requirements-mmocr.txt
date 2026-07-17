@@ -1,0 +1,11 @@
+--find-links https://download.openmmlab.com/mmcv/dist/cpu/torch1.13/index.html
+
+# Default SoccerNet reference provider. EasyOCR is installed only in its own
+# image variant, so the two cv2 distributions never overlap.
+opencv-python==4.11.0.86
+mmcv==2.0.1
+mmocr==1.0.1
+mmdet==3.1.0
+mmengine==0.10.4
+# MMEngine 0.10.x still calls yapf's removed `verify` argument.
+yapf==0.40.1
