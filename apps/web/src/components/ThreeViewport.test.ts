@@ -2,17 +2,17 @@ import { createSSRApp } from 'vue'
 import { renderToString } from '@vue/server-renderer'
 import { describe, expect, it } from 'vitest'
 import type { PlayerActionPlaybackState } from '../lib/playerActions'
-import type { SceneDocument } from '../types'
+import type { SceneDocument } from '../types/scene'
 import ThreeViewport from './ThreeViewport.vue'
 
 const scene = {
   id: 'scene-1',
   title: 'Test scene',
   version: 1,
+  revision: 1,
   duration: 10,
   payload: {
     pitch: { length: 105, width: 68 },
-    matchBinding: null,
     teams: [],
     tracks: [],
     ball: { keyframes: [] },

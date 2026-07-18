@@ -1,24 +1,33 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import { calibrationRejectionReasonLabel } from '../lib/calibrationDiagnostics'
-import type {
-  CalibrationEvidence,
-  CalibrationFrameEvidence,
-  ProcessingStatus,
-  QualityGateStatus,
-  QualityVerdict,
-  ReconstructionQuality,
-} from '../types'
+import {
+  calibrationBallBackendSummary,
+  calibrationFrameStatus as frameStatus,
+  calibrationFrameStatusLabel as frameStatusLabel,
+  calibrationFrameUncertainty as frameUncertainty,
+  calibrationMotionLabel as motionLabel,
+  calibrationObservationLabel as observationLabel,
+  calibrationPersonSupport as personSupport,
+  calibrationProcessingLabel as processingLabel,
+  calibrationReportReasons,
+  calibrationSolutionLabel as solutionLabel,
+  calibrationTemporalAnchors as temporalAnchors,
+  calibrationTemporalDirection as temporalDirection,
+  calibrationTemporalGap as temporalGap,
+  calibrationTemporalMotionConfidence as temporalMotionConfidence,
+  calibrationVerdictLabel as verdictLabel,
+  formatCalibrationNumber as number,
+  formatCalibrationPercent as percent,
+  isAmbiguousCalibrationFrame as isAmbiguous,
+  isTemporalCalibrationProjection as isTemporalProjection,
+  nearestCalibrationFrame,
+  normalizeCalibrationGates,
+} from '../features/calibration/calibrationQaPresentation'
+import type { CalibrationEvidence, CalibrationFrameEvidence } from '../types/calibration'
+import type { ProcessingStatus, QualityVerdict, ReconstructionQuality } from '../types/reconstruction'
 
 type Side = 'left' | 'right' | 'unknown'
-type GateView = {
-  id: string
-  label: string
-  status: QualityGateStatus
-  value: string | null
-  threshold: string | null
-  detail: string | null
-}
 
 const props = defineProps<{
   processingStatus: ProcessingStatus
@@ -60,14 +69,6 @@ const props = defineProps<{
   visiblePitchSideSource: string
   attackingGoal: Side
   directionSaving?: boolean
-  legacyCalibration?: {
-    status: string
-    method?: string | null
-    confidence?: number | null
-    supportedLines?: number | null
-    alignmentError?: number | null
-    reason?: string | null
-  } | null
 }>()
 
 const emit = defineEmits<{
@@ -77,219 +78,10 @@ const emit = defineEmits<{
 }>()
 
 const evidenceFrames = computed(() => props.calibration?.frameEvidence ?? props.frames ?? [])
-const selectedFrame = computed<CalibrationFrameEvidence | null>(() => {
-  if (!evidenceFrames.value.length) return null
-  return evidenceFrames.value.reduce((nearest, frame) => (
-    Math.abs(frame.sceneTime - props.currentTime) < Math.abs(nearest.sceneTime - props.currentTime)
-      ? frame
-      : nearest
-  ))
-})
-const effectiveBallBackends = computed(() => {
-  const counts = props.ballDetection?.backendCounts ?? {}
-  return Object.entries(counts)
-    .map(([backend, count]) => `${backend} × ${count}`)
-    .join(' · ') || 'not recorded'
-})
-const selectedHypothesis = computed(() => {
-  const frame = selectedFrame.value
-  if (!frame?.hypotheses?.length) return null
-  return frame.hypotheses.find((hypothesis) => (
-    hypothesis.selected || hypothesis.id === frame.selectedHypothesisId
-  )) ?? null
-})
-const reportReasons = computed(() => {
-  const summary = props.quality?.summary
-  const reasons = Array.isArray(summary)
-    ? summary
-    : typeof summary === 'string' && summary.trim()
-      ? [summary]
-      : summary && typeof summary === 'object'
-        ? [
-            ...(Array.isArray(summary.reasons) ? summary.reasons.filter((item): item is string => typeof item === 'string') : []),
-            ...(typeof summary.message === 'string' ? [summary.message] : []),
-          ]
-        : []
-  const limitations = (props.quality?.limitations ?? []).map((item) => (
-    typeof item === 'string' ? item : `${item.code}: ${item.message}`
-  ))
-  return [...reasons, ...limitations]
-})
-const normalizedGates = computed<GateView[]>(() => {
-  const rawGates = props.quality?.gates ?? []
-  const gates = Array.isArray(rawGates)
-    ? rawGates
-    : Object.entries(rawGates).map(([id, gate]) => ({ id, ...gate }))
-  return gates.map((gate, index) => {
-  const record = gate as Record<string, unknown>
-  const rawStatus = String(record.status ?? 'not-available').toLowerCase()
-  const status: QualityGateStatus = rawStatus === 'pass' || rawStatus === 'passed'
-    ? 'pass'
-    : rawStatus === 'review' || rawStatus === 'warning' || rawStatus === 'warn'
-      ? 'review'
-      : rawStatus === 'fail' || rawStatus === 'failed' || rawStatus === 'reject'
-        ? 'fail'
-        : 'not-available'
-  return {
-    id: String(record.id ?? record.name ?? `gate-${index}`),
-    label: String(record.label ?? record.name ?? record.id ?? `Quality gate ${index + 1}`),
-    status,
-    value: formatUnknown(record.value ?? record.metricValue, record.unit),
-    threshold: formatThreshold(record.threshold ?? record.thresholds, record.unit),
-    detail: typeof record.reason === 'string'
-      ? record.reason
-      : typeof record.detail === 'string'
-        ? record.detail
-        : typeof record.note === 'string'
-          ? record.note
-        : null,
-  }
-  })
-})
-
-function formatUnknown(value: unknown, unit?: unknown): string | null {
-  if (value === null || value === undefined || value === '') return null
-  if (typeof value === 'object') {
-    const record = value as Record<string, unknown>
-    if ('value' in record) return formatUnknown(record.value, record.unit ?? unit)
-    return JSON.stringify(value)
-  }
-  if (typeof value === 'number' && unit === 'ratio') return `${Math.round(value * 100)}%`
-  const unitLabel = unit === 'pixels' ? 'px' : unit === 'seconds' ? 's' : unit === 'metres' || unit === 'meters' ? 'm' : unit
-  const formatted = typeof value === 'number'
-    ? Math.abs(value) < 1 ? value.toFixed(3) : value.toFixed(1)
-    : String(value)
-  return `${formatted}${typeof unitLabel === 'string' && unitLabel ? ` ${unitLabel}` : ''}`
-}
-
-function personSupport(value: CalibrationFrameEvidence['personSupport']) {
-  if (value === null || value === undefined) return '—'
-  if (typeof value === 'number') return String(value)
-  return `${value.supported} / ${value.total} · ${percent(value.ratio)}`
-}
-
-function formatThreshold(value: unknown, unit?: unknown): string | null {
-  if (!value || typeof value !== 'object') return formatUnknown(value, unit)
-  const labels: Record<string, string> = {
-    passAtLeast: 'pass ≥',
-    passAtMost: 'pass ≤',
-    reviewAtLeast: 'review ≥',
-    reviewAtMost: 'review ≤',
-    rejectBelow: 'reject <',
-    rejectAbove: 'reject >',
-  }
-  const parts = Object.entries(value as Record<string, unknown>)
-    .filter(([, threshold]) => threshold !== null && threshold !== undefined)
-    .map(([key, threshold]) => `${labels[key] ?? key} ${formatUnknown(threshold, unit)}`)
-  return parts.length ? parts.join(' · ') : null
-}
-
-function percent(value: number | null | undefined) {
-  return value === null || value === undefined || !Number.isFinite(value)
-    ? '—'
-    : `${Math.round(value * 100)}%`
-}
-
-function number(value: number | null | undefined, suffix = '') {
-  return value === null || value === undefined || !Number.isFinite(value)
-    ? '—'
-    : `${value.toFixed(1)}${suffix}`
-}
-
-function isTemporalProjection(source: CalibrationFrameEvidence['projectionSource']) {
-  return source === 'temporal-forward'
-    || source === 'temporal-backward'
-    || source === 'temporal-bidirectional'
-}
-
-function isAmbiguous(frame: CalibrationFrameEvidence) {
-  return frame.solutionStatus === 'ambiguous'
-    || (Boolean(frame.hypotheses?.length) && !frame.hypotheses?.some((hypothesis) => hypothesis.selected))
-      && Boolean(frame.rejectionReasons?.some((reason) => reason.includes('conflict')))
-}
-
-function observationLabel(frame: CalibrationFrameEvidence) {
-  if (frame.observationStatus) return frame.observationStatus.replaceAll('-', ' ')
-  if (frame.projectionSource === 'direct' && frame.status === 'accepted') return 'direct accepted'
-  return frame.source !== 'none' ? 'direct rejected / unavailable' : 'missing'
-}
-
-function solutionLabel(frame: CalibrationFrameEvidence) {
-  if (isAmbiguous(frame)) return 'ambiguous — no projection selected'
-  if (frame.solutionStatus) return frame.solutionStatus.replaceAll('-', ' ')
-  if (isTemporalProjection(frame.projectionSource) && frame.status === 'accepted') return 'recovered'
-  return frame.status
-}
-
-function temporalDirection(frame: CalibrationFrameEvidence) {
-  if (frame.temporal?.direction) return frame.temporal.direction
-  if (frame.projectionSource.startsWith('temporal-')) return frame.projectionSource.replace('temporal-', '')
-  return selectedHypothesis.value?.origin.replace('temporal-', '') ?? '—'
-}
-
-function temporalAnchors(frame: CalibrationFrameEvidence) {
-  const indices = frame.temporal?.anchorFrameIndices
-    ?? selectedHypothesis.value?.anchorFrameIndices
-    ?? []
-  return indices.length ? indices.map((index) => `#${index}`).join(' + ') : '—'
-}
-
-function temporalGap(frame: CalibrationFrameEvidence) {
-  return frame.temporal?.temporalDistanceSeconds
-    ?? selectedHypothesis.value?.temporalDistanceSeconds
-    ?? null
-}
-
-function temporalMotionConfidence(frame: CalibrationFrameEvidence) {
-  return frame.temporal?.motionConfidence
-    ?? selectedHypothesis.value?.motionConfidence
-    ?? null
-}
-
-function frameUncertainty(frame: CalibrationFrameEvidence) {
-  return frame.uncertainty?.p95Metres
-    ?? selectedHypothesis.value?.uncertaintyP95Metres
-    ?? frame.positionUncertaintyMetres
-    ?? null
-}
-
-function motionLabel(frame: CalibrationFrameEvidence) {
-  const motion = frame.cameraMotion
-  if (!motion) return 'not recorded'
-  return motion.confidence === null || motion.confidence === undefined
-    ? motion.status
-    : `${motion.status} · ${percent(motion.confidence)}`
-}
-
-function frameStatus(frame: CalibrationFrameEvidence) {
-  if (isAmbiguous(frame)) return 'ambiguous'
-  if (frame.status === 'accepted' && frame.projectionSource === 'direct') return 'direct'
-  if (frame.status === 'accepted' && isTemporalProjection(frame.projectionSource)) return 'recovered'
-  if (frame.status === 'accepted') return 'propagated'
-  return frame.status
-}
-
-function frameStatusLabel(frame: CalibrationFrameEvidence) {
-  if (isAmbiguous(frame)) return 'AMBIGUOUS · NOT SELECTED'
-  if (frame.status === 'accepted' && frame.projectionSource === 'direct') return 'DIRECT · ACCEPTED'
-  if (frame.status === 'accepted' && isTemporalProjection(frame.projectionSource)) {
-    return `${frame.projectionSource.toUpperCase()} · RECOVERED`
-  }
-  if (frame.status === 'accepted') return `${frame.projectionSource.toUpperCase()} · ACCEPTED`
-  return frame.status.toUpperCase()
-}
-
-function processingLabel(status: ProcessingStatus) {
-  if (status === 'completed') return 'COMPUTE COMPLETE'
-  if (status === 'processing') return 'COMPUTING'
-  if (status === 'queued') return 'QUEUED'
-  return 'COMPUTE FAILED'
-}
-
-function verdictLabel(verdict: QualityVerdict) {
-  if (verdict === 'pending') return 'QUALITY PENDING'
-  return verdict === 'unknown' ? 'NOT EVALUATED' : `QUALITY ${verdict.toUpperCase()}`
-}
+const selectedFrame = computed(() => nearestCalibrationFrame(evidenceFrames.value, props.currentTime))
+const effectiveBallBackends = computed(() => calibrationBallBackendSummary(props.ballDetection?.backendCounts))
+const reportReasons = computed(() => calibrationReportReasons(props.quality))
+const normalizedGates = computed(() => normalizeCalibrationGates(props.quality))
 
 function chooseAttackingGoal(event: Event) {
   const side = (event.target as HTMLSelectElement).value
@@ -481,13 +273,7 @@ function chooseAttackingGoal(event: Event) {
 
     <div v-else class="qa-no-evidence">
       <strong>Per-frame evidence was not recorded for this run.</strong>
-      <p>The legacy result cannot prove calibration coverage or temporal stability. Rebuild the scene to generate a reviewable run.</p>
-      <dl v-if="legacyCalibration">
-        <div><dt>Legacy status</dt><dd>{{ legacyCalibration.status }}</dd></div>
-        <div><dt>Heuristic confidence</dt><dd>{{ percent(legacyCalibration.confidence) }}</dd></div>
-        <div><dt>Method</dt><dd>{{ legacyCalibration.method || '—' }}</dd></div>
-        <div><dt>Supported markings</dt><dd>{{ legacyCalibration.supportedLines ?? '—' }}</dd></div>
-      </dl>
+      <p>This run cannot prove calibration coverage or temporal stability. Rebuild the scene to generate reviewable evidence.</p>
     </div>
 
     <div v-if="normalizedGates.length" class="qa-gates">

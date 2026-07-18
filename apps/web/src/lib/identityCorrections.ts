@@ -1,4 +1,5 @@
-import type { FrameAnnotation, FrameIdentityAction, Track, TrackObservation } from '../types'
+import type { FrameAnnotation, FrameIdentityAction } from '../types/analysis'
+import type { Track, TrackObservation } from '../types/tracking'
 
 export type IdentityMergeTarget = {
   id: string
@@ -55,7 +56,7 @@ function dedicatedRosterDecision(
     if (!resolvedOwners.ids.some((ownerId) => ownerIds.has(ownerId))) continue
     if (resolvedOwners.ambiguous) return 'conflict'
     const state = annotation.rosterBindingState
-      ?? (annotation.externalPlayerId ? 'bound' : 'unbound')
+    if (state !== 'bound' && state !== 'unbound') return 'conflict'
     decisions.add(state === 'bound'
       ? `bound:${annotation.externalPlayerId ?? ''}`
       : 'unbound')

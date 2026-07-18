@@ -8,7 +8,8 @@ import json
 from pathlib import Path
 from time import perf_counter
 
-from app.main import PnLCalibEngine
+from calibration_worker_service.engine_factory import create_pnlcalib_engine
+from calibration_worker_service.frame_decoder import decode_frame
 
 
 def main() -> None:
@@ -26,26 +27,23 @@ def main() -> None:
 
     payload = args.frame.read_bytes()
     engine_started = perf_counter()
-    engine = PnLCalibEngine()
+    engine = create_pnlcalib_engine(cache_max_entries=0 if args.uncached else None)
     engine_wall_seconds = perf_counter() - engine_started
-    if args.uncached:
-        engine.cache_max_entries = 0
 
     runs = []
     for run_index in range(args.runs):
         request_started = perf_counter()
         decode_started = perf_counter()
-        frame = engine.decode(run_index, payload)
+        frame = decode_frame(run_index, payload)
         decode_seconds = perf_counter() - decode_started
-        diagnostics: dict = {}
-        result = engine.calibrate([frame], diagnostics)
+        result = engine.calibrate([frame])
         runs.append(
             {
                 "run": run_index + 1,
-                "accepted": bool(result),
+                "accepted": bool(result.frames),
                 "wallSeconds": round(perf_counter() - request_started, 6),
                 "decodeSeconds": round(decode_seconds, 6),
-                "diagnostics": diagnostics,
+                "diagnostics": result.diagnostics.to_wire(),
             }
         )
 

@@ -48,6 +48,17 @@ request do not hide model-loading time. Set `PNLCALIB_PRELOAD=0` only when lazy
 startup is explicitly preferred; readiness still loads and validates both
 models and returns `503` if either checkpoint cannot be loaded.
 
+## Internal boundaries
+
+The HTTP root composes a narrow `CalibrationEngine` contract with five
+independent capabilities: source-frame decoding, pinned PnLCalib runtime/model
+loading, heatmap inference, geometry projection/quality gating, and a bounded
+LRU result cache. `PnLCalibEngine` owns only batch deduplication, the
+single-inference lock, and orchestration of those capabilities. Engine results
+are immutable DTOs until the application service serializes them at the HTTP
+boundary; no compatibility `engine.py` facade or mutable diagnostics argument
+is retained.
+
 ## Latency, cache, and diagnostics
 
 Successful and failed calibration results are cached in-process by the exact

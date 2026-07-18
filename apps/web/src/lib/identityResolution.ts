@@ -1,10 +1,5 @@
-import type {
-  CanonicalIdentityEvidenceKind,
-  CanonicalPerson,
-  CanonicalPersonStatus,
-  CanonicalRosterCandidate,
-  ExternalPlayer,
-} from '../types'
+import type { CanonicalIdentityEvidenceKind, CanonicalPerson, CanonicalPersonStatus, CanonicalRosterCandidate } from '../types/identity'
+import type { ExternalPlayer } from '../types/match'
 
 export type ResolvedRosterCandidate = Omit<CanonicalRosterCandidate, 'confidence'> & {
   confidence: number | null
@@ -92,7 +87,7 @@ function hydrateCandidate(
   const rosterPlayer = rosterPlayers.find((player) => player.id === candidate.externalPlayerId)
   return {
     ...candidate,
-    confidence: candidate.confidence ?? candidate.score ?? null,
+    confidence: candidate.score ?? null,
     name: candidate.name?.trim() || rosterPlayer?.name.trim() || candidate.externalPlayerId,
     number: candidate.number ?? rosterPlayer?.number ?? null,
     position: candidate.position ?? rosterPlayer?.position ?? null,

@@ -1,4 +1,4 @@
-import type { Keyframe, Track } from '../types'
+import type { Keyframe, Track } from '../types/tracking'
 
 export type TrackPresenceState = NonNullable<Keyframe['presenceState']>
 

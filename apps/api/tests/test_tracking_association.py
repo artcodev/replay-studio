@@ -1,6 +1,7 @@
 import numpy as np
 
-from app.reconstruction import Detection, _track_people
+from app.reconstruction_person_detection_contract import Detection
+from app.reconstruction_person_tracking import track_people as _track_people
 
 
 def _detection(
@@ -75,9 +76,13 @@ def test_manual_roster_identity_is_a_hard_association_constraint():
     first = _detection(100.0, -10.0, 0, external_player_id="player-a")
     first.annotation_id = "anchor-a"
     first.annotation_kind = "home-player"
+    first.roster_binding_state = "bound"
+    first.roster_binding_annotation_ids = {"anchor-a"}
     second = _detection(103.0, -9.8, 0, external_player_id="player-b")
     second.annotation_id = "anchor-b"
     second.annotation_kind = "home-player"
+    second.roster_binding_state = "bound"
+    second.roster_binding_annotation_ids = {"anchor-b"}
 
     tracks = _track_people([([first], 0.0), ([second], 0.1)])
 

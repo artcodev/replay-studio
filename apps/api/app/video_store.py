@@ -9,7 +9,6 @@ from .database import SessionLocal, VideoAssetRow
 
 
 def _serialize(row: VideoAssetRow) -> dict[str, Any]:
-    ready = row.status == "ready"
     return {
         "id": row.id,
         "filename": row.filename,
@@ -23,38 +22,59 @@ def _serialize(row: VideoAssetRow) -> dict[str, Any]:
         "height": row.height,
         "fps": row.fps,
         "frame_count": row.frame_count,
+        "generation_key": row.generation_key,
         "scene_id": row.scene_id,
-        "media_url": f"/api/videos/{row.id}/media" if ready else None,
-        "poster_url": f"/api/videos/{row.id}/poster" if ready else None,
+        # HTTP URLs are project-scoped representations and are attached by
+        # project routes. The persistence store does not know request scope.
+        "media_url": None,
+        "poster_url": None,
         "error": row.error,
         "created_at": row.created_at.isoformat() if isinstance(row.created_at, datetime) else None,
     }
 
 
 class VideoStore:
+    def __init__(self, session_factory=None) -> None:
+        self._session_factory = session_factory
+
+    def _session(self):
+        return (self._session_factory or SessionLocal)()
+
     def create(self, **values: Any) -> dict:
-        with SessionLocal.begin() as session:
+        with self._session() as session:
             row = VideoAssetRow(**values)
             session.add(row)
+            session.commit()
         return _serialize(row)
 
     def get(self, asset_id: str) -> dict | None:
-        with SessionLocal() as session:
+        with self._session() as session:
             row = session.get(VideoAssetRow, asset_id)
             return _serialize(row) if row else None
 
     def list(self) -> list[dict]:
-        with SessionLocal() as session:
+        with self._session() as session:
             rows = session.scalars(select(VideoAssetRow).order_by(VideoAssetRow.created_at.desc())).all()
             return [_serialize(row) for row in rows]
 
+    def list_by_ids(self, asset_ids: list[str]) -> list[dict]:
+        normalized = sorted({str(value) for value in asset_ids if str(value)})
+        if not normalized:
+            return []
+        with self._session() as session:
+            rows = session.scalars(
+                select(VideoAssetRow).where(VideoAssetRow.id.in_(normalized))
+            ).all()
+            return [_serialize(row) for row in rows]
+
     def update(self, asset_id: str, **values: Any) -> dict | None:
-        with SessionLocal.begin() as session:
+        with self._session() as session:
             row = session.get(VideoAssetRow, asset_id)
             if row is None:
                 return None
             for key, value in values.items():
                 setattr(row, key, value)
+            session.commit()
         return _serialize(row)
 
 

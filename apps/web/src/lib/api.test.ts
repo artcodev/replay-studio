@@ -1,50 +1,101 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import type { PlayerAction } from '../types'
-import { api } from './api'
+import type { PlayerAction } from '../types/playerActions'
+import { sceneClient } from './api/scenes'
+import { reconstructionClient } from './api/reconstruction'
+import { identityClient } from './api/identities'
+import { matchClient } from './api/matches'
+import { playerActionClient } from './api/playerActions'
+
+const PROJECT_ID = 'project/one'
 
 afterEach(() => {
   vi.unstubAllGlobals()
 })
 
 describe('canonical roster binding API', () => {
-  it('discovers match-data providers without receiving credentials', async () => {
-    const response = {
-      defaultProvider: 'api-football',
-      providers: [{
-        id: 'api-football',
-        name: 'API-Football',
-        configured: true,
-        available: true,
-        capabilities: ['fixtures', 'lineups'],
-      }],
+  it('enqueues model comparison instead of waiting for an inference report', async () => {
+    const queued = {
+      runId: 'model-comparison-run',
+      sceneId: 'scene/one',
+      kind: 'model-comparison',
+      status: 'queued',
     }
-    const fetch = vi.fn().mockResolvedValue({ ok: true, json: async () => response })
+    const fetch = vi.fn().mockResolvedValue({ ok: true, json: async () => queued })
     vi.stubGlobal('fetch', fetch)
 
-    expect(await api.matchDataProviders()).toEqual(response)
-    expect(fetch).toHaveBeenCalledWith('/api/catalog/providers', expect.any(Object))
+    expect(await reconstructionClient.compareModels(PROJECT_ID, 'scene/one')).toEqual(queued)
+
+    const [path, init] = fetch.mock.calls[0] as [string, RequestInit]
+    expect(path).toBe('/api/projects/project%2Fone/scenes/scene%2Fone/compare-models')
+    expect(init.method).toBe('POST')
   })
 
-  it('keeps provider selection on catalog and project-binding requests', async () => {
-    const fetch = vi.fn().mockResolvedValue({ ok: true, json: async () => [] })
+  it('never treats embedded dense scene arrays as a playback fallback', async () => {
+    const scene = {
+      id: 'scene-dense',
+      title: 'Scene',
+      version: 1,
+      duration: 2,
+      payload: {
+        pitch: { length: 105, width: 68 },
+        teams: [],
+        tracks: [{
+          id: 'track-1', label: 'Player', teamId: 'home', color: '#fff', number: 1,
+          externalPlayerId: null,
+          keyframes: [{ t: 1, x: 2, z: 3, confidence: 1 }],
+          observations: [],
+        }],
+        canonicalPeople: [],
+        ball: { keyframes: [{ t: 1, x: 2, z: 3, confidence: 1 }] },
+        videoAsset: { reconstruction: { status: 'ready' } },
+      },
+    }
+    const fetch = vi.fn().mockResolvedValue({ ok: true, json: async () => scene })
     vi.stubGlobal('fetch', fetch)
 
-    await api.eventsByDate('2026-07-17', 'api-football')
-    await api.searchEvents('Spain & Belgium', 'api-football')
-    await api.bindSceneMatch('project/one', 'fixture/42', 'api-football')
+    const loaded = await sceneClient.get(PROJECT_ID, 'scene-dense')
 
-    expect(fetch.mock.calls[0][0]).toBe(
-      '/api/catalog/events?date=2026-07-17&provider=api-football',
+    expect(loaded.payload.tracks[0].keyframes).toEqual([])
+    expect(loaded.payload.ball.keyframes).toEqual([])
+    expect(fetch).toHaveBeenCalledOnce()
+  })
+
+  it('surfaces an artifact window failure instead of silently using scene arrays', async () => {
+    const scene = {
+      id: 'scene-artifact',
+      title: 'Scene',
+      version: 1,
+      duration: 2,
+      payload: {
+        pitch: { length: 105, width: 68 },
+        teams: [],
+        tracks: [],
+        canonicalPeople: [],
+        ball: { keyframes: [] },
+        videoAsset: {
+          reconstruction: {
+            status: 'ready',
+            artifactManifest: {
+              schemaVersion: 1,
+              artifacts: { identityTimeline: { id: 'sha256:x' } },
+            },
+          },
+        },
+      },
+    }
+    const fetch = vi.fn()
+      .mockResolvedValueOnce({ ok: true, json: async () => scene })
+      .mockResolvedValueOnce({
+        ok: false,
+        status: 409,
+        json: async () => ({ detail: 'Reconstruction artifact is unavailable or corrupt' }),
+      })
+    vi.stubGlobal('fetch', fetch)
+
+    await expect(sceneClient.get(PROJECT_ID, 'scene-artifact')).rejects.toThrow(
+      'Reconstruction artifact is unavailable or corrupt',
     )
-    expect(fetch.mock.calls[1][0]).toBe(
-      '/api/catalog/events/search?q=Spain%20%26%20Belgium&provider=api-football',
-    )
-    const [path, init] = fetch.mock.calls[2] as [string, RequestInit]
-    expect(path).toBe('/api/scenes/project%2Fone/match-binding')
-    expect(JSON.parse(String(init.body))).toEqual({
-      event_id: 'fixture/42',
-      provider: 'api-football',
-    })
+    expect(fetch).toHaveBeenCalledTimes(2)
   })
 
   it.each([
@@ -64,7 +115,8 @@ describe('canonical roster binding API', () => {
     })
     vi.stubGlobal('fetch', fetch)
 
-    const result = await api.updateCanonicalRosterBinding(
+    const result = await identityClient.updateRosterBinding(
+      PROJECT_ID,
       'scene/one',
       'canonical/person-2',
       externalPlayerId,
@@ -74,7 +126,7 @@ describe('canonical roster binding API', () => {
     expect(fetch).toHaveBeenCalledOnce()
     const [path, init] = fetch.mock.calls[0] as [string, RequestInit]
     expect(path).toBe(
-      '/api/scenes/scene%2Fone/canonical-people/canonical%2Fperson-2/roster-binding',
+      '/api/projects/project%2Fone/scenes/scene%2Fone/canonical-people/canonical%2Fperson-2/roster-binding',
     )
     expect(init.method).toBe('PUT')
     expect(JSON.parse(String(init.body))).toEqual({ external_player_id: externalPlayerId })
@@ -94,7 +146,8 @@ describe('canonical roster binding API', () => {
     })
     vi.stubGlobal('fetch', fetch)
 
-    const result = await api.clearCanonicalRosterBinding(
+    const result = await identityClient.clearRosterBinding(
+      PROJECT_ID,
       'scene/one',
       'canonical/person-2',
     )
@@ -102,7 +155,7 @@ describe('canonical roster binding API', () => {
     expect(result).toEqual(scene)
     const [path, init] = fetch.mock.calls[0] as [string, RequestInit]
     expect(path).toBe(
-      '/api/scenes/scene%2Fone/canonical-people/canonical%2Fperson-2/roster-binding',
+      '/api/projects/project%2Fone/scenes/scene%2Fone/canonical-people/canonical%2Fperson-2/roster-binding',
     )
     expect(init.method).toBe('DELETE')
     expect(init.body).toBeUndefined()
@@ -116,31 +169,32 @@ describe('canonical roster binding API', () => {
       .mockResolvedValueOnce({ ok: true, json: async () => scene })
     vi.stubGlobal('fetch', fetch)
 
-    expect(await api.identityReview('scene/one')).toEqual(review)
-    expect(await api.rejectRosterCandidate(
+    expect(await identityClient.review(PROJECT_ID, 'scene/one')).toEqual(review)
+    expect(await identityClient.rejectRosterCandidate(
+      PROJECT_ID,
       'scene/one',
       'canonical/person-2',
       'player/10',
     )).toEqual(scene)
 
-    expect(fetch.mock.calls[0][0]).toBe('/api/scenes/scene%2Fone/identity-review')
+    expect(fetch.mock.calls[0][0]).toBe('/api/projects/project%2Fone/scenes/scene%2Fone/identity-review')
     const [path, init] = fetch.mock.calls[1] as [string, RequestInit]
     expect(path).toBe(
-      '/api/scenes/scene%2Fone/canonical-people/canonical%2Fperson-2/roster-rejections',
+      '/api/projects/project%2Fone/scenes/scene%2Fone/canonical-people/canonical%2Fperson-2/roster-rejections',
     )
     expect(init.method).toBe('POST')
     expect(JSON.parse(String(init.body))).toEqual({ external_player_id: 'player/10' })
   })
 
   it('refreshes a persisted match snapshot without calling the catalog endpoint', async () => {
-    const response = { scene: { id: 'scene/one' }, bundle: { source: 'thesportsdb' } }
+    const response = { id: 'match-1', sync: { state: 'synced' } }
     const fetch = vi.fn().mockResolvedValue({ ok: true, json: async () => response })
     vi.stubGlobal('fetch', fetch)
 
-    expect(await api.refreshSceneMatchBinding('scene/one')).toEqual(response)
+    expect(await matchClient.refresh(PROJECT_ID)).toEqual(response)
 
     const [path, init] = fetch.mock.calls[0] as [string, RequestInit]
-    expect(path).toBe('/api/scenes/scene%2Fone/match-binding/refresh')
+    expect(path).toBe('/api/projects/project%2Fone/match/refresh')
     expect(init.method).toBe('POST')
     expect(init.body).toBeUndefined()
   })
@@ -154,14 +208,14 @@ describe('canonical roster binding API', () => {
       },
       players: [{ id: 'player-1', name: 'Player One', team_id: 'home' }],
     }
-    const response = { scene: { id: 'scene/one' }, bundle: { source: 'manual' } }
+    const response = { id: 'match-1', sync: { state: 'manual' } }
     const fetch = vi.fn().mockResolvedValue({ ok: true, json: async () => response })
     vi.stubGlobal('fetch', fetch)
 
-    expect(await api.importSceneMatchBinding('scene/one', payload)).toEqual(response)
+    expect(await matchClient.import(PROJECT_ID, payload)).toEqual(response)
 
     const [path, init] = fetch.mock.calls[0] as [string, RequestInit]
-    expect(path).toBe('/api/scenes/scene%2Fone/match-binding/import')
+    expect(path).toBe('/api/projects/project%2Fone/match/import')
     expect(init.method).toBe('POST')
     expect(JSON.parse(String(init.body))).toEqual(payload)
   })
@@ -179,7 +233,7 @@ describe('canonical roster binding API', () => {
     })
     vi.stubGlobal('fetch', fetch)
 
-    await expect(api.importSceneMatchBinding('scene-1', {
+    await expect(matchClient.import(PROJECT_ID, {
       event: { id: 'match-1', name: 'Home v Away' },
       teams: {
         home: { id: 'home', name: 'Home' },
@@ -211,10 +265,10 @@ describe('player action API', () => {
       status: 'suggested',
       source: 'automatic',
     }
-    await api.upsertPlayerAction('scene/one', fullAction)
+    await playerActionClient.upsert(PROJECT_ID, 'scene/one', fullAction)
 
     const [path, init] = fetch.mock.calls[0] as [string, RequestInit]
-    expect(path).toBe('/api/scenes/scene%2Fone/player-actions')
+    expect(path).toBe('/api/projects/project%2Fone/scenes/scene%2Fone/player-actions')
     expect(init.method).toBe('POST')
     expect(JSON.parse(String(init.body))).toEqual({
       id: 'action:1',
@@ -235,10 +289,10 @@ describe('player action API', () => {
     const fetch = vi.fn().mockResolvedValue({ ok: true, json: async () => scene })
     vi.stubGlobal('fetch', fetch)
 
-    await api.deletePlayerAction('scene/one', 'action/one')
+    await playerActionClient.remove(PROJECT_ID, 'scene/one', 'action/one')
 
     const [path, init] = fetch.mock.calls[0] as [string, RequestInit]
-    expect(path).toBe('/api/scenes/scene%2Fone/player-actions/action%2Fone')
+    expect(path).toBe('/api/projects/project%2Fone/scenes/scene%2Fone/player-actions/action%2Fone')
     expect(init.method).toBe('DELETE')
   })
 })

@@ -1,0 +1,229 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Any
+
+import numpy as np
+
+from .cache import IdentityCacheEntry, IdentityEmbeddingCache
+from .evidence import (
+    EVIDENCE_FINGERPRINT_VERSION,
+    QualityPolicy,
+    apply_cache_entry,
+    cache_key,
+    crop_observation,
+    decode_image,
+    evidence_fingerprint,
+    provider_cache_entry,
+    rejected_cache_entry,
+)
+from .provider_contract import EmbeddingSample, IdentityEmbeddingProvider, ProviderUnavailable
+from .request_contract import parse_manifest
+
+
+class IdentityInferenceError(RuntimeError):
+    """The provider or cache could not complete a validated request."""
+
+
+@dataclass(slots=True)
+class _RequestGroup:
+    key: str
+    crop: np.ndarray
+    quality: dict
+    reasons: list[str]
+    representative_observation_id: str
+    response_indices: list[int]
+
+
+class IdentityEmbeddingService:
+    """Coordinate crop evidence, cache single-flight, and provider inference."""
+
+    def __init__(
+        self,
+        provider: IdentityEmbeddingProvider,
+        policy: QualityPolicy,
+        cache: IdentityEmbeddingCache,
+    ) -> None:
+        self.provider = provider
+        self.policy = policy
+        self.cache = cache
+
+    def process(self, frame_bytes: list[bytes], manifest: str) -> dict[str, Any]:
+        decoded = [decode_image(data, index) for index, data in enumerate(frame_bytes)]
+        frame_items = parse_manifest(manifest, len(decoded))
+        provider_info = self.provider.info()
+        responses: list[dict] = []
+        groups: dict[str, _RequestGroup] = {}
+        in_request_deduplicated = 0
+        for frame in frame_items:
+            image = decoded[int(frame["fileIndex"])]
+            frame_index = int(frame.get("frameIndex") or 0)
+            for observation in frame["observations"]:
+                crop, quality, reasons = crop_observation(
+                    image, observation["bbox"], self.policy
+                )
+                response = {
+                    "observationId": observation["observationId"],
+                    "frameIndex": frame_index,
+                    "usable": not reasons,
+                    "quality": quality,
+                    "rejectionReasons": reasons,
+                    "embedding": None,
+                    "visibilityScores": None,
+                    "role": None,
+                    "roleConfidence": None,
+                    "evidenceFingerprint": evidence_fingerprint(crop),
+                    "cacheHit": False,
+                    "cacheSource": "pending",
+                }
+                responses.append(response)
+                key = cache_key(
+                    crop, observation["bbox"], self.policy, provider_info
+                )
+                group = groups.get(key)
+                if group is not None:
+                    group.response_indices.append(len(responses) - 1)
+                    in_request_deduplicated += 1
+                    continue
+                groups[key] = _RequestGroup(
+                    key=key,
+                    crop=crop,
+                    quality=quality,
+                    reasons=reasons,
+                    representative_observation_id=str(observation["observationId"]),
+                    response_indices=[len(responses) - 1],
+                )
+
+        self.cache.note_in_request_deduplicated(in_request_deduplicated)
+        unresolved = list(groups)
+        request_hits = 0
+        request_misses = 0
+        concurrent_deduplicated = 0
+        corrupt_misses = 0
+        expired_misses = 0
+        provider_inference_count = 0
+        resolution_round = 0
+        while unresolved:
+            resolution_round += 1
+            if resolution_round > 3:
+                raise IdentityInferenceError(
+                    "Identity cache single-flight could not resolve a concurrent miss"
+                )
+            reservation = self.cache.reserve_many(unresolved)
+            corrupt_misses += reservation.corrupt_misses
+            expired_misses += reservation.expired_misses
+            next_unresolved: list[str] = []
+
+            for key, entry in reservation.hits.items():
+                request_hits += 1
+                for response_index in groups[key].response_indices:
+                    apply_cache_entry(
+                        responses[response_index], entry, cache_source="cache-hit"
+                    )
+
+            request_misses += len(reservation.owners)
+            rejected_entries: dict[str, IdentityCacheEntry] = {}
+            provider_keys: list[str] = []
+            samples: list[EmbeddingSample] = []
+            for key in reservation.owners:
+                group = groups[key]
+                if group.reasons:
+                    rejected_entries[key] = rejected_cache_entry(
+                        group.quality, group.reasons
+                    )
+                    continue
+                provider_keys.append(key)
+                samples.append(
+                    EmbeddingSample(
+                        observation_id=group.representative_observation_id,
+                        image_rgb=group.crop,
+                    )
+                )
+
+            if rejected_entries:
+                self.cache.publish(rejected_entries)
+                for key, entry in rejected_entries.items():
+                    for response_index in groups[key].response_indices:
+                        apply_cache_entry(
+                            responses[response_index],
+                            entry,
+                            cache_source="qa-computed",
+                        )
+
+            if samples:
+                provider_inference_count += len(samples)
+                try:
+                    embedded = self.provider.embed(samples)
+                    if len(embedded) != len(samples):
+                        raise ProviderUnavailable(
+                            "Provider returned an incomplete batch"
+                        )
+                    provider_entries: dict[str, IdentityCacheEntry] = {}
+                    for key, sample, item in zip(provider_keys, samples, embedded):
+                        if item.observation_id != sample.observation_id:
+                            raise ProviderUnavailable(
+                                "Provider changed observation order"
+                            )
+                        provider_entries[key] = provider_cache_entry(
+                            item, groups[key].quality
+                        )
+                    self.cache.publish(provider_entries)
+                except ProviderUnavailable as exc:
+                    self.cache.fail(provider_keys)
+                    raise IdentityInferenceError(str(exc)) from exc
+                except Exception as exc:
+                    self.cache.fail(provider_keys)
+                    raise IdentityInferenceError(
+                        f"Identity provider failed: {exc}"
+                    ) from exc
+                for key, entry in provider_entries.items():
+                    for response_index in groups[key].response_indices:
+                        apply_cache_entry(
+                            responses[response_index], entry, cache_source="provider"
+                        )
+
+            if reservation.waiters:
+                concurrent_deduplicated += len(reservation.waiters)
+                waited = self.cache.wait_many(reservation.waiters)
+                for key, entry in waited.items():
+                    for response_index in groups[key].response_indices:
+                        apply_cache_entry(
+                            responses[response_index],
+                            entry,
+                            cache_source="concurrent-deduplicated",
+                        )
+                next_unresolved.extend(
+                    key for key in reservation.waiters if key not in waited
+                )
+            unresolved = next_unresolved
+
+        usable_count = sum(item["usable"] is True for item in responses)
+        rejected_count = len(responses) - usable_count
+        usable_fingerprints = [
+            str(item["evidenceFingerprint"])
+            for item in responses
+            if item["usable"] is True
+        ]
+        unique_usable_fingerprints = set(usable_fingerprints)
+        return {
+            **provider_info,
+            "evidenceFingerprintVersion": EVIDENCE_FINGERPRINT_VERSION,
+            "items": responses,
+            "diagnostics": {
+                "requestedObservationCount": len(responses),
+                "usableObservationCount": usable_count,
+                "rejectedObservationCount": rejected_count,
+                "cacheHitCount": request_hits,
+                "cacheMissCount": request_misses,
+                "deduplicatedObservationCount": in_request_deduplicated,
+                "concurrentDeduplicatedCount": concurrent_deduplicated,
+                "providerInferenceCount": provider_inference_count,
+                "corruptCacheMissCount": corrupt_misses,
+                "expiredCacheMissCount": expired_misses,
+                "uniqueEvidenceFingerprintCount": len(unique_usable_fingerprints),
+                "duplicateEvidenceFingerprintCount": (
+                    len(usable_fingerprints) - len(unique_usable_fingerprints)
+                ),
+                "cache": self.cache.stats(),
+            },
+        }

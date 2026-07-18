@@ -4,12 +4,14 @@ from types import SimpleNamespace
 import httpx
 import pytest
 
-from app.jersey_ocr_worker import (
-    JerseyCropRequest,
-    JerseyOcrWorkerError,
+from app.jersey_ocr_worker_batch_validation import validate_analysis_payload
+from app.jersey_ocr_worker_client import (
     analyze_jersey_crops,
     jersey_ocr_worker_readiness,
 )
+from app.jersey_ocr_worker_contract import JerseyCropRequest, JerseyOcrWorkerError
+from app.jersey_ocr_worker_item_validation import validate_ocr_item
+from app.jersey_ocr_worker_model_contract import validate_readiness_payload
 
 
 class FakeResponse:
@@ -54,8 +56,65 @@ def _fingerprint(identifier: str = "crop") -> str:
     return f"pixel-evidence-v1:{identifier}"
 
 
+def _response_identity(item: dict) -> dict:
+    return {key: value for key, value in item.items() if key != "fileIndex"}
+
+
+def _recognized_item(crop_id: str = "crop") -> dict:
+    return {
+        "cropId": crop_id,
+        "usable": True,
+        "status": "recognized",
+        "number": "8",
+        "confidence": 0.9,
+        "candidates": [
+            {
+                "number": "8",
+                "confidence": 0.9,
+                "rawText": "8",
+                "polygon": None,
+            }
+        ],
+        "quality": _quality(),
+        "rejectionReasons": [],
+        "decisionReasons": [],
+        "evidenceFingerprint": _fingerprint(crop_id),
+    }
+
+
+def test_contract_layers_reject_unknown_wire_fields() -> None:
+    with pytest.raises(JerseyOcrWorkerError, match="unsupported fields"):
+        validate_readiness_payload(
+            _base_payload(status="ready", unversionedModelMetadata=True)
+        )
+
+    readiness = _base_payload(status="ready")
+    readiness["capabilities"]["providerHint"] = "private"
+    with pytest.raises(JerseyOcrWorkerError, match="unsupported fields"):
+        validate_readiness_payload(readiness)
+
+    item = _recognized_item()
+    item["candidates"][0]["providerLogit"] = 0.9
+    with pytest.raises(JerseyOcrWorkerError, match="unsupported fields"):
+        validate_ocr_item(item)
+
+    item = _recognized_item()
+    item["quality"] = {**_quality(), "providerScore": 0.9}
+    with pytest.raises(JerseyOcrWorkerError, match="unsupported fields"):
+        validate_ocr_item(item)
+
+    with pytest.raises(JerseyOcrWorkerError, match="unsupported fields"):
+        validate_analysis_payload(
+            _base_payload(
+                items=[_recognized_item()],
+                diagnostics={"unversionedCount": 1},
+            ),
+            {"crop"},
+        )
+
+
 def test_readiness_is_disabled_without_url(monkeypatch):
-    monkeypatch.setattr("app.jersey_ocr_worker.get_settings", lambda: _settings(url=""))
+    monkeypatch.setattr("app.jersey_ocr_worker_client.get_settings", lambda: _settings(url=""))
     assert jersey_ocr_worker_readiness() == {
         "configured": False,
         "status": "disabled",
@@ -64,9 +123,9 @@ def test_readiness_is_disabled_without_url(monkeypatch):
 
 
 def test_readiness_accepts_provider_neutral_contract(monkeypatch):
-    monkeypatch.setattr("app.jersey_ocr_worker.get_settings", lambda: _settings())
+    monkeypatch.setattr("app.jersey_ocr_worker_client.get_settings", lambda: _settings())
     monkeypatch.setattr(
-        "app.jersey_ocr_worker.httpx.get",
+        "app.jersey_ocr_worker_transport.httpx.get",
         lambda url, timeout: FakeResponse(
             _base_payload(
                 status="ready",
@@ -92,12 +151,12 @@ def test_readiness_accepts_provider_neutral_contract(monkeypatch):
 
 
 def test_readiness_is_nonfatal_when_worker_is_offline(monkeypatch):
-    monkeypatch.setattr("app.jersey_ocr_worker.get_settings", lambda: _settings())
+    monkeypatch.setattr("app.jersey_ocr_worker_client.get_settings", lambda: _settings())
 
     def offline(*_args, **_kwargs):
         raise httpx.ConnectError("offline")
 
-    monkeypatch.setattr("app.jersey_ocr_worker.httpx.get", offline)
+    monkeypatch.setattr("app.jersey_ocr_worker_transport.httpx.get", offline)
     result = jersey_ocr_worker_readiness()
     assert result["status"] == "unavailable"
     assert "offline" in result["detail"]
@@ -135,7 +194,7 @@ def test_client_batches_crops_and_preserves_unaccepted_evidence(monkeypatch, tmp
                 )
             items.append(
                 {
-                    **item,
+                    **_response_identity(item),
                     "usable": True,
                     "status": "recognized" if recognized else "ambiguous",
                     "number": "12" if recognized else None,
@@ -170,16 +229,16 @@ def test_client_batches_crops_and_preserves_unaccepted_evidence(monkeypatch, tmp
 
     progress = []
     monkeypatch.setattr(
-        "app.jersey_ocr_worker.get_settings", lambda: _settings(batch_size=2)
+        "app.jersey_ocr_worker_client.get_settings", lambda: _settings(batch_size=2)
     )
-    monkeypatch.setattr("app.jersey_ocr_worker.httpx.post", fake_post)
+    monkeypatch.setattr("app.jersey_ocr_worker_transport.httpx.post", fake_post)
     result = analyze_jersey_crops(crops, lambda *values: progress.append(values))
     assert len(requests) == 2
     assert requests[0][2]["contractVersion"] == "jersey-ocr.v1"
     assert requests[0][2]["items"][0]["trackletId"] == "tracklet-1"
-    assert result["crop-0"]["number"] == "12"
-    assert result["crop-1"]["status"] == "ambiguous"
-    assert result["crop-1"]["number"] is None
+    assert result.items_by_crop_id["crop-0"]["number"] == "12"
+    assert result.items_by_crop_id["crop-1"]["status"] == "ambiguous"
+    assert result.items_by_crop_id["crop-1"]["number"] is None
     assert result.diagnostics["requestedCropCount"] == 3
     assert result.diagnostics["cacheHitCount"] == 2
     assert result.diagnostics["providerInferenceCropCount"] == 1
@@ -216,7 +275,7 @@ def test_client_rejects_model_version_change_between_http_batches(
                 modelVersion=f"fake-v{call_count}",
                 items=[
                     {
-                        **item,
+                        **_response_identity(item),
                         "usable": True,
                         "status": "recognized",
                         "number": "8",
@@ -239,9 +298,9 @@ def test_client_rejects_model_version_change_between_http_batches(
         )
 
     monkeypatch.setattr(
-        "app.jersey_ocr_worker.get_settings", lambda: _settings(batch_size=1)
+        "app.jersey_ocr_worker_client.get_settings", lambda: _settings(batch_size=1)
     )
-    monkeypatch.setattr("app.jersey_ocr_worker.httpx.post", fake_post)
+    monkeypatch.setattr("app.jersey_ocr_worker_transport.httpx.post", fake_post)
 
     with pytest.raises(
         JerseyOcrWorkerError,
@@ -255,9 +314,9 @@ def test_client_rejects_model_version_change_between_http_batches(
 def test_client_rejects_non_digit_accepted_number(monkeypatch, tmp_path):
     path = tmp_path / "crop.jpg"
     path.write_bytes(b"jpeg")
-    monkeypatch.setattr("app.jersey_ocr_worker.get_settings", lambda: _settings())
+    monkeypatch.setattr("app.jersey_ocr_worker_client.get_settings", lambda: _settings())
     monkeypatch.setattr(
-        "app.jersey_ocr_worker.httpx.post",
+        "app.jersey_ocr_worker_transport.httpx.post",
         lambda *_args, **_kwargs: FakeResponse(
             _base_payload(
                 items=[
@@ -281,10 +340,48 @@ def test_client_rejects_non_digit_accepted_number(monkeypatch, tmp_path):
         analyze_jersey_crops([JerseyCropRequest("crop", path)])
 
 
-def test_readiness_rejects_non_object_json_without_raising(monkeypatch):
-    monkeypatch.setattr("app.jersey_ocr_worker.get_settings", lambda: _settings())
+def test_client_rejects_unknown_worker_item_fields(monkeypatch, tmp_path):
+    path = tmp_path / "crop.jpg"
+    path.write_bytes(b"jpeg")
+    monkeypatch.setattr("app.jersey_ocr_worker_client.get_settings", lambda: _settings())
     monkeypatch.setattr(
-        "app.jersey_ocr_worker.httpx.get", lambda *_args, **_kwargs: FakeResponse([])
+        "app.jersey_ocr_worker_transport.httpx.post",
+        lambda *_args, **_kwargs: FakeResponse(
+            _base_payload(
+                items=[
+                    {
+                        "cropId": "crop",
+                        "usable": True,
+                        "status": "recognized",
+                        "number": "8",
+                        "confidence": 0.9,
+                        "candidates": [
+                            {
+                                "number": "8",
+                                "confidence": 0.9,
+                                "rawText": "8",
+                                "polygon": None,
+                            }
+                        ],
+                        "quality": _quality(),
+                        "rejectionReasons": [],
+                        "decisionReasons": [],
+                        "evidenceFingerprint": _fingerprint(),
+                        "unversionedProviderPayload": True,
+                    }
+                ]
+            )
+        ),
+    )
+
+    with pytest.raises(JerseyOcrWorkerError, match="unsupported fields"):
+        analyze_jersey_crops([JerseyCropRequest("crop", path)])
+
+
+def test_readiness_rejects_non_object_json_without_raising(monkeypatch):
+    monkeypatch.setattr("app.jersey_ocr_worker_client.get_settings", lambda: _settings())
+    monkeypatch.setattr(
+        "app.jersey_ocr_worker_transport.httpx.get", lambda *_args, **_kwargs: FakeResponse([])
     )
 
     assert jersey_ocr_worker_readiness()["status"] == "invalid-response"
@@ -293,9 +390,9 @@ def test_readiness_rejects_non_object_json_without_raising(monkeypatch):
 def test_client_rejects_inconsistent_usable_status(monkeypatch, tmp_path):
     path = tmp_path / "crop.jpg"
     path.write_bytes(b"jpeg")
-    monkeypatch.setattr("app.jersey_ocr_worker.get_settings", lambda: _settings())
+    monkeypatch.setattr("app.jersey_ocr_worker_client.get_settings", lambda: _settings())
     monkeypatch.setattr(
-        "app.jersey_ocr_worker.httpx.post",
+        "app.jersey_ocr_worker_transport.httpx.post",
         lambda *_args, **_kwargs: FakeResponse(
             _base_payload(
                 items=[
@@ -325,10 +422,10 @@ def test_client_rejects_inconsistent_usable_status(monkeypatch, tmp_path):
 def test_client_rejects_non_object_analysis_response(monkeypatch, tmp_path):
     path = tmp_path / "crop.jpg"
     path.write_bytes(b"jpeg")
-    monkeypatch.setattr("app.jersey_ocr_worker.get_settings", lambda: _settings())
+    monkeypatch.setattr("app.jersey_ocr_worker_client.get_settings", lambda: _settings())
     monkeypatch.setattr(
-        "app.jersey_ocr_worker.httpx.post", lambda *_args, **_kwargs: FakeResponse([])
+        "app.jersey_ocr_worker_transport.httpx.post", lambda *_args, **_kwargs: FakeResponse([])
     )
 
-    with pytest.raises(JerseyOcrWorkerError, match="top-level JSON"):
+    with pytest.raises(JerseyOcrWorkerError, match="malformed JSON"):
         analyze_jersey_crops([JerseyCropRequest("crop", path)])

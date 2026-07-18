@@ -2,7 +2,7 @@ import type {
   PlayerAction,
   PlayerActionKeypointKind,
   PlayerActionType,
-} from '../types'
+} from '../types/playerActions'
 
 export type PlayerActionCategory = 'locomotion' | 'ball' | 'defensive' | 'skill'
 

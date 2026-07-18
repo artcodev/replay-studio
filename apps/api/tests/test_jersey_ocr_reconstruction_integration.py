@@ -9,19 +9,32 @@ import pytest
 
 from app.identity_decisions import reject_roster_candidate
 from app.jersey_ocr_fusion import aggregate_canonical_people
-from app.jersey_ocr_worker import JerseyOcrWorkerError
-from app.reconstruction import (
-    Detection,
-    JERSEY_OCR_FUSION_CONFIG,
-    TrackState,
-    _assign_persistent_canonical_person_ids,
-    _aggregate_jersey_evidence_for_final_tracks,
-    _canonical_people_documents,
-    _capture_detection_observations,
-    _apply_canonical_split_corrections,
-    _partition_local_jersey_evidence_for_resolver,
-    _resolve_canonical_track_states,
-    _run_jersey_ocr_for_tracklets,
+from app.jersey_ocr_worker_contract import JerseyOcrBatchResult, JerseyOcrWorkerError
+from app.reconstruction_person_detection_contract import Detection
+from app.reconstruction_track_state import TrackState
+from app.track_observation_accumulator import append_track_observation
+from app.reconstruction_identity_splitting import (
+    apply_canonical_split_corrections as _apply_canonical_split_corrections,
+)
+from app.reconstruction_canonical_people_projection import (
+    canonical_people_documents as _canonical_people_documents,
+)
+from app.reconstruction_identity_persistence import (
+    assign_persistent_canonical_person_ids as _assign_persistent_canonical_person_ids,
+)
+from app.reconstruction_jersey_inference import (
+    run_jersey_ocr_for_tracklets as _run_jersey_ocr_for_tracklets,
+)
+from app.reconstruction_jersey_policy import JERSEY_OCR_FUSION_CONFIG
+from app.reconstruction_jersey_resolution import (
+    aggregate_jersey_evidence_for_final_tracks as _aggregate_jersey_evidence_for_final_tracks,
+    partition_local_jersey_evidence_for_resolver as _partition_local_jersey_evidence_for_resolver,
+)
+from app.reconstruction_reid_evidence import (
+    capture_detection_observations as _capture_detection_observations,
+)
+from app.reconstruction_canonical_identity_resolution import (
+    resolve_canonical_track_states as _resolve_canonical_track_states,
 )
 
 
@@ -36,6 +49,21 @@ def _scene(
     return {
         "id": "jersey-scene",
         "duration": 4.0,
+        "_testMatchSnapshot": {
+            "homeTeam": {"id": "home-api", "name": "Home"},
+            "awayTeam": {"id": "away-api", "name": "Away"},
+            "roster": roster_players,
+            "rosterQuality": {
+                "status": (
+                    "automatic-ready"
+                    if automatic_identity_eligible
+                    else "partial"
+                ),
+                "automaticIdentityEligible": automatic_identity_eligible,
+                "manualIdentityEligible": bool(roster_players),
+                "reasons": [],
+            },
+        },
         "payload": {
             "pitch": {"length": 105, "width": 68},
             "teams": [
@@ -45,24 +73,6 @@ def _scene(
             "tracks": [],
             "canonicalPeople": [],
             "ball": {"keyframes": []},
-            "matchBinding": {
-                "eventId": "event-1",
-                "teams": {
-                    "home": {"id": "home-api", "name": "Home"},
-                    "away": {"id": "away-api", "name": "Away"},
-                },
-                "players": roster_players,
-                "rosterQuality": {
-                    "status": (
-                        "automatic-ready"
-                        if automatic_identity_eligible
-                        else "partial"
-                    ),
-                    "automaticIdentityEligible": automatic_identity_eligible,
-                    "manualIdentityEligible": bool(roster_players),
-                    "reasons": [],
-                },
-            },
             "videoAsset": {
                 "sourceStart": 0.0,
                 "selectedSegmentId": "segment-1",
@@ -106,7 +116,7 @@ def _tracks_and_frames(
                 position_uncertainty_metres=0.5,
             )
             _capture_detection_observations([detection], source_frame)
-            track.append(detection, sample_index, float(sample_index))
+            append_track_observation(track, detection, sample_index, float(sample_index))
         tracks.append(track)
     return tracks, frames
 
@@ -129,7 +139,7 @@ def _recognized(number: int, confidence: float = 0.90) -> dict:
 def _install_worker(monkeypatch, values: dict[tuple[str, int], dict]) -> list:
     submitted = []
     monkeypatch.setattr(
-        "app.reconstruction.jersey_ocr_worker_readiness",
+        "app.reconstruction_jersey_inference.jersey_ocr_worker_readiness",
         lambda **_: {
             "configured": True,
             "status": "ready",
@@ -142,7 +152,7 @@ def _install_worker(monkeypatch, values: dict[tuple[str, int], dict]) -> list:
     def analyze(requests, on_progress=None):
         submitted.extend(requests)
         assert all(request.path.is_file() for request in requests)
-        result = {}
+        result: dict[str, dict] = {}
         recognized = 0
         for request in requests:
             item = values[(str(request.tracklet_id), int(request.frame_index))]
@@ -150,9 +160,9 @@ def _install_worker(monkeypatch, values: dict[tuple[str, int], dict]) -> list:
             result[request.crop_id] = {"cropId": request.crop_id, **item}
         if on_progress is not None:
             on_progress(len(requests), len(requests), recognized)
-        return result
+        return JerseyOcrBatchResult(items_by_crop_id=result)
 
-    monkeypatch.setattr("app.reconstruction.analyze_jersey_crops", analyze)
+    monkeypatch.setattr("app.reconstruction_jersey_inference.analyze_jersey_crops", analyze)
     return submitted
 
 
@@ -188,6 +198,7 @@ def _publish(
         scene,
         resolver_diagnostics,
         canonical_evidence,
+        scene.get("_testMatchSnapshot"),
     )
     return resolved, people, diagnostics
 
@@ -326,7 +337,12 @@ def test_rejected_roster_hypothesis_is_not_republished_on_rebuild(
     canonical_id = first_people[0]["canonicalPersonId"]
     assert first_people[0]["rosterCandidates"][0]["externalPlayerId"] == "player-8"
 
-    reject_roster_candidate(scene, canonical_id, "player-8")
+    reject_roster_candidate(
+        scene,
+        canonical_id,
+        "player-8",
+        match_snapshot=scene["_testMatchSnapshot"],
+    )
     _, rebuilt_people, diagnostics = _publish(
         tracks,
         scene,
@@ -339,7 +355,7 @@ def test_rejected_roster_hypothesis_is_not_republished_on_rebuild(
     assert diagnostics["rosterCandidateCount"] == 0
 
 
-def test_legacy_ocr_selection_maps_only_a_uniquely_owned_source_tracklet(
+def test_missing_raw_ocr_rows_do_not_reuse_pre_resolver_selection(
     monkeypatch,
     tmp_path,
 ) -> None:
@@ -357,17 +373,15 @@ def test_legacy_ocr_selection_maps_only_a_uniquely_owned_source_tracklet(
 
     canonical, mapping = _aggregate_jersey_evidence_for_final_tracks(
         tracks,
-        summaries,
         {},
     )
 
-    assert mapping["evidenceSource"] == "legacy-pre-resolver-selection"
-    assert mapping["mappedRawCropCount"] == 3
-    assert canonical["canonical-only"].jersey_number == "8"
-    assert canonical["canonical-only"].status == "reliable"
+    assert mapping["evidenceSource"] == "raw-crop-results"
+    assert mapping["mappedRawCropCount"] == 0
+    assert canonical == {}
 
 
-def test_legacy_ocr_selection_abstains_when_a_source_tracklet_was_split(
+def test_missing_raw_ocr_rows_abstain_after_a_source_tracklet_split(
     monkeypatch,
     tmp_path,
 ) -> None:
@@ -390,13 +404,12 @@ def test_legacy_ocr_selection_abstains_when_a_source_tracklet_was_split(
 
     canonical, mapping = _aggregate_jersey_evidence_for_final_tracks(
         [remaining, split],
-        summaries,
         {},
     )
 
     assert canonical == {}
     assert mapping["mappedRawCropCount"] == 0
-    assert len(mapping["ambiguousRawCropIds"]) == 3
+    assert mapping["ambiguousRawCropIds"] == []
 
 
 def test_manual_roster_binding_survives_reliable_ocr_disagreement_with_explicit_conflict(
@@ -536,7 +549,6 @@ def test_manual_split_reassigns_ocr_by_immutable_observation_not_old_tracklet(
 
     canonical, mapping_diagnostics = _aggregate_jersey_evidence_for_final_tracks(
         [remaining, split],
-        summaries,
         diagnostics,
     )
 
@@ -544,7 +556,7 @@ def test_manual_split_reassigns_ocr_by_immutable_observation_not_old_tracklet(
     assert canonical["canonical-remaining"].support_count == 2
     assert canonical["canonical-split"].jersey_number is None
     assert canonical["canonical-split"].candidate_number == "8"
-    assert mapping_diagnostics["mappedSelectedCropCount"] == 3
+    assert mapping_diagnostics["mappedRawCropCount"] == 3
 
 
 def test_split_is_partitioned_before_ocr_can_stitch_a_continuation_to_wrong_side(
@@ -617,7 +629,6 @@ def test_split_is_partitioned_before_ocr_can_stitch_a_continuation_to_wrong_side
     partitioned, _ = _apply_canonical_split_corrections(tracks, scene)
     partition_evidence, mapping = _partition_local_jersey_evidence_for_resolver(
         partitioned,
-        summaries,
         diagnostics,
     )
     assert mapping["mappedRawCropCount"] == 8
@@ -713,7 +724,6 @@ def test_manual_split_fuses_partition_local_raw_crops_excluded_from_pre_resolver
     split.points = split.points[5:]
     canonical, mapping_diagnostics = _aggregate_jersey_evidence_for_final_tracks(
         [remaining, split],
-        summaries,
         diagnostics,
     )
 
@@ -863,7 +873,7 @@ def test_ocr_outage_is_diagnostic_and_reconstruction_identity_remains_available(
 ) -> None:
     tracks, frames = _tracks_and_frames(tmp_path, samples_per_track=2)
     monkeypatch.setattr(
-        "app.reconstruction.jersey_ocr_worker_readiness",
+        "app.reconstruction_jersey_inference.jersey_ocr_worker_readiness",
         lambda **_: {
             "configured": True,
             "status": "ready",
@@ -874,7 +884,7 @@ def test_ocr_outage_is_diagnostic_and_reconstruction_identity_remains_available(
     def outage(*_args, **_kwargs):
         raise JerseyOcrWorkerError("worker offline")
 
-    monkeypatch.setattr("app.reconstruction.analyze_jersey_crops", outage)
+    monkeypatch.setattr("app.reconstruction_jersey_inference.analyze_jersey_crops", outage)
 
     summaries, diagnostics, warnings = _run_jersey_ocr_for_tracklets(tracks, frames)
 
@@ -897,7 +907,7 @@ def test_unavailable_worker_skips_crop_submission_and_remains_fail_open(
 ) -> None:
     tracks, frames = _tracks_and_frames(tmp_path, samples_per_track=1)
     monkeypatch.setattr(
-        "app.reconstruction.jersey_ocr_worker_readiness",
+        "app.reconstruction_jersey_inference.jersey_ocr_worker_readiness",
         lambda **_: {
             "configured": True,
             "status": "unavailable",
@@ -906,7 +916,7 @@ def test_unavailable_worker_skips_crop_submission_and_remains_fail_open(
         },
     )
     monkeypatch.setattr(
-        "app.reconstruction.analyze_jersey_crops",
+        "app.reconstruction_jersey_inference.analyze_jersey_crops",
         lambda *_args, **_kwargs: pytest.fail("client must not run while unavailable"),
     )
 

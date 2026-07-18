@@ -24,18 +24,26 @@ class Settings(BaseSettings):
     reconstruction_frame_rate: float = 10.0
     reconstruction_model: str = "yolo26m.pt"
     reconstruction_device: str = "cpu"
-    # A database-backed fencing lease prevents two API processes from running
+    # A database-backed fencing lease prevents two runner processes from owning
     # the same reconstruction. Heartbeats live outside the scene JSON so they
-    # do not invalidate the worker's document revision. The monitor also
-    # reclaims legacy ``processing`` scenes that have no lease.
+    # do not invalidate the worker's document revision. Recovery discovers
+    # only compact current-job rows and reclaims processing jobs after expiry.
     reconstruction_lease_ttl_seconds: float = 180.0
     reconstruction_lease_heartbeat_seconds: float = 15.0
     reconstruction_recovery_poll_seconds: float = 5.0
-    reconstruction_recovery_max_workers: int = 2
+    reconstruction_recovery_max_workers: int = 1
+    # Video ingest and multi-pass orchestration run in a separate durable
+    # process pool.  Their compact queue/leases are independent from both
+    # dense Scene documents and AnalysisRun telemetry.
+    pipeline_lease_ttl_seconds: float = 120.0
+    pipeline_lease_heartbeat_seconds: float = 10.0
+    pipeline_recovery_poll_seconds: float = 2.0
+    pipeline_recovery_max_workers: int = 2
+    pipeline_dependency_poll_seconds: float = 2.0
     # The ball is a tiny, fast target and must not share the generic COCO
     # person detector's class/filter contract.  The bundled Roboflow Sports
     # checkpoint is the accuracy-first local default; WASB runs in its own
-    # legacy worker and can be selected without changing the scene schema.
+    # isolated pinned-runtime worker behind the same detector contract.
     ball_detection_backend: str = "dedicated-ultralytics"
     ball_detection_model: str = str(
         Path(__file__).resolve().parent.parent
@@ -47,12 +55,23 @@ class Settings(BaseSettings):
     ball_detection_tile_size: int = 640
     ball_detection_tile_overlap: float = 0.20
     ball_detection_inference_batch_size: int = 8
+    # Persist a clean detector prefix periodically so cancellation/restart does
+    # not discard many minutes of tiled CPU inference.
+    ball_detection_checkpoint_interval: int = 4
+    # Dedicated Ultralytics performs a full tiled reacquisition periodically
+    # and follows recent candidates in substantially cheaper full-resolution
+    # crops between those scans. A miss is retried with a global scan on the
+    # same frame, so this optimization keeps every source timestamp in the
+    # evidence stream and prevents a clean miss from making a lost seed sticky.
+    ball_detection_full_scan_interval: int = 5
+    ball_detection_roi_region_count: int = 3
+    ball_detection_roi_padding: int = 320
     ball_detection_nms_iou: float = 0.10
     ball_detection_max_candidates: int = 12
     # Dense source-rate sampling is cached per scene range. Player detection
     # and calibration remain on their existing 10 FPS cadence.
     ball_analysis_frame_rate: float = 25.0
-    ball_wasb_worker_url: str | None = "http://127.0.0.1:8092/detect"
+    ball_wasb_worker_url: str | None = "http://127.0.0.1:8092/v1/detections"
     ball_wasb_timeout: float = 120.0
     ball_detection_failure_policy: str = "fallback"
     # Accuracy-first local default. Docker Compose overrides this with the
@@ -64,7 +83,12 @@ class Settings(BaseSettings):
     # must not inherit the 15-minute background-job timeout.
     calibration_frame_worker_timeout: float = 60.0
     calibration_worker_batch_size: int = 2
-    # PRTReID lives in its own legacy PyTorch runtime. Keep the URL optional so
+    # Full-shot reconstruction directly calibrates sparse camera anchors and
+    # lets the temporal solver recover the in-between samples. A one-second
+    # ceiling keeps every sampled frame within the solver's two-second window
+    # without paying the cold PnLCalib cost on every 10 FPS frame.
+    calibration_anchor_max_gap_seconds: float = 1.0
+    # PRTReID lives in its own pinned PyTorch runtime. Keep the URL optional so
     # reconstruction can report missing identity evidence without pretending a
     # generic image embedding is an equivalent fallback.
     identity_worker_url: str | None = "http://127.0.0.1:8091"

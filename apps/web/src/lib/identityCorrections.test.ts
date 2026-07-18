@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import type { FrameAnnotation, Track } from '../types'
+import type { FrameAnnotation } from '../types/analysis'
+import type { Track } from '../types/tracking'
 import {
   annotationIdentityAction,
   buildIdentityMergeTargets,
@@ -49,7 +50,7 @@ describe('identity corrections', () => {
     expect(confirmedRosterBindingsConflict(null, 'player-10')).toBe(false)
   })
 
-  it('normalizes legacy ignore labels into exclude actions', () => {
+  it('maps the ignore semantic to the exclude identity action', () => {
     expect(annotationIdentityAction(annotation('ignored', { kind: 'ignore' }))).toBe('exclude')
     expect(annotationIdentityAction(annotation('confirmed'))).toBe('confirm')
     expect(annotationIdentityAction(annotation('split', { action: 'split', scope: 'range' }))).toBe('split')
@@ -134,13 +135,21 @@ describe('identity corrections', () => {
     expect(dedicatedRosterBindingStateForOwner(annotations, ['canonical-without-decision'])).toBeNull()
     expect(hasActiveDedicatedUnbindForOwner(annotations, ['canonical-a'])).toBe(false)
     expect(hasActiveDedicatedUnbindForOwner(annotations, ['canonical-b'])).toBe(true)
-    expect(hasActiveDedicatedUnbindForOwner([
-      annotation('legacy-null-without-state', {
+    const malformedWithoutState = [
+      annotation('missing-state', {
         correctionKind: 'canonical-roster-binding-v1',
         canonicalPersonId: 'canonical-b',
         externalPlayerId: null,
       }),
-    ], ['canonical-b'])).toBe(false)
+    ]
+    expect(hasActiveDedicatedUnbindForOwner(
+      malformedWithoutState,
+      ['canonical-b'],
+    )).toBe(false)
+    expect(dedicatedRosterBindingStateForOwner(
+      malformedWithoutState,
+      ['canonical-b'],
+    )).toBe('conflict')
     expect(hasActiveDedicatedUnbindForOwner(
       [...annotations, annotation('second-unbound-b', {
         correctionKind: 'canonical-roster-binding-v1',

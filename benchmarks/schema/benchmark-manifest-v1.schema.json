@@ -1,0 +1,167 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://replay-studio.local/schemas/benchmark-manifest-v1.schema.json",
+  "title": "Replay Studio quality benchmark manifest v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "benchmark", "samples"],
+  "properties": {
+    "$schema": { "type": "string" },
+    "schemaVersion": { "const": "1.0" },
+    "benchmark": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "name", "status", "coordinateSystem"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "name": { "type": "string", "minLength": 1 },
+        "description": { "type": "string" },
+        "status": { "enum": ["draft", "labelled", "frozen"] },
+        "annotationRevision": { "type": "string", "minLength": 1 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "coordinateSystem": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["image", "pitch"],
+          "properties": {
+            "image": { "const": "pixels-top-left" },
+            "pitch": { "const": "metres-centre-origin-xz" }
+          }
+        },
+        "labelingNotes": { "type": "string" }
+      }
+    },
+    "evaluation": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "personIouThreshold": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "maximum": 1
+        },
+        "ballPointThresholdPx": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        }
+      }
+    },
+    "samples": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/sample" }
+    }
+  },
+  "$defs": {
+    "point": {
+      "type": "array",
+      "prefixItems": [{ "type": "number" }, { "type": "number" }],
+      "minItems": 2,
+      "maxItems": 2
+    },
+    "bbox": {
+      "type": "array",
+      "prefixItems": [
+        { "type": "number" },
+        { "type": "number" },
+        { "type": "number", "exclusiveMinimum": 0 },
+        { "type": "number", "exclusiveMinimum": 0 }
+      ],
+      "minItems": 4,
+      "maxItems": 4
+    },
+    "sample": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "source", "groundTruth"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "source": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "assetId": { "type": "string", "minLength": 1 },
+            "path": { "type": "string", "minLength": 1 },
+            "sha256": { "type": "string", "pattern": "^[a-fA-F0-9]{64}$" },
+            "frameRate": { "type": "number", "exclusiveMinimum": 0 },
+            "segment": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["startSeconds", "endSeconds"],
+              "properties": {
+                "startSeconds": { "type": "number", "minimum": 0 },
+                "endSeconds": { "type": "number", "exclusiveMinimum": 0 }
+              }
+            }
+          },
+          "anyOf": [{ "required": ["assetId"] }, { "required": ["path"] }]
+        },
+        "groundTruth": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["frames"],
+          "properties": {
+            "frames": {
+              "type": "array",
+              "items": { "$ref": "#/$defs/groundTruthFrame" }
+            }
+          }
+        }
+      }
+    },
+    "groundTruthFrame": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["frameIndex"],
+      "properties": {
+        "frameIndex": { "type": "integer", "minimum": 0 },
+        "persons": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["id", "bbox"],
+            "properties": {
+              "id": { "type": "string", "minLength": 1 },
+              "bbox": { "$ref": "#/$defs/bbox" },
+              "role": {
+                "enum": ["player", "goalkeeper", "referee", "staff", "other"]
+              },
+              "team": { "enum": ["home", "away", "official", "unknown"] },
+              "occluded": { "type": "boolean" }
+            }
+          }
+        },
+        "ball": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["visible"],
+          "properties": {
+            "visible": { "type": "boolean" },
+            "center": { "$ref": "#/$defs/point" },
+            "occluded": { "type": "boolean" }
+          },
+          "allOf": [
+            {
+              "if": { "properties": { "visible": { "const": true } } },
+              "then": { "required": ["center"] }
+            }
+          ]
+        },
+        "calibrationPoints": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["id", "image", "pitch"],
+            "properties": {
+              "id": { "type": "string", "minLength": 1 },
+              "image": { "$ref": "#/$defs/point" },
+              "pitch": { "$ref": "#/$defs/point" },
+              "semanticType": { "type": "string" }
+            }
+          }
+        }
+      }
+    }
+  }
+}

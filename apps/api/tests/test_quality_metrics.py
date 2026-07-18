@@ -74,7 +74,6 @@ def _scene():
                     "coordinateSpace": "pitch-metric-per-frame-homography",
                     "pitchCalibration": {"status": "ready", "method": "pnlcalib-points-lines"},
                     "calibration": {"frameEvidence": evidence},
-                    "calibrationFrames": evidence,
                     "diagnostics": {
                         "calibratedFrameCount": 10,
                         "calibrationFrameCoverage": 1.0,
@@ -254,11 +253,10 @@ def test_low_coverage_fallback_clamping_and_impossible_speed_reject():
     assert gates["player-speed"]["status"] == "reject"
 
 
-def test_legacy_metric_run_without_provenance_cannot_pass():
+def test_metric_run_without_required_provenance_cannot_pass():
     scene = _scene()
     reconstruction = scene["payload"]["videoAsset"]["reconstruction"]
     reconstruction.pop("calibration")
-    reconstruction.pop("calibrationFrames")
     reconstruction["diagnostics"] = {
         "calibratedFrameCount": 10,
         "calibrationFrameCoverage": 1.0,
@@ -287,7 +285,6 @@ def test_bad_manual_anchor_alignment_rejects_even_without_frame_evidence():
     scene = _scene()
     reconstruction = scene["payload"]["videoAsset"]["reconstruction"]
     reconstruction.pop("calibration")
-    reconstruction.pop("calibrationFrames")
     reconstruction["pitchCalibration"] = {
         "status": "ready",
         "method": "manual-pitch-anchors",

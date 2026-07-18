@@ -2,18 +2,16 @@ from __future__ import annotations
 
 import pytest
 
-from app.roster_identity_resolver import (
+from app.closed_set_roster_resolution import resolve_closed_set_roster
+from app.roster_identity_contract import (
     AttributeEvidence,
     CanonicalPersonEvidence,
     ParticipationEvidence,
     PersistedRosterPlayer,
     PlayerLikelihoodEvidence,
     RosterResolverConfig,
-    TimeInterval,
-    _intervals_overlap,
-    _merge_intervals,
-    resolve_closed_set_roster,
 )
+from app.roster_identity_temporal import TimeInterval, intervals_overlap, merge_intervals
 
 
 def _attribute(
@@ -88,8 +86,6 @@ def test_repeated_jersey_team_role_and_time_produce_review_suggestion_only() -> 
     person = _resolution(result, "canonical-8")
     assert person.status == "suggested"
     assert person.suggested_external_player_id == "player-8"
-    assert person.auto_bind_external_player_id is None
-    assert result.auto_bindings == ()
     assert result.diagnostics["automaticBindingCount"] == 0
     candidate = _candidate(result, "canonical-8", "player-8")
     assert candidate.proposal_status == "selected"
@@ -467,9 +463,7 @@ def test_payload_contract_exposes_suggestion_but_never_auto_binding() -> None:
 
     payload = result.to_payload()
     assert payload["schemaVersion"] == 1
-    assert payload["autoBindings"] == []
     assert payload["people"][0]["suggestedExternalPlayerId"] == "player-8"
-    assert payload["people"][0]["autoBindExternalPlayerId"] is None
     assert payload["people"][0]["requiresManualConfirmation"] is True
     assert payload["people"][0]["candidates"][0][
         "requiresManualConfirmation"
@@ -544,13 +538,13 @@ def test_point_overlap_is_symmetric_exact_and_preserves_half_open_endpoint() -> 
     point_ten = (TimeInterval(10, 10),)
     span = (TimeInterval(0, 10),)
 
-    assert _intervals_overlap(point_five, span) is True
-    assert _intervals_overlap(span, point_five) is True
-    assert _intervals_overlap(point_five, point_five) is True
-    assert _intervals_overlap(point_five, point_ten) is False
-    assert _intervals_overlap(point_ten, span) is False
-    assert _intervals_overlap(span, point_ten) is False
-    assert _merge_intervals((*span, *point_ten)) == (
+    assert intervals_overlap(point_five, span) is True
+    assert intervals_overlap(span, point_five) is True
+    assert intervals_overlap(point_five, point_five) is True
+    assert intervals_overlap(point_five, point_ten) is False
+    assert intervals_overlap(point_ten, span) is False
+    assert intervals_overlap(span, point_ten) is False
+    assert merge_intervals((*span, *point_ten)) == (
         TimeInterval(0, 10),
         TimeInterval(10, 10),
     )

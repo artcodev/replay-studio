@@ -31,40 +31,21 @@ export type CanonicalRenderTrack = {
   canonicalPersonId?: string | null
 }
 
-/** Resolves video → 3D using canonical identity, with legacy track id fallback. */
+/** Resolves video → 3D exclusively through canonical identity ownership. */
 export function renderTrackForFramePerson<T extends CanonicalRenderTrack>(
   person: FrameTrackMatch,
   tracks: readonly T[],
 ): T | null {
-  if (person.canonicalPersonId) {
-    const canonicalMatch = tracks.find(
-      (track) => track.canonicalPersonId === person.canonicalPersonId,
-    )
-    if (canonicalMatch) return canonicalMatch
-  }
-  if (!person.matchedTrackId) return null
-  return tracks.find((track) => track.id === person.matchedTrackId) ?? null
+  if (!person.canonicalPersonId) return null
+  return tracks.find((track) => track.canonicalPersonId === person.canonicalPersonId) ?? null
 }
 
 export function selectedFramePeople<T extends FrameTrackMatch>(
   analysis: { people: readonly T[] } | null,
-  trackId: string | null,
-  canonicalPersonId: string | null = null,
+  canonicalPersonId: string | null,
 ): T[] {
-  if (!analysis) return []
-
-  // Canonical identity is authoritative. matchedTrackId only names an
-  // optional render actor and can legitimately be missing (or stale) when
-  // metric projection was rejected.
-  if (canonicalPersonId) {
-    const canonicalMatches = analysis.people.filter(
-      (person) => person.canonicalPersonId === canonicalPersonId,
-    )
-    if (canonicalMatches.length) return canonicalMatches
-  }
-
-  if (!trackId) return []
-  return analysis.people.filter((person) => person.matchedTrackId === trackId)
+  if (!analysis || !canonicalPersonId) return []
+  return analysis.people.filter((person) => person.canonicalPersonId === canonicalPersonId)
 }
 
 /** Distinguishes an accepted metric projection from identity-only evidence. */
@@ -86,8 +67,8 @@ export function linkedFrameMetricSelectionStatus(
   person: FrameMetricMatch,
   trackLabel: string | null,
 ): VideoTrackSelectionStatus | null {
-  if ((!person.canonicalPersonId && !person.matchedTrackId) || frameMetricBadge(person) !== 'UNCERTAIN') return null
-  const detail = trackLabel || person.canonicalPersonId || person.matchedTrackId || 'Selected person'
+  if (!person.canonicalPersonId || frameMetricBadge(person) !== 'UNCERTAIN') return null
+  const detail = trackLabel || person.canonicalPersonId
   const reason = person.metricReason
     || (person.positionSource === 'track-inferred'
       ? 'using a track-inferred 3D position'
@@ -125,7 +106,7 @@ export function canonicalSelectionAfterFrameAnalysis(
   if (currentSelection !== selectionAtRequestStart) return currentSelection
   if (selectedTrackCanonicalPersonId) return selectedTrackCanonicalPersonId
   if (selectionAtRequestStart) return selectionAtRequestStart
-  // A selected legacy track deliberately has no canonical identity. Do not
+  // A selected unbound track deliberately has no canonical identity. Do not
   // attach the first unrelated detector result to it.
   return currentTrackId ? null : firstMatchedCanonicalPersonId
 }
@@ -161,7 +142,7 @@ export function videoTrackSelectionStatus(
     }
   }
 
-  const matches = selectedFramePeople(analysis, trackId, options.canonicalPersonId)
+  const matches = selectedFramePeople(analysis, options.canonicalPersonId ?? null)
   if (matches.length) {
     return {
       state: 'visible',

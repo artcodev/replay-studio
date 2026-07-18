@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import type { Keyframe } from '../types'
+import type { Keyframe } from '../types/tracking'
 import {
   buildPathTrackingSegments,
   interpolatePathTrackingSegments,
@@ -45,8 +45,8 @@ describe('pathTracking', () => {
     })).toBe('inferred')
   })
 
-  it('keeps legacy keyframes visible as observed evidence', () => {
-    expect(keyframePathEvidence(frame(0))).toBe('observed')
+  it('fails keyframes without explicit evidence closed as inferred', () => {
+    expect(keyframePathEvidence(frame(0))).toBe('inferred')
   })
 
   it('groups adjacent edges while sharing evidence-change boundaries', () => {

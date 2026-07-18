@@ -141,6 +141,15 @@ batch**, not a wall-clock deadline for the complete reconstruction job. A job
 with many batches can therefore run longer. Reconstruction stays in the
 background and does not hold an editor request open.
 
+Full-shot reconstruction does not need an independent PnLCalib solve for every
+10 FPS analysis frame. It keeps the first and last frames plus direct camera
+anchors no farther apart than `CALIBRATION_ANCHOR_MAX_GAP_SECONDS` (`1.0` by
+default), then uses the existing temporal solver to propagate and validate the
+in-between camera states. Manual calibration anchors remain authoritative and
+**Calibrate Frame** still submits exactly the selected frame. Set the value to
+`0` only when diagnosing the former all-frames calibration path; this is much
+slower on CPU.
+
 The official checkpoints are stored under
 `services/calibration-worker/models/` and have these verified MD5 hashes:
 
@@ -190,8 +199,8 @@ Three concepts are stored separately:
 An explicit editor choice of attacking goal remains authoritative match
 metadata. It never mirrors calibration or track coordinates. Attack direction
 is no longer inferred by asking which side of the screen a generic rectangle
-happens to occupy. PnLCalib/Roboflow semantic calibrations are also exempt from
-the legacy screen-side canonicalisation heuristic. Recovered frames inherit an
+happens to occupy. PnLCalib/Roboflow semantic calibrations do not use the
+retired screen-side canonicalisation heuristic. Recovered frames inherit an
 anchor's visible-side label and therefore do not count as independent
 orientation votes.
 

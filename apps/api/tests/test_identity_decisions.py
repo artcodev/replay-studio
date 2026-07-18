@@ -12,12 +12,6 @@ def scene() -> dict:
     return {
         "id": "identity-decisions",
         "payload": {
-            "matchBinding": {
-                "players": [
-                    {"id": "player-8", "name": "Eight"},
-                    {"id": "player-10", "name": "Ten"},
-                ]
-            },
             "canonicalPeople": [
                 {
                     "canonicalPersonId": "canonical-1",
@@ -33,10 +27,22 @@ def scene() -> dict:
     }
 
 
+MATCH_SNAPSHOT = {
+    "roster": [
+        {"id": "player-8", "name": "Eight"},
+        {"id": "player-10", "name": "Ten"},
+    ]
+}
+
+
 def test_roster_candidate_rejection_is_idempotent_and_clearable():
     value = scene()
-    first = reject_roster_candidate(value, "canonical-1", "player-8")
-    second = reject_roster_candidate(value, "canonical-1", "player-8")
+    first = reject_roster_candidate(
+        value, "canonical-1", "player-8", match_snapshot=MATCH_SNAPSHOT
+    )
+    second = reject_roster_candidate(
+        value, "canonical-1", "player-8", match_snapshot=MATCH_SNAPSHOT
+    )
 
     assert first == second
     assert first["anchorObservationId"] == "obs-1"
@@ -53,8 +59,12 @@ def test_cannot_reject_confirmed_or_unpublished_candidate():
     value = scene()
     value["payload"]["canonicalPeople"][0]["externalPlayerId"] = "player-8"
     with pytest.raises(IdentityDecisionError, match="Unbind"):
-        reject_roster_candidate(value, "canonical-1", "player-8")
+        reject_roster_candidate(
+            value, "canonical-1", "player-8", match_snapshot=MATCH_SNAPSHOT
+        )
 
     value["payload"]["canonicalPeople"][0]["externalPlayerId"] = None
     with pytest.raises(IdentityDecisionError, match="published"):
-        reject_roster_candidate(value, "canonical-1", "missing")
+        reject_roster_candidate(
+            value, "canonical-1", "missing", match_snapshot=MATCH_SNAPSHOT
+        )

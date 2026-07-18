@@ -1,14 +1,11 @@
 import numpy as np
 import pytest
 
-from app.pitch_calibration import PitchCalibration, pitch_side
-from app.temporal_calibration import (
-    CameraMotionEstimate,
-    TemporalCalibrationFrame,
-    normalize_homography,
-    propagate_homography,
-    solve_calibration_sequence,
-)
+from app.pitch_calibration_contract import PitchCalibration, pitch_side
+from app.camera_motion_contract import CameraMotionEstimate
+from app.temporal_calibration_contract import TemporalCalibrationFrame
+from app.temporal_calibration_solver import solve_calibration_sequence
+from app.temporal_homography import normalize_homography, propagate_homography
 
 
 def _frame(sample_index: int, scene_time: float | None = None) -> TemporalCalibrationFrame:

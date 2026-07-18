@@ -1,12 +1,16 @@
 import numpy as np
 
-from app.pitch_calibration import PitchCalibration
-from app.reconstruction import (
-    TrackState,
-    _continuous_track_keyframes,
-    _evaluate_calibration_quality,
-    _keypoint_evidence,
-    _scene_tracks,
+from app.pitch_calibration_contract import PitchCalibration
+from app.reconstruction_calibration_evidence import keypoint_evidence as _keypoint_evidence
+from app.reconstruction_shot_calibration_quality import (
+    evaluate_calibration_quality as _evaluate_calibration_quality,
+)
+from app.reconstruction_track_state import TrackState
+from app.reconstruction_latent_presence import (
+    materialize_continuous_presence as _materialize_continuous_presence,
+)
+from app.reconstruction_scene_track_publisher import (
+    publish_scene_tracks as _scene_tracks,
 )
 
 
@@ -92,7 +96,7 @@ def test_metric_tracks_skip_observations_without_calibration(monkeypatch):
         "payload": {"pitch": {"length": 105, "width": 68}},
     }
     monkeypatch.setattr(
-        "app.reconstruction._frame_paths",
+        "app.reconstruction_scene_track_publisher.frame_paths",
         lambda _: [(f"frame-{index}", index * 0.2) for index in range(5)],
     )
 
@@ -114,7 +118,7 @@ def test_metric_tracks_skip_observations_without_calibration(monkeypatch):
 
 
 def test_continuous_presence_spans_scene_without_faking_observations():
-    keyframes, presence = _continuous_track_keyframes(
+    keyframes, presence = _materialize_continuous_presence(
         [
             {"t": 1.0, "x": 8.0, "z": 4.0, "confidence": 0.9},
             {"t": 1.2, "x": 8.5, "z": 4.2, "confidence": 0.85},
@@ -137,7 +141,7 @@ def test_continuous_presence_spans_scene_without_faking_observations():
 
 
 def test_continuous_presence_marks_long_internal_gap_as_inferred():
-    keyframes, _ = _continuous_track_keyframes(
+    keyframes, _ = _materialize_continuous_presence(
         [
             {"t": 0.0, "x": -10.0, "z": 0.0, "confidence": 0.9},
             {"t": 2.0, "x": 0.0, "z": 4.0, "confidence": 0.9},
@@ -186,7 +190,7 @@ def test_manual_confirmation_is_not_dropped_by_team_capacity(monkeypatch):
         "payload": {"pitch": {"length": 105, "width": 68}},
     }
     monkeypatch.setattr(
-        "app.reconstruction._frame_paths",
+        "app.reconstruction_scene_track_publisher.frame_paths",
         lambda _: [(f"frame-{index}", index * 0.2) for index in range(5)],
     )
 

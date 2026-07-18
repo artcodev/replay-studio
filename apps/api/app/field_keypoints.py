@@ -5,7 +5,7 @@ from math import exp
 import cv2
 import numpy as np
 
-from .pitch_calibration import PitchCalibration
+from .pitch_calibration_contract import PitchCalibration
 
 
 # Semantic order used by the open Roboflow Sports pitch-keypoint model.  The

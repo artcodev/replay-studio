@@ -1,0 +1,5 @@
+.pytest_cache
+tests
+scripts
+**/__pycache__
+**/*.py[cod]

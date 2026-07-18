@@ -157,35 +157,34 @@ accuracy winner.
 
 ## Persisted roster and closed-set player resolver
 
-Real names are resolved only against the match snapshot saved in
-`payload.matchBinding` (schema version 2). The snapshot contains the event,
-teams, complete player list, lineup roles, timeline, substitutions, provenance
-and an explicit `rosterQuality` decision. Loading an existing scene never
-silently refreshes this data from the network, so one reconstruction run cannot
-mix a saved roster with a newer provider response.
+Real names are resolved only against the project's current canonical match
+snapshot. It contains the event, teams, complete player list, lineup roles,
+timeline, substitutions and an explicit `rosterQuality` decision. Provider
+provenance is stored separately. Scene routes cannot write match data. Loading
+an existing scene never silently refreshes data from the network, so one
+reconstruction run cannot mix two roster revisions.
 
 TheSportsDB free responses that contain five or fewer than eleven players per
 team are marked `partial`. They remain available in the manual Bind selector,
 but are not a valid closed set and cannot generate automatic player-name
-hypotheses. A legacy snapshot can be upgraded through:
+hypotheses. Refresh the current Project match through:
 
 ```http
-POST /api/scenes/{sceneId}/match-binding/refresh
+POST /api/projects/{projectId}/match/refresh
 ```
 
 If the provider cannot return a complete roster, a strict user-owned JSON
 snapshot can be imported through:
 
 ```http
-POST /api/scenes/{sceneId}/match-binding/import
+POST /api/projects/{projectId}/match/import
 Content-Type: application/json
 ```
 
-Both routes use the same reconstruction lock, full-document revision and
-fingerprint CAS as the ordinary match-binding endpoint. Match metadata is
-updated project-wide, but reconstruction is queued only when `sceneId` is the
-explicitly requested single-pass shot. Calling either route on the root video
-does not enqueue any child scene.
+Both operations persist a new canonical Project snapshot and do not queue
+reconstruction. The changed snapshot participates in the reconstruction input
+fingerprint; the user explicitly rebuilds the current single-pass scene or
+reruns a composition.
 The project includes a validated full Spain–Belgium 2026 fixture at
 `data/matches/spain-belgium-2026-qf.json` as an importable example.
 
@@ -204,7 +203,7 @@ the dedicated manual Bind endpoint. Rejecting a roster hypothesis is also a
 durable reconstruction input:
 
 ```http
-POST /api/scenes/{sceneId}/canonical-people/{canonicalPersonId}/roster-rejections
+POST /api/projects/{projectId}/scenes/{sceneId}/canonical-people/{canonicalPersonId}/roster-rejections
 { "external_player_id": "..." }
 ```
 
@@ -213,21 +212,24 @@ included in the reconstruction fingerprint, so an older worker cannot restore
 the hypothesis.
 
 The read-only review workbench is available at
-`GET /api/scenes/{sceneId}/identity-review`. It returns the priority queue,
+`GET /api/projects/{projectId}/scenes/{sceneId}/identity-review`. It returns the priority queue,
 best observation crops, ReID/OCR readiness and rejection reasons, roster
 hypotheses, conflicts and the completeness status of the saved roster. Crop
 URLs resolve exact persisted observation bboxes; clients cannot request an
-arbitrary file path or crop.
+arbitrary file path or crop. A valid `sourceFrameIndex: 0` is preserved rather
+than treated as a missing value. Roster completeness is derived from structured
+`rosterQuality` flags; human-readable provider warnings never change identity
+eligibility.
 
 ## Manual editing
 
-The editor sends `canonical_person_id` separately from legacy
+The editor sends `canonical_person_id` separately from the optional
 `source_track_id`. Consequently all actions also work for a video-only person:
 
 - **Confirm** adds positive identity, role and label evidence; roster identity
   is accepted only through the dedicated canonical Bind endpoint;
 - **Exclude** can affect one observation or the complete canonical identity;
-- **Merge** targets either a canonical person or a legacy annotation;
+- **Merge** targets either a canonical person or a scene-local annotation;
 - **Split identity here / range** moves observations in a half-open
   `[start, end)` interval to a new canonical identity and persists a cannot-link
   barrier so a later merge pass cannot immediately reconnect both partitions;
@@ -342,7 +344,7 @@ Queued and interrupted processing jobs use a process-independent database lease.
 The scene run ID, run revision, input fingerprint and full-document revision are
 still the publication guards; the lease adds an expiring owner token and a
 heartbeat that does not mutate the scene revision. Active leases cannot be
-stolen, stale or legacy missing-lease jobs are reclaimed, and an old owner cannot
+stolen, while processing work without an active lease is reclaimed; an old owner cannot
 publish after takeover. Terminal jobs clear the lease, while an invalid recorded
 input fingerprint fails closed and can be explicitly queued again from current
 inputs instead of remaining stuck forever.
@@ -441,7 +443,7 @@ than a single name-recognition model:
    reportable benchmark results; runtime smoothness is not ground truth.
 8. **Scale only after accuracy is measured:** add GPU production images,
    cross-job batching and a shared persistent cache. For multi-host scale,
-   replace the local recovery monitor with a durable shared queue while
+   evolve the compact DB job table into a brokered multi-host queue while
    retaining input/revision CAS and owner fencing.
 
 ## Verification

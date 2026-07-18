@@ -1,20 +1,20 @@
-import app.multi_pass as multi_pass_module
+import app.multi_pass_alignment as multi_pass_alignment
 
-from app.multi_pass import (
-    _copy_reference_identity_state,
-    _fuse_aligned_pass_identities,
-    _manual_clock_alignment,
-    _temporal_alignment,
+from app.multi_pass_alignment import (
     classify_pass_relation,
-    consensus_summary,
-    create_multi_pass_scene,
+    manual_clock_alignment,
     motion_dtw,
-    pass_quality,
+    temporal_alignment,
 )
-from app.schemas import MultiPassRequest
+from app.multi_pass_fusion import (
+    copy_reference_identity_state,
+    fuse_aligned_pass_identities,
+)
+from app.multi_pass_metrics import consensus_summary, pass_quality
+from app.project_http_contracts import ProjectCompositionRequest
 
 
-def _scene(*, tracks=10, ball=12, frames=30, calibration=0.8, verdict=None):
+def _scene(*, tracks=10, ball=12, frames=30, calibration=0.8, verdict="pass"):
     reconstruction = {
         "status": "ready",
         "frameCount": frames,
@@ -69,11 +69,23 @@ def test_pass_quality_does_not_reward_false_positive_counts_after_quality_reject
     assert accepted_with_less_evidence > rejected_with_many_detections
 
 
+def test_pass_quality_requires_the_current_qa_contract():
+    unverified = _scene(
+        tracks=22,
+        ball=30,
+        frames=60,
+        calibration=0.99,
+        verdict=None,
+    )
+
+    assert pass_quality(unverified) == 0.0
+
+
 def test_consensus_counts_independent_pass_evidence():
     summary = consensus_summary(
         [
-            {"status": "ready", "calibrationStatus": "ready", "ballSamples": 9, "trackCount": 12},
-            {"status": "ready", "calibrationStatus": "fallback", "ballSamples": 0, "trackCount": 8},
+            {"status": "ready", "qualityVerdict": "pass", "calibrationStatus": "ready", "ballSamples": 9, "trackCount": 12},
+            {"status": "ready", "qualityVerdict": "review", "calibrationStatus": "fallback", "ballSamples": 0, "trackCount": 8},
             {"status": "failed", "calibrationStatus": "fallback", "ballSamples": 0, "trackCount": 0},
         ]
     )
@@ -147,7 +159,7 @@ def test_reference_identity_copy_preserves_canonical_people_and_evidence():
     }
     target = {}
 
-    warnings = _copy_reference_identity_state(target, reference)
+    warnings = copy_reference_identity_state(target, reference)
 
     assert warnings == []
     assert target["canonicalPeople"] == reference["canonicalPeople"]
@@ -164,7 +176,7 @@ def test_reference_identity_copy_preserves_canonical_people_and_evidence():
 def test_reference_identity_copy_detaches_orphan_track_reference():
     target = {}
 
-    warnings = _copy_reference_identity_state(
+    warnings = copy_reference_identity_state(
         target,
         {
             "tracks": [{"id": "legacy", "canonicalPersonId": "missing-person"}],
@@ -231,7 +243,7 @@ def test_multi_pass_identity_fusion_enriches_reference_without_mixing_observatio
         observations=[{"observationId": "foreign-observation", "frameIndex": 4}],
     )
 
-    diagnostics = _fuse_aligned_pass_identities(
+    diagnostics = fuse_aligned_pass_identities(
         target,
         {"id": "reference-angle"},
         [_aligned_pass("reference-angle", []), _aligned_pass("source-angle", [source])],
@@ -255,7 +267,7 @@ def test_multi_pass_identity_fusion_enriches_reference_without_mixing_observatio
 def test_multi_pass_identity_fusion_abstains_for_weak_alignment():
     target = {"canonicalPeople": [_identity_person("reference-8", jerseyNumber="8")]}
 
-    diagnostics = _fuse_aligned_pass_identities(
+    diagnostics = fuse_aligned_pass_identities(
         target,
         {"id": "reference-angle"},
         [
@@ -285,7 +297,7 @@ def test_multi_pass_identity_fusion_abstains_for_ambiguous_or_conflicting_people
         _identity_person("wrong-number", jerseyNumber="9"),
     ]
 
-    diagnostics = _fuse_aligned_pass_identities(
+    diagnostics = fuse_aligned_pass_identities(
         target,
         {"id": "reference-angle"},
         [_aligned_pass("source-angle", sources)],
@@ -313,11 +325,11 @@ def test_manual_alignment_is_authoritative_over_motion_dtw(monkeypatch):
     ]
 
     monkeypatch.setattr(
-        multi_pass_module,
-        "_motion_signature",
+        multi_pass_alignment,
+        "motion_signature",
         lambda _scene: (_ for _ in ()).throw(AssertionError("DTW must not run")),
     )
-    alignment = _temporal_alignment(
+    alignment = temporal_alignment(
         reference,
         source,
         reference_segment,
@@ -336,7 +348,7 @@ def test_manual_alignment_rejects_non_monotonic_and_out_of_range_anchors():
     source = {"id": "source-angle", "duration": 6.0}
     segment = {"id": "source-segment"}
 
-    non_monotonic, non_monotonic_diagnostics = _manual_clock_alignment(
+    non_monotonic, non_monotonic_diagnostics = manual_clock_alignment(
         [
             {"sourceSceneId": "source-angle", "referenceTime": 1.0, "passTime": 4.0},
             {"sourceSceneId": "source-angle", "referenceTime": 7.0, "passTime": 2.0},
@@ -345,7 +357,7 @@ def test_manual_alignment_rejects_non_monotonic_and_out_of_range_anchors():
         source,
         segment,
     )
-    out_of_range, range_diagnostics = _manual_clock_alignment(
+    out_of_range, range_diagnostics = manual_clock_alignment(
         [
             {"segmentId": "source-segment", "referenceTime": 1.0, "passTime": 0.5},
             {"segmentId": "source-segment", "referenceTime": 9.0, "passTime": 5.0},
@@ -362,7 +374,7 @@ def test_manual_alignment_rejects_non_monotonic_and_out_of_range_anchors():
     assert "at-least-two-valid-anchors-required" in range_diagnostics["rejectionReasons"]
 
 
-def test_multi_pass_request_accepts_saved_manual_alignment_anchor_aliases():
+def test_project_composition_request_accepts_http_and_python_field_names():
     anchors = [
         {
             "segmentId": "segment-b",
@@ -373,13 +385,13 @@ def test_multi_pass_request_accepts_saved_manual_alignment_anchor_aliases():
         }
     ]
 
-    camel_case = MultiPassRequest.model_validate(
+    camel_case = ProjectCompositionRequest.model_validate(
         {
             "segment_ids": ["segment-a", "segment-b"],
             "manualAlignmentAnchors": anchors,
         }
     )
-    snake_case = MultiPassRequest.model_validate(
+    snake_case = ProjectCompositionRequest.model_validate(
         {
             "segment_ids": ["segment-a", "segment-b"],
             "manual_alignment_anchors": anchors,
@@ -388,71 +400,3 @@ def test_multi_pass_request_accepts_saved_manual_alignment_anchor_aliases():
 
     assert camel_case.manual_alignment_anchors == anchors
     assert snake_case.manual_alignment_anchors == anchors
-
-
-def test_create_multi_pass_scene_persists_manual_alignment_anchors(monkeypatch):
-    anchors = [
-        {
-            "segmentId": "segment-b",
-            "anchors": [
-                {"referenceTime": 0.0, "passTime": 0.2},
-                {"referenceTime": 5.0, "passTime": 4.8},
-            ],
-        }
-    ]
-    segments = [
-        {"id": "segment-a", "label": "A", "score": 0.9, "duration": 6.0},
-        {"id": "segment-b", "label": "B", "score": 0.8, "duration": 5.0},
-    ]
-    children = {
-        segment["id"]: {
-            "id": f"scene-{segment['id']}",
-            "duration": segment["duration"],
-            "payload": {
-                "videoAsset": {
-                    "id": "asset-1",
-                    "selectedSegmentId": segment["id"],
-                },
-                "matchBinding": None,
-                "teams": [{"id": "home"}, {"id": "away"}],
-            },
-        }
-        for segment in segments
-    }
-    parent = {
-        "id": "parent-scene",
-        "title": "Match",
-        "payload": {"videoAsset": {}, "teams": []},
-    }
-
-    monkeypatch.setattr(
-        multi_pass_module,
-        "materialize_segment_scene",
-        lambda _parent, segment: children[segment["id"]],
-    )
-    monkeypatch.setattr(
-        multi_pass_module,
-        "make_video_scene",
-        lambda scene_id, title, duration, video_asset: {
-            "id": scene_id,
-            "title": title,
-            "duration": duration,
-            "payload": {
-                "videoAsset": video_asset,
-                "matchBinding": None,
-                "teams": [{"id": "home"}, {"id": "away"}],
-            },
-        },
-    )
-    monkeypatch.setattr(
-        multi_pass_module,
-        "get_settings",
-        lambda: type("Settings", (), {"reconstruction_model": "yolo26n.pt"})(),
-    )
-    monkeypatch.setattr(multi_pass_module.scene_store, "put", lambda scene: scene)
-
-    scene = create_multi_pass_scene(parent, segments, manual_alignment_anchors=anchors)
-
-    saved = scene["payload"]["videoAsset"]["multiPass"]["manualAlignmentAnchors"]
-    assert saved == anchors
-    assert saved is not anchors

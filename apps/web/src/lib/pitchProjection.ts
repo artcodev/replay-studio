@@ -1,4 +1,4 @@
-import type { CalibrationEvidenceMarking } from '../types'
+import type { CalibrationEvidenceMarking } from '../types/calibration'
 
 type Point = [number, number]
 type Row3 = [number, number, number]

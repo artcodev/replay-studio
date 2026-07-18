@@ -6,7 +6,6 @@ import {
   identityReviewWorkerStatusLabel,
   inspectIdentityObservationDecision,
   linkReviewDecision,
-  manualRosterBindingDecision,
   rosterReviewDecision,
   topIdentityReviewObservations,
   type IdentityReviewCandidateDecision,
@@ -20,11 +19,19 @@ import {
   canonicalPersonDisplayName,
   canonicalPersonSourceTrackletCount,
   canonicalPersonStatusLabel,
-  identityConfidenceLabel,
+  identityConfidenceLabel as finitePercent,
   identityEvidenceKindLabel,
   topRosterCandidates,
 } from '../lib/identityResolution'
-import type { CanonicalIdentityEvidence, CanonicalPerson, ExternalPlayer } from '../types'
+import {
+  formatIdentityReviewTime as formatTime,
+  identityEvidenceDetail as evidenceDetail,
+  identityObservationBoxStyle as boxStyle,
+  identityRosterPlayerLabel as rosterPlayerLabel,
+} from '../features/identity-review/identityReviewPresentation'
+import { useIdentityRosterSelection } from '../features/identity-review/useIdentityRosterSelection'
+import type { CanonicalPerson } from '../types/identity'
+import type { ExternalPlayer } from '../types/match'
 
 const props = withDefaults(defineProps<{
   identity?: CanonicalPerson | null
@@ -80,88 +87,26 @@ const candidates = computed(() => props.identity
 const sourceTrackletCount = computed(() => props.identity
   ? canonicalPersonSourceTrackletCount(props.identity)
   : 0)
-const rosterSelection = ref(props.identity?.externalPlayerId ?? '')
-const rosterIdCounts = computed(() => {
-  const counts = new Map<string, number>()
-  for (const player of props.rosterPlayers) {
-    counts.set(player.id, (counts.get(player.id) ?? 0) + 1)
-  }
-  return counts
-})
-const sortedRosterPlayers = computed(() => [...props.rosterPlayers].sort((left, right) => (
-  String(left.team_name || left.team_id || '').localeCompare(String(right.team_name || right.team_id || ''))
-  || rosterNumberSortValue(left.number) - rosterNumberSortValue(right.number)
-  || left.name.localeCompare(right.name)
-  || left.id.localeCompare(right.id)
-)))
-const rosterSelectionCount = computed(() => rosterIdCounts.value.get(rosterSelection.value) ?? 0)
-const manualRosterBinding = computed(() => props.identity
-  ? manualRosterBindingDecision(
-      props.identity.canonicalPersonId,
-      props.identity.externalPlayerId,
-      rosterSelection.value,
-      props.rosterPlayers,
-    )
-  : null)
-const canBindRosterSelection = computed(() => Boolean(manualRosterBinding.value))
-const currentBindingMissingFromRoster = computed(() => Boolean(
-  props.identity?.externalPlayerId
-  && !rosterIdCounts.value.has(props.identity.externalPlayerId),
-))
-const currentRosterBindingLabel = computed(() => {
-  const externalPlayerId = props.identity?.externalPlayerId
-  if (!externalPlayerId) return ''
-  return rosterPlayerLabel(
-    props.rosterPlayers.find((player) => player.id === externalPlayerId)
-    ?? { id: externalPlayerId, name: externalPlayerId },
-  )
+const {
+  selection: rosterSelection,
+  idCounts: rosterIdCounts,
+  orderedPlayers: sortedRosterPlayers,
+  selectionCount: rosterSelectionCount,
+  decision: manualRosterBinding,
+  canBind: canBindRosterSelection,
+  currentBindingMissing: currentBindingMissingFromRoster,
+  currentBindingLabel: currentRosterBindingLabel,
+} = useIdentityRosterSelection({
+  identity: computed(() => props.identity),
+  players: computed(() => props.rosterPlayers),
 })
 
 watch(
   () => props.identity?.canonicalPersonId,
   () => {
     failedPreviewIds.value = new Set()
-    rosterSelection.value = props.identity?.externalPlayerId ?? ''
   },
 )
-
-watch(
-  () => props.identity?.externalPlayerId,
-  (externalPlayerId) => { rosterSelection.value = externalPlayerId ?? '' },
-)
-
-function finitePercent(value: number | null | undefined): string {
-  return identityConfidenceLabel(value)
-}
-
-function rosterNumberSortValue(value: string | null | undefined): number {
-  if (!value?.trim()) return Number.POSITIVE_INFINITY
-  const number = Number(value)
-  return Number.isFinite(number) ? number : Number.POSITIVE_INFINITY
-}
-
-function formatTime(seconds: number): string {
-  const safe = Number.isFinite(seconds) ? Math.max(0, seconds) : 0
-  const minutes = Math.floor(safe / 60)
-  const remainder = safe - minutes * 60
-  return `${String(minutes).padStart(2, '0')}:${remainder.toFixed(3).padStart(6, '0')}`
-}
-
-function evidenceDetail(evidence: CanonicalIdentityEvidence): string {
-  const parts: string[] = []
-  if (evidence.value !== null && evidence.value !== undefined && String(evidence.value).trim()) {
-    parts.push(String(evidence.value))
-  }
-  if (evidence.confidence !== null && evidence.confidence !== undefined) {
-    parts.push(finitePercent(evidence.confidence))
-  }
-  if (evidence.supportCount !== undefined) {
-    parts.push(evidence.sampleCount !== undefined
-      ? `${evidence.supportCount}/${evidence.sampleCount} samples`
-      : `${evidence.supportCount} samples`)
-  }
-  return parts.join(' · ') || 'Recorded evidence'
-}
 
 function previewSource(observation: IdentityReviewObservation): string | null {
   if (failedPreviewIds.value.has(observation.id)) return null
@@ -170,26 +115,6 @@ function previewSource(observation: IdentityReviewObservation): string | null {
 
 function markPreviewFailed(observation: IdentityReviewObservation) {
   failedPreviewIds.value = new Set(failedPreviewIds.value).add(observation.id)
-}
-
-function boxStyle(observation: IdentityReviewObservation): Record<string, string> | null {
-  const box = observation.bbox
-  const width = Number(observation.frameWidth)
-  const height = Number(observation.frameHeight)
-  if (
-    !box
-    || !Number.isFinite(width)
-    || !Number.isFinite(height)
-    || width <= 0
-    || height <= 0
-  ) return null
-  const clamp = (value: number) => Math.min(100, Math.max(0, value))
-  return {
-    left: `${clamp(box.x / width * 100)}%`,
-    top: `${clamp(box.y / height * 100)}%`,
-    width: `${clamp(box.width / width * 100)}%`,
-    height: `${clamp(box.height / height * 100)}%`,
-  }
 }
 
 function inspectFrame(observation: IdentityReviewObservation) {
@@ -212,15 +137,6 @@ function bindRosterSelection() {
   const decision = manualRosterBinding.value
   if (!decision || props.disabled) return
   emit('bind-candidate', decision)
-}
-
-function rosterPlayerLabel(player: ExternalPlayer): string {
-  const parts = [
-    player.number ? `#${player.number}` : null,
-    player.name,
-    player.team_name || player.team_id || null,
-  ].filter(Boolean)
-  return parts.join(' · ')
 }
 
 function unbindRoster() {

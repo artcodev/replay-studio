@@ -8,7 +8,12 @@ from app.field_keypoints import (
     calibration_from_pose_result,
     calibration_from_worker_result,
 )
-from app.reconstruction import Detection, TrackState, _attach_metric_positions
+from app.reconstruction_metric_projection import (
+    attach_metric_positions as _attach_metric_positions,
+)
+from app.reconstruction_person_detection_contract import Detection
+from app.reconstruction_track_state import TrackState
+from app.track_observation_accumulator import append_track_observation
 
 
 def _tensor(value):
@@ -142,7 +147,7 @@ def test_per_frame_metric_position_is_preserved_through_tracking():
         {"length": 105, "width": 68},
     )
     track = TrackState(id=1)
-    track.append(detection, frame_index=0, time=0.0)
+    append_track_observation(track, detection, frame_index=0, time=0.0)
 
     assert (detection.pitch_x, detection.pitch_z) == (12.0, 8.0)
     assert (balls[0]["pitchX"], balls[0]["pitchZ"]) == (2.0, 3.0)

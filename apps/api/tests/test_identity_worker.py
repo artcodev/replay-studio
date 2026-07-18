@@ -1,25 +1,14 @@
 import json
 from types import SimpleNamespace
 
-import httpx
 import pytest
 
-from app.identity_worker import (
-    IdentityWorkerError,
+from app.identity_worker_client import (
     embed_identity_frames,
     identity_worker_readiness,
 )
-
-
-class FakeResponse:
-    def __init__(self, payload):
-        self.payload = payload
-
-    def raise_for_status(self):
-        return None
-
-    def json(self):
-        return self.payload
+from app.identity_worker_contract import IdentityWorkerError
+from app.identity_worker_transport import IdentityWorkerTransportError
 
 
 def _settings(url="http://identity-worker:8091", batch_size=2):
@@ -51,8 +40,32 @@ def _fingerprint(identifier: str = "crop") -> str:
     return f"pixel-evidence-v1:{identifier}"
 
 
+def _cache():
+    return {
+        "schemaVersion": "identity-embedding-cache.v1",
+        "enabled": True,
+        "maxEntries": 4096,
+        "ttlSeconds": 86400.0,
+        "waitTimeoutSeconds": 900.0,
+        "size": 0,
+        "inFlight": 0,
+        "configurationError": None,
+        "hits": 0,
+        "misses": 0,
+        "stores": 0,
+        "evictions": 0,
+        "expirations": 0,
+        "corruptMisses": 0,
+        "inRequestDeduplicated": 0,
+        "concurrentDeduplicated": 0,
+        "waitTimeouts": 0,
+    }
+
+
 def test_readiness_is_disabled_without_url(monkeypatch):
-    monkeypatch.setattr("app.identity_worker.get_settings", lambda: _settings(url=""))
+    monkeypatch.setattr(
+        "app.identity_worker_client.get_settings", lambda: _settings(url="")
+    )
     assert identity_worker_readiness() == {
         "configured": False,
         "status": "disabled",
@@ -61,23 +74,22 @@ def test_readiness_is_disabled_without_url(monkeypatch):
 
 
 def test_readiness_requires_loaded_normalized_model(monkeypatch):
-    monkeypatch.setattr("app.identity_worker.get_settings", lambda: _settings())
+    monkeypatch.setattr("app.identity_worker_client.get_settings", lambda: _settings())
     monkeypatch.setattr(
-        "app.identity_worker.httpx.get",
-        lambda url, timeout: FakeResponse(
-            {
-                "status": "ready",
-                "backend": "prtreid-bpbreid-soccernet",
-                "dimension": 256,
-                "normalized": True,
-                "evidenceFingerprintVersion": "pixel-evidence-v1",
-                "device": "cpu",
-                "batchSize": 8,
-                "modelVersion": "model-v1",
-                "modelLoadSeconds": 4.2,
-                "soccerNetCommit": "reference-commit",
-            }
-        ),
+        "app.identity_worker_client.fetch_identity_readiness",
+        lambda url, timeout: {
+            "status": "ready",
+            "backend": "prtreid-bpbreid-soccernet",
+            "dimension": 256,
+            "normalized": True,
+            "evidenceFingerprintVersion": "pixel-evidence-v1",
+            "device": "cpu",
+            "batchSize": 8,
+            "modelVersion": "model-v1",
+            "modelLoadSeconds": 4.2,
+            "soccerNetCommit": "reference-commit",
+            "cache": _cache(),
+        },
     )
     result = identity_worker_readiness(timeout=1.5)
     assert result == {
@@ -96,12 +108,14 @@ def test_readiness_requires_loaded_normalized_model(monkeypatch):
 
 
 def test_readiness_is_nonfatal_when_worker_is_offline(monkeypatch):
-    monkeypatch.setattr("app.identity_worker.get_settings", lambda: _settings())
+    monkeypatch.setattr("app.identity_worker_client.get_settings", lambda: _settings())
 
     def offline(*_args, **_kwargs):
-        raise httpx.ConnectError("offline")
+        raise IdentityWorkerTransportError("offline")
 
-    monkeypatch.setattr("app.identity_worker.httpx.get", offline)
+    monkeypatch.setattr(
+        "app.identity_worker_client.fetch_identity_readiness", offline
+    )
     result = identity_worker_readiness()
     assert result["status"] == "unavailable"
     assert "offline" in result["detail"]
@@ -126,8 +140,8 @@ def test_client_batches_frames_and_preserves_rejected_items(monkeypatch, tmp_pat
         )
     calls = []
 
-    def fake_post(url, data, files, timeout):
-        manifest = json.loads(data["manifest"])
+    def fake_post(url, *, manifest, files, timeout):
+        manifest = json.loads(manifest)
         calls.append([item["frameIndex"] for item in manifest["frames"]])
         items = []
         for frame in manifest["frames"]:
@@ -147,8 +161,7 @@ def test_client_batches_frames_and_preserves_rejected_items(monkeypatch, tmp_pat
                     "evidenceFingerprint": _fingerprint(observation_id),
                 }
             )
-        return FakeResponse(
-            {
+        return {
                 "backend": "prtreid-bpbreid-soccernet",
                 "dimension": 256,
                 "normalized": True,
@@ -168,10 +181,11 @@ def test_client_batches_frames_and_preserves_rejected_items(monkeypatch, tmp_pat
                     "expiredCacheMissCount": 0,
                 },
             }
-        )
 
-    monkeypatch.setattr("app.identity_worker.get_settings", lambda: _settings(batch_size=2))
-    monkeypatch.setattr("app.identity_worker.httpx.post", fake_post)
+    monkeypatch.setattr(
+        "app.identity_worker_client.get_settings", lambda: _settings(batch_size=2)
+    )
+    monkeypatch.setattr("app.identity_worker_client.post_identity_batch", fake_post)
     updates = []
     result = embed_identity_frames(
         frames,
@@ -179,10 +193,18 @@ def test_client_batches_frames_and_preserves_rejected_items(monkeypatch, tmp_pat
     )
     assert calls == [[1, 2], [3]]
     assert updates == [(2, 3, 1), (3, 3, 2)]
-    assert set(result) == {"track-1:1", "track-1:2", "track-1:3"}
-    assert result["track-1:1"]["provider"] == "prtreid-bpbreid-soccernet"
-    assert result["track-1:2"]["usable"] is False
-    assert result["track-1:2"]["embedding"] is None
+    assert not isinstance(result, dict)
+    assert set(result.items_by_observation_id) == {
+        "track-1:1",
+        "track-1:2",
+        "track-1:3",
+    }
+    assert (
+        result.items_by_observation_id["track-1:1"]["provider"]
+        == "prtreid-bpbreid-soccernet"
+    )
+    assert result.items_by_observation_id["track-1:2"]["usable"] is False
+    assert result.items_by_observation_id["track-1:2"]["embedding"] is None
     assert result.diagnostics["requestedObservationCount"] == 3
     assert result.diagnostics["cacheHitCount"] == 2
     assert result.diagnostics["providerInferenceCount"] == 1
@@ -217,13 +239,12 @@ def test_client_rejects_model_version_change_between_http_batches(
 
     call_count = 0
 
-    def fake_post(_url, data, **_kwargs):
+    def fake_post(_url, *, manifest, **_kwargs):
         nonlocal call_count
         call_count += 1
-        frame = json.loads(data["manifest"])["frames"][0]
+        frame = json.loads(manifest)["frames"][0]
         observation_id = frame["observations"][0]["observationId"]
-        return FakeResponse(
-            {
+        return {
                 "backend": "prtreid-bpbreid-soccernet",
                 "dimension": 256,
                 "normalized": True,
@@ -244,12 +265,11 @@ def test_client_rejects_model_version_change_between_http_batches(
                     }
                 ],
             }
-        )
 
     monkeypatch.setattr(
-        "app.identity_worker.get_settings", lambda: _settings(batch_size=1)
+        "app.identity_worker_client.get_settings", lambda: _settings(batch_size=1)
     )
-    monkeypatch.setattr("app.identity_worker.httpx.post", fake_post)
+    monkeypatch.setattr("app.identity_worker_client.post_identity_batch", fake_post)
 
     with pytest.raises(
         IdentityWorkerError,
@@ -272,11 +292,10 @@ def test_client_rejects_non_normalized_embedding(monkeypatch, tmp_path):
     ]
     vector = _embedding()
     vector[0] = 2.0
-    monkeypatch.setattr("app.identity_worker.get_settings", lambda: _settings())
+    monkeypatch.setattr("app.identity_worker_client.get_settings", lambda: _settings())
     monkeypatch.setattr(
-        "app.identity_worker.httpx.post",
-        lambda *_args, **_kwargs: FakeResponse(
-            {
+        "app.identity_worker_client.post_identity_batch",
+        lambda *_args, **_kwargs: {
                 "backend": "prtreid-bpbreid-soccernet",
                 "dimension": 256,
                 "normalized": True,
@@ -296,17 +315,17 @@ def test_client_rejects_non_normalized_embedding(monkeypatch, tmp_path):
                         "evidenceFingerprint": _fingerprint(),
                     }
                 ],
-            }
-        ),
+            },
     )
     with pytest.raises(IdentityWorkerError, match="non-normalized"):
         embed_identity_frames(frames)
 
 
 def test_readiness_rejects_non_object_json_without_raising(monkeypatch):
-    monkeypatch.setattr("app.identity_worker.get_settings", lambda: _settings())
+    monkeypatch.setattr("app.identity_worker_client.get_settings", lambda: _settings())
     monkeypatch.setattr(
-        "app.identity_worker.httpx.get", lambda *_args, **_kwargs: FakeResponse([])
+        "app.identity_worker_client.fetch_identity_readiness",
+        lambda *_args, **_kwargs: [],
     )
 
     assert identity_worker_readiness()["status"] == "invalid-response"
@@ -339,19 +358,17 @@ def test_client_rejects_malformed_identity_item(
         "evidenceFingerprint": _fingerprint(),
         **mutation,
     }
-    monkeypatch.setattr("app.identity_worker.get_settings", lambda: _settings())
+    monkeypatch.setattr("app.identity_worker_client.get_settings", lambda: _settings())
     monkeypatch.setattr(
-        "app.identity_worker.httpx.post",
-        lambda *_args, **_kwargs: FakeResponse(
-            {
+        "app.identity_worker_client.post_identity_batch",
+        lambda *_args, **_kwargs: {
                 "backend": "prtreid-bpbreid-soccernet",
                 "dimension": 256,
                 "normalized": True,
                 "evidenceFingerprintVersion": "pixel-evidence-v1",
                 "modelVersion": "model-v1",
                 "items": [item],
-            }
-        ),
+            },
     )
 
     with pytest.raises(IdentityWorkerError, match=message):
@@ -363,12 +380,49 @@ def test_client_rejects_malformed_identity_item(
 def test_client_rejects_non_object_embedding_response(monkeypatch, tmp_path):
     path = tmp_path / "frame.jpg"
     path.write_bytes(b"jpeg")
-    monkeypatch.setattr("app.identity_worker.get_settings", lambda: _settings())
+    monkeypatch.setattr("app.identity_worker_client.get_settings", lambda: _settings())
     monkeypatch.setattr(
-        "app.identity_worker.httpx.post", lambda *_args, **_kwargs: FakeResponse([])
+        "app.identity_worker_client.post_identity_batch",
+        lambda *_args, **_kwargs: [],
     )
 
     with pytest.raises(IdentityWorkerError, match="top-level JSON"):
+        embed_identity_frames(
+            [(1, path, [{"observationId": "obs", "bbox": {"x": 1, "y": 2, "width": 30, "height": 60}}])]
+        )
+
+
+def test_client_rejects_unknown_wire_fields(monkeypatch, tmp_path):
+    path = tmp_path / "frame.jpg"
+    path.write_bytes(b"jpeg")
+    monkeypatch.setattr("app.identity_worker_client.get_settings", lambda: _settings())
+    monkeypatch.setattr(
+        "app.identity_worker_client.post_identity_batch",
+        lambda *_args, **_kwargs: {
+            "backend": "prtreid-bpbreid-soccernet",
+            "dimension": 256,
+            "normalized": True,
+            "evidenceFingerprintVersion": "pixel-evidence-v1",
+            "modelVersion": "model-v1",
+            "items": [
+                {
+                    "observationId": "obs",
+                    "frameIndex": 1,
+                    "usable": True,
+                    "quality": _quality(),
+                    "rejectionReasons": [],
+                    "embedding": _embedding(),
+                    "visibilityScores": None,
+                    "role": None,
+                    "roleConfidence": None,
+                    "evidenceFingerprint": _fingerprint(),
+                    "futureField": "must-fail-closed",
+                }
+            ],
+        },
+    )
+
+    with pytest.raises(IdentityWorkerError, match="unsupported fields: futureField"):
         embed_identity_frames(
             [(1, path, [{"observationId": "obs", "bbox": {"x": 1, "y": 2, "width": 30, "height": 60}}])]
         )
@@ -394,11 +448,10 @@ def test_client_reports_duplicate_pixel_evidence_across_http_batches(
             )
         )
 
-    def fake_post(_url, data, **_kwargs):
-        frame = json.loads(data["manifest"])["frames"][0]
+    def fake_post(_url, *, manifest, **_kwargs):
+        frame = json.loads(manifest)["frames"][0]
         observation_id = frame["observations"][0]["observationId"]
-        return FakeResponse(
-            {
+        return {
                 "backend": "prtreid-bpbreid-soccernet",
                 "dimension": 256,
                 "normalized": True,
@@ -419,12 +472,11 @@ def test_client_reports_duplicate_pixel_evidence_across_http_batches(
                     }
                 ],
             }
-        )
 
     monkeypatch.setattr(
-        "app.identity_worker.get_settings", lambda: _settings(batch_size=1)
+        "app.identity_worker_client.get_settings", lambda: _settings(batch_size=1)
     )
-    monkeypatch.setattr("app.identity_worker.httpx.post", fake_post)
+    monkeypatch.setattr("app.identity_worker_client.post_identity_batch", fake_post)
 
     result = embed_identity_frames(frames)
 

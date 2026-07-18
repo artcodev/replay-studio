@@ -1,11 +1,11 @@
+import type { CanonicalPerson } from '../types/identity'
+import type { TrackObservation } from '../types/tracking'
+import type { ExternalPlayer } from '../types/match'
 import type {
-  CanonicalPerson,
-  ExternalPlayer,
   IdentityReviewItem,
   IdentityReviewResponse,
   IdentityReviewWorkerHealth,
-  TrackObservation,
-} from '../types'
+} from '../types/identityReview'
 
 export type IdentityReviewBox = TrackObservation['bbox']
 
@@ -255,7 +255,10 @@ function reviewWorkerStatus(value: unknown): IdentityReviewWorkerStatus {
   return status in WORKER_STATUS_LABELS ? status : 'unknown'
 }
 
-function optionalCount(health: IdentityReviewWorkerHealth, keys: string[]): number | null {
+function optionalCount(
+  health: IdentityReviewWorkerHealth,
+  keys: (keyof IdentityReviewWorkerHealth)[],
+): number | null {
   for (const key of keys) {
     const value = health[key]
     if (typeof value === 'number' && Number.isFinite(value) && value >= 0) return value

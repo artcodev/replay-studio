@@ -24,7 +24,7 @@ RUN git clone --filter=blob:none https://github.com/SoccerNet/sn-gamestate.git /
 COPY models /models
 RUN test -s /models/pnl_SV_kp \
     && test -s /models/pnl_SV_lines
-COPY app ./app
+COPY calibration_worker_service ./calibration_worker_service
 
 EXPOSE 8090
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8090", "--workers", "1"]
+CMD ["uvicorn", "calibration_worker_service.main:app", "--host", "0.0.0.0", "--port", "8090", "--workers", "1"]

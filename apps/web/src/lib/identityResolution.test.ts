@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import type { CanonicalPerson, ExternalPlayer } from '../types'
+import type { CanonicalPerson } from '../types/identity'
+import type { ExternalPlayer } from '../types/match'
 import {
   canonicalPersonDisplayName,
   canonicalPersonSourceTrackletCount,
@@ -27,8 +28,8 @@ function canonicalPerson(overrides: Partial<CanonicalPerson> = {}): CanonicalPer
     memberTrackletIds: ['tracklet-1', 'tracklet-1', 'tracklet-8'],
     evidence: [],
     rosterCandidates: [
-      { externalPlayerId: 'player-10', confidence: 0.91, reasons: ['jersey number agrees'] },
-      { externalPlayerId: 'player-8', confidence: 0.74 },
+      { externalPlayerId: 'player-10', score: 0.91, reasons: ['jersey number agrees'] },
+      { externalPlayerId: 'player-8', score: 0.74 },
     ],
     conflicts: [],
     ...overrides,
@@ -56,10 +57,10 @@ describe('canonical identity presentation', () => {
   it('sorts candidates deterministically, hydrates roster metadata, and limits output', () => {
     const identity = canonicalPerson({
       rosterCandidates: [
-        { externalPlayerId: 'unknown-b', name: 'Unknown B', confidence: 0.5, rank: 2 },
-        { externalPlayerId: 'player-8', confidence: 0.9, rank: 3 },
-        { externalPlayerId: 'player-10', confidence: 0.9, rank: 1 },
-        { externalPlayerId: 'unknown-a', name: 'Unknown A', confidence: -2 },
+        { externalPlayerId: 'unknown-b', name: 'Unknown B', score: 0.5, rank: 2 },
+        { externalPlayerId: 'player-8', score: 0.9, rank: 3 },
+        { externalPlayerId: 'player-10', score: 0.9, rank: 1 },
+        { externalPlayerId: 'unknown-a', name: 'Unknown A', score: -2 },
       ],
     })
 

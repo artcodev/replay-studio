@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { trackPresenceAtTime, trackPresenceSummary } from './trackPresence'
-import type { Track } from '../types'
+import type { Track } from '../types/tracking'
 
 const track: Track = {
   id: 'player-7',

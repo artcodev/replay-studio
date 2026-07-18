@@ -8,7 +8,7 @@ import httpx
 
 from .config import get_settings
 from .field_keypoints import calibration_from_worker_result
-from .pitch_calibration import PitchCalibration
+from .pitch_calibration_contract import PitchCalibration
 
 
 class CalibrationWorkerError(RuntimeError):

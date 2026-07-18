@@ -4,14 +4,19 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from app.reconstruction import (
-    Detection,
-    ReconstructionError,
-    TrackState,
-    _capture_detection_observations,
-    _merge_scene_track_documents,
-    _scene_tracks,
-    analyze_scene_frame,
+from app.reconstruction_errors import ReconstructionError
+from app.reconstruction_person_detection_contract import Detection
+from app.reconstruction_track_state import TrackState
+from app.track_observation_accumulator import append_track_observation
+from app.reconstruction_frame_analysis import analyze_scene_frame
+from app.reconstruction_identity_scene_corrections import (
+    merge_scene_track_documents as _merge_scene_track_documents,
+)
+from app.reconstruction_reid_evidence import (
+    capture_detection_observations as _capture_detection_observations,
+)
+from app.reconstruction_scene_track_publisher import (
+    publish_scene_tracks as _scene_tracks,
 )
 
 
@@ -94,11 +99,11 @@ def _scene(tracks: list[dict], *, observation_schema: bool) -> dict:
 
 def _patch_analysis(monkeypatch, detections: list[Detection]) -> None:
     result = SimpleNamespace(orig_img=np.zeros((540, 960, 3), dtype=np.uint8))
-    monkeypatch.setattr("app.reconstruction._frame_paths", lambda _: [(FRAME_PATH, 0.0)])
-    monkeypatch.setattr("app.reconstruction._load_model", lambda _: object())
-    monkeypatch.setattr("app.reconstruction._predict_frame", lambda *_: result)
+    monkeypatch.setattr("app.reconstruction_frame_analysis.frame_paths", lambda _: [(FRAME_PATH, 0.0)])
+    monkeypatch.setattr("app.reconstruction_frame_analysis.load_model", lambda _: object())
+    monkeypatch.setattr("app.ultralytics_person_inference.predict_frame", lambda *_: result)
     monkeypatch.setattr(
-        "app.reconstruction._person_detections",
+        "app.ultralytics_person_inference.parse_person_detections",
         lambda _: (detections, []),
     )
 
@@ -120,14 +125,17 @@ def test_raw_bbox_and_source_frame_survive_camera_stabilization(monkeypatch):
     detection.x = 410.0
     detection.y = 350.0
     track = TrackState(id=1)
-    track.append(detection, frame_index=0, time=0.0)
+    append_track_observation(track, detection, frame_index=0, time=0.0)
 
     point = track.points[0]
     assert point["frameIndex"] == FRAME_INDEX
     assert point["bbox"] == {"x": 100.0, "y": 160.0, "width": 20.0, "height": 40.0}
     assert (point["px"], point["py"]) == (410.0, 350.0)
 
-    monkeypatch.setattr("app.reconstruction._frame_paths", lambda _: [(FRAME_PATH, 0.0)])
+    monkeypatch.setattr(
+        "app.reconstruction_scene_track_publisher.frame_paths",
+        lambda _: [(FRAME_PATH, 0.0)],
+    )
     rendered = _scene_tracks(
         [track],
         {1: "home"},
@@ -209,10 +217,10 @@ def test_rejected_metric_fragment_keeps_authoritative_video_identity(monkeypatch
             position_uncertainty_metres=0.8,
         )
         _capture_detection_observations([detection], frame_index)
-        track.append(detection, frame_index=index, time=time)
+        append_track_observation(track, detection, frame_index=index, time=time)
 
     monkeypatch.setattr(
-        "app.reconstruction._frame_paths",
+        "app.reconstruction_scene_track_publisher.frame_paths",
         lambda _: [(Path(f"/tmp/frame_{index:05d}.jpg"), time) for index, time, *_ in samples],
     )
     rendered = _scene_tracks(
@@ -288,8 +296,11 @@ def test_unprojected_image_observation_is_published_without_fake_pitch(monkeypat
     )
     for sample_index, detection in enumerate((projected, missing_metric)):
         _capture_detection_observations([detection], FRAME_INDEX + sample_index)
-        track.append(detection, frame_index=sample_index, time=sample_index * 0.1)
-    monkeypatch.setattr("app.reconstruction._frame_paths", lambda _: [(FRAME_PATH, 0.0)])
+        append_track_observation(track, detection, frame_index=sample_index, time=sample_index * 0.1)
+    monkeypatch.setattr(
+        "app.reconstruction_scene_track_publisher.frame_paths",
+        lambda _: [(FRAME_PATH, 0.0)],
+    )
 
     published = _scene_tracks(
         [track],
@@ -369,79 +380,34 @@ def test_inferred_track_without_observation_never_claims_video_bbox(monkeypatch)
     assert result["people"][0]["observationId"] is None
 
 
-def test_legacy_scene_without_exact_frame_calibration_remains_unmatched(monkeypatch):
-    track = _track("legacy-nearby", -39.0, -8.8, observed=True)
+def test_scene_without_observation_schema_requires_rebuild_for_identity_linking(monkeypatch):
+    track = _track("pre-schema-track", 0.0, 0.0, observed=True)
+    scene = _scene([track], observation_schema=False)
+    scene["payload"]["videoAsset"]["reconstruction"]["calibration"] = {
+        "frameEvidence": [
+            {
+                "sourceFrameIndex": FRAME_INDEX,
+                "status": "accepted",
+                "solutionStatus": "direct-accepted",
+                "confidence": 0.9,
+                "imageToPitch": [
+                    [0.1, 0.0, -10.0],
+                    [0.0, 0.1, -20.0],
+                    [0.0, 0.0, 1.0],
+                ],
+            }
+        ]
+    }
     _patch_analysis(
         monkeypatch,
-        [Detection(110, 200, 20, 40, 0.8, np.zeros(12, dtype=np.float32))],
+        [Detection(100, 200, 20, 40, 0.8, np.zeros(12, dtype=np.float32))],
     )
 
-    result = analyze_scene_frame(_scene([track], observation_schema=False), 0.0)
+    result = analyze_scene_frame(scene, 0.0)
 
     assert result["people"][0]["matchedTrackId"] is None
     assert result["identityLinking"]["mode"] == "rebuild-required"
     assert any("rebuild tracks" in warning.lower() for warning in result["warnings"])
-
-
-def test_legacy_exact_observed_frame_match_is_conservative(monkeypatch):
-    scene = _scene([_track("legacy-exact", 0.0, 0.0, observed=True)], observation_schema=False)
-    scene["payload"]["videoAsset"]["reconstruction"]["calibration"] = {
-        "frameEvidence": [
-            {
-                "sourceFrameIndex": FRAME_INDEX,
-                "status": "accepted",
-                "solutionStatus": "direct-accepted",
-                "confidence": 0.9,
-                "imageToPitch": [
-                    [0.1, 0.0, -10.0],
-                    [0.0, 0.1, -20.0],
-                    [0.0, 0.0, 1.0],
-                ],
-            }
-        ]
-    }
-    _patch_analysis(
-        monkeypatch,
-        [Detection(100, 200, 20, 40, 0.8, np.zeros(12, dtype=np.float32))],
-    )
-
-    result = analyze_scene_frame(scene, 0.0)
-
-    assert result["people"][0]["matchedTrackId"] == "legacy-exact"
-    assert result["people"][0]["matchSource"] == "legacy-observed-frame"
-
-
-def test_legacy_exact_frame_ambiguity_fails_closed(monkeypatch):
-    scene = _scene(
-        [
-            _track("legacy-a", 0.0, 0.0, observed=True),
-            _track("legacy-b", 0.5, 0.0, observed=True),
-        ],
-        observation_schema=False,
-    )
-    scene["payload"]["videoAsset"]["reconstruction"]["calibration"] = {
-        "frameEvidence": [
-            {
-                "sourceFrameIndex": FRAME_INDEX,
-                "status": "accepted",
-                "solutionStatus": "direct-accepted",
-                "confidence": 0.9,
-                "imageToPitch": [
-                    [0.1, 0.0, -10.0],
-                    [0.0, 0.1, -20.0],
-                    [0.0, 0.0, 1.0],
-                ],
-            }
-        ]
-    }
-    _patch_analysis(
-        monkeypatch,
-        [Detection(100, 200, 20, 40, 0.8, np.zeros(12, dtype=np.float32))],
-    )
-
-    result = analyze_scene_frame(scene, 0.0)
-
-    assert result["people"][0]["matchedTrackId"] is None
 
 
 def test_scene_identity_merge_unions_observations_by_frame_and_prefers_manual():

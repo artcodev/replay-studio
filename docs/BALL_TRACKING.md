@@ -44,14 +44,46 @@ The implementation boundaries are:
 
 - `apps/api/app/ball_frames.py` — deterministic dense-frame extraction and
   cache;
-- `apps/api/app/ball_detection.py` — detector-neutral candidate contract,
-  tiled Ultralytics inference, and WASB adapters;
+- `apps/api/app/ball_detection_contract.py` and
+  `apps/api/app/ball_detector_factory.py` — provider-neutral contract and
+  explicit backend selection;
+- `apps/api/app/ball_detection_configuration.py` — immutable queued backend,
+  checkpoint and failure-policy input;
+- `apps/api/app/reconstruction_ball_detector_selection.py` — reconstruction
+  detector/fallback construction from that immutable input;
+- `apps/api/app/ultralytics_ball_detector.py` and
+  `apps/api/app/wasb_ball_detector.py` — provider-specific inference adapters;
 - `services/ball-worker/` — isolated pinned WASB-SBDT runtime;
-- `apps/api/app/ball_tracking.py` — global multi-hypothesis trajectory
-  resolution;
-- `apps/api/app/reconstruction.py` — calibration, provenance, persistence,
-  progress, and explicit fallback integration;
-- `apps/api/app/quality_metrics.py` — reconstruction QA metrics and gates.
+- `apps/api/app/reconstruction_ball_detection.py` — dense source/cache,
+  checkpoint and per-frame attempt orchestration;
+- `apps/api/app/reconstruction_ball_roi.py` — adaptive ROI and reacquisition
+  policy;
+- `apps/api/app/reconstruction_ball_projection_contract.py` — immutable
+  dense-frame projection input;
+- `apps/api/app/reconstruction_bounded_homography.py` and
+  `apps/api/app/reconstruction_dense_ball_projection_context.py` — bounded
+  homography interpolation and auditable temporal camera/calibration choice;
+- `apps/api/app/reconstruction_ball_candidate_projection.py` and
+  `apps/api/app/reconstruction_ball_projection_status.py` — candidate metric
+  materialization and final publication status;
+- `apps/api/app/ball_tracking_contract.py` and
+  `apps/api/app/ball_tracking_candidates.py` — strict resolver inputs and
+  candidate normalization;
+- `apps/api/app/ball_tracking_solver.py` — cohesive beam/Viterbi path solve;
+- `apps/api/app/ball_trajectory_projection.py` and
+  `apps/api/app/ball_trajectory_materialization.py` — metric projection,
+  editor keyframes and diagnostics;
+- `apps/api/app/ball_tracking.py` — thin normalize → solve → materialize
+  orchestration;
+- `apps/api/app/reconstruction_ball_phase.py` — reconstruction phase
+  composition and publication payload;
+- `apps/api/app/reconstruction_ball_trajectory.py` — pure automatic/manual
+  scene trajectory rules;
+- `apps/api/app/reconstruction_ball_trajectory_command.py` — artifact and
+  scene-repository publication for an editor trajectory command;
+- `apps/api/app/quality_measurements.py` — typed reconstruction measurements.
+- `apps/api/app/quality_metric_report.py` — stable QA metric contract.
+- `apps/api/app/quality_gate_report.py` — versioned QA gate assessment.
 
 ## Detector backends
 
@@ -61,7 +93,7 @@ The editor exposes the same three backend identifiers accepted by the API.
 | --- | --- | --- | --- | --- |
 | Roboflow · tiled | `dedicated-ultralytics` | Default | One-class football checkpoint, native-resolution overlapping tiles, batched tile inference, duplicate suppression | Single-frame model; CPU inference is expensive; a visually ball-like object can still be proposed |
 | WASB · temporal | `wasb-service` | Accuracy challenger | Official three-frame soccer-ball heatmap model, temporal evidence, isolated and checksum-verified runtime | Optional worker and checkpoint are required; CPU is slow; heatmap confidence is not interchangeable with YOLO confidence |
-| COCO · fallback | `generic-ultralytics` | Compatibility and diagnosis only | Uses the already-loaded person model and requires no extra worker/checkpoint | Generic COCO class 32 is materially weaker for a tiny broadcast football and should not be the accuracy baseline |
+| COCO · fallback | `generic-ultralytics` | Explicit failure recovery and diagnostics only | Uses the already-loaded person model and requires no extra worker/checkpoint | Generic COCO class 32 is materially weaker for a tiny broadcast football and should not be the accuracy baseline |
 
 ### Dedicated Roboflow/Ultralytics backend
 
@@ -88,6 +120,25 @@ shasum -a 256 apps/api/models/football-ball-detection.pt
 The detector does not download a missing model implicitly. A missing or
 unreadable checkpoint therefore remains an observable configuration error.
 
+Dense dedicated inference uses a deterministic adaptive schedule. Frames `0`,
+the final frame, every fifth frame, and every declared camera-cut boundary run
+the full tiled scan. Intermediate frames rerun up to three exact source tiles
+that produced the strongest candidates on the previous frame. Reusing the
+original tile is important: this checkpoint can produce a different result for
+a centred crop even when that crop still contains the ball. Strongly
+overlapping candidate tiles are deduplicated; seeds without tile provenance use
+a shifted 640-pixel window that retains full context at image borders.
+
+An empty ROI result triggers a full tiled scan on the same timestamp. A
+non-empty false-positive ROI can still hide a true ball until the next periodic
+scan, so the default worst-case blind window is four frames. Set
+`BALL_DETECTION_FULL_SCAN_INTERVAL=1` to disable adaptive ROI and restore a full
+scan on every frame for gold-set validation. This strategy applies only to
+`dedicated-ultralytics`; generic COCO and WASB keep their original contracts.
+Per-frame `scanMode` and top-level `adaptiveRoi` diagnostics report global/ROI
+frame counts, crop counts, same-frame reacquisitions, the estimated all-global
+baseline, and crop reduction ratio.
+
 ### WASB temporal challenger
 
 `wasb-service` uses the offline window `[previous, current, next]` and requests
@@ -104,8 +155,10 @@ The worker separates liveness from readiness:
 - `GET /health/ready` verifies the checkpoint checksum, imports the pinned
   model source, strictly loads every state-dict key, and moves the model to the
   configured device;
-- `POST /detect` implements the JSON/base64 contract used by the API;
-- `POST /v1/detections` exposes the batch multipart contract.
+- `POST /v1/detections` is the only inference contract. The API uploads image
+  bytes as multipart files and sends a strict JSON manifest. Repeated manifest
+  `fileIndex` values express temporal edge padding without duplicating image
+  bytes.
 
 The pinned WASB checkpoint SHA-256 is:
 
@@ -124,9 +177,9 @@ Fallbacks are never presented as results from the requested model:
    breaker keeps later frames on that explicit fallback instead of repeating
    the same worker timeout hundreds of times.
 2. A failed dedicated detector may cross to generic COCO under the same policy.
-3. If the configured fallback also fails, a legacy COCO observation is mapped
+3. If the configured fallback also fails, a sampled generic COCO observation is mapped
    to at most one nearest dense frame within half a dense-frame interval; it is
-   never duplicated across the clip. It is tagged `legacy-coco-fallback`.
+   never duplicated across the clip. It is tagged `generic-coco-fallback`.
 4. If native dense frames cannot be decoded, the sampled reconstruction frames
    are used and `frameSource.source` becomes `sampled-frame-fallback`.
 
@@ -156,7 +209,8 @@ The cache lives below the media asset:
 ```
 
 The key includes source name, byte size, modification time, scene range, and
-requested FPS. A manifest and expected frame count make partial caches invalid.
+requested FPS. A manifest and expected frame count make partial decoded-frame
+caches invalid.
 Extraction first writes to a temporary directory and renames it only after a
 complete FFmpeg run, so an interrupted decode is not reused. Rebuilding the
 same inputs reuses decoded frames. A persistent per-key `flock` serializes the
@@ -167,17 +221,30 @@ Detector inference has a second, independent cache:
 
 ```text
 <MEDIA_ROOT>/<asset-id>/ball-detections/<cache-key>.json
+<MEDIA_ROOT>/<asset-id>/ball-detections/<cache-key>.partial.json
 ```
 
 Its key contains the dense-frame cache key, cache schema, and the complete
 detector input fingerprint, including checkpoint identity and tiling/confidence
-settings. Only a complete run produced entirely by the requested primary
-backend is published. A run containing any failed or fallback frame is never
-cached, so a temporary WASB outage cannot become sticky. The artifact stores
-post-NMS image-space candidates, not the resolved trajectory or pitch
-projection: calibration changes, annotations, and resolver changes are always
-re-evaluated on rebuild. Writes use a temporary file, `fsync`, and atomic
-replacement; corrupt or stale files are treated as cache misses.
+settings. The `.json` artifact remains the publishable complete cache: only a
+run produced entirely by the requested primary backend may populate it. A run
+containing any failed or fallback frame is never published as complete, so a
+temporary WASB outage cannot become sticky.
+
+The separate `.partial.json` artifact is a resumable, clean contiguous prefix,
+not a valid completed result. It is atomically refreshed every
+`BALL_DETECTION_CHECKPOINT_INTERVAL` clean primary frames (four by default).
+After cancellation or process interruption, an exact contract and timestamp
+match resumes inference after that prefix. A failed/fallback frame stops the
+prefix from growing, and successful publication of the complete cache removes
+the partial artifact. Both artifacts store post-NMS image-space candidates, not
+the resolved trajectory or pitch projection: calibration changes, annotations,
+and resolver changes are always re-evaluated on rebuild. Writes use a temporary
+file, `fsync`, and atomic replacement; corrupt or stale files are treated as
+cache misses. Complete and partial publication also share a persistent
+per-contract `flock`: concurrent retries may extend a prefix, but a late fenced
+worker cannot replace it with fewer frames or recreate partial state after the
+complete cache exists.
 
 On the bundled 1920 x 1080 Shot 01 sample, the first 102-frame tiled CPU pass
 takes roughly 4–5 minutes on the development machine. An identical rebuild
@@ -259,8 +326,8 @@ Important fields include:
 
 - `status`: `ready` or `degraded`;
 - `requestedBackend` and the complete input/configuration fingerprint;
-- `frameSource`: cache key, cadence, scene range, cache hit, and fallback
-  reason;
+- `frameSource`: cache key, cadence, scene range, cache hit, fallback reason,
+  detector-checkpoint hit, and resumed/checkpointed frame counts;
 - `frameCount`, `candidateCount`, and `framesWithCandidates`;
 - `backendCounts`, showing the effective backend on every frame;
 - observed, inferred, and occluded counts and coverage;
@@ -330,10 +397,14 @@ The API reads these variables from `.env` through `apps/api/app/config.py`.
 | `BALL_DETECTION_TILE_SIZE` | `640` | Square tile size in source pixels |
 | `BALL_DETECTION_TILE_OVERLAP` | `0.20` | Fractional overlap between adjacent tiles |
 | `BALL_DETECTION_INFERENCE_BATCH_SIZE` | `8` | Tiles submitted per Ultralytics inference batch |
+| `BALL_DETECTION_CHECKPOINT_INTERVAL` | `4` | Clean primary frames between resumable detector-prefix checkpoints |
+| `BALL_DETECTION_FULL_SCAN_INTERVAL` | `5` | Dedicated-backend frames between mandatory full tiled scans; `1` disables ROI optimization |
+| `BALL_DETECTION_ROI_REGION_COUNT` | `3` | Maximum previous-candidate tiles evaluated on an intermediate frame |
+| `BALL_DETECTION_ROI_PADDING` | `320` | Half-size of the 640px fallback ROI for seeds without source-tile provenance |
 | `BALL_DETECTION_NMS_IOU` | `0.10` | Full-frame duplicate suppression threshold |
 | `BALL_DETECTION_MAX_CANDIDATES` | `12` | Maximum detector candidates retained per frame |
 | `BALL_ANALYSIS_FRAME_RATE` | `25` | Maximum dense decode FPS |
-| `BALL_WASB_WORKER_URL` | `http://127.0.0.1:8092/detect` | WASB JSON endpoint |
+| `BALL_WASB_WORKER_URL` | `http://127.0.0.1:8092/v1/detections` | Canonical WASB multipart endpoint |
 | `BALL_WASB_TIMEOUT` | `120` | Per-request timeout in seconds |
 | `BALL_DETECTION_FAILURE_POLICY` | `fallback` | Explicit fallback with a circuit breaker, or strict `raise` |
 | `RECONSTRUCTION_DEVICE` | `cpu` | Device passed to the local dedicated/generic Ultralytics backends |
@@ -429,9 +500,10 @@ Tune in this order:
    the resolver needs alternate low-confidence hypotheses in difficult frames.
 
 The first request includes model load/warm-up. Report warm and cold latency
-separately. Cache hits eliminate FFmpeg decoding, not model inference. WASB CPU
-is suitable for correctness checks; a GPU-backed service is the intended path
-for interactive challenger comparisons.
+separately. A dense-frame cache hit eliminates FFmpeg decoding; a complete
+detector-cache hit eliminates model inference, while a partial checkpoint skips
+only its validated clean prefix. WASB CPU is suitable for correctness checks; a
+GPU-backed service is the intended path for interactive challenger comparisons.
 
 ## Troubleshooting
 

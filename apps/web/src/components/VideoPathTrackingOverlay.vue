@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed } from 'vue'
-import type { Keyframe } from '../types'
+import type { Keyframe } from '../types/tracking'
 import {
   projectPitchEdgeInContext,
   projectPitchPointInContext,

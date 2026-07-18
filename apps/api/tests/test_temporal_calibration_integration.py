@@ -4,12 +4,13 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from app.pitch_calibration import PitchCalibration
-from app.reconstruction import (
-    Detection,
-    _resolve_temporal_frame_calibrations,
+from app.pitch_calibration_contract import PitchCalibration
+from app.reconstruction_calibration_resolution import (
+    resolve_temporal_frame_calibrations as _resolve_temporal_frame_calibrations,
 )
-from app.temporal_calibration import CameraMotionEstimate, normalize_homography
+from app.reconstruction_person_detection_contract import Detection
+from app.camera_motion_contract import CameraMotionEstimate
+from app.temporal_homography import normalize_homography
 
 
 PITCH = {"length": 105, "width": 68}
@@ -128,11 +129,11 @@ def test_resolver_uses_future_anchor_and_publishes_temporal_provenance(
     h2 = normalize_homography(h0 @ frame_1_to_0 @ frame_2_to_1)
     evidence[2]["imageToPitch"] = h2.tolist()
     monkeypatch.setattr(
-        "app.reconstruction.cv2.imread",
+        "app.reconstruction_calibration_resolution.cv2.imread",
         lambda _path: np.zeros((540, 960, 3), dtype=np.uint8),
     )
     monkeypatch.setattr(
-        "app.reconstruction.calibration_alignment_metrics",
+        "app.reconstruction_calibration_resolution.calibration_alignment_metrics",
         lambda _image, _calibration: None,
     )
 
@@ -191,7 +192,7 @@ def test_resolver_keeps_conflicting_temporal_candidates_unresolved(
     evidence[2]["imageToPitch"] = right.tolist()
     # No target image validation should run for an ambiguity with no selection.
     monkeypatch.setattr(
-        "app.reconstruction.cv2.imread",
+        "app.reconstruction_calibration_resolution.cv2.imread",
         lambda _path: pytest.fail("ambiguous target must not reach target validation"),
     )
 
@@ -245,11 +246,11 @@ def test_target_line_validation_can_veto_temporal_recovery(
         },
     )
     monkeypatch.setattr(
-        "app.reconstruction.cv2.imread",
+        "app.reconstruction_calibration_resolution.cv2.imread",
         lambda _path: np.zeros((540, 960, 3), dtype=np.uint8),
     )
     monkeypatch.setattr(
-        "app.reconstruction.calibration_alignment_metrics",
+        "app.reconstruction_calibration_resolution.calibration_alignment_metrics",
         lambda _image, _calibration: bad_alignment,
     )
 

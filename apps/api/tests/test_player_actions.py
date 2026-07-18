@@ -1,17 +1,24 @@
 import asyncio
 from copy import deepcopy
+from unittest.mock import patch
 
 import httpx
 import pytest
+from fastapi import HTTPException
 from pydantic import ValidationError
 
 from app.main import app
-from app.player_actions import (
-    PlayerActionError,
+import app.project_resource_access as resource_access
+from app.player_action_commands import (
     delete_player_action,
     upsert_player_action,
 )
-from app.schemas import PlayerActionUpsertRequest
+from app.player_action_planning import (
+    PlayerActionError,
+    apply_player_action_delete,
+    apply_player_action_upsert,
+)
+from app.player_action_contracts import PlayerActionUpsertRequest
 
 
 def _automatic_action(identifier: str = "suggestion-1") -> dict:
@@ -83,14 +90,21 @@ async def _async_request(method: str, path: str, **kwargs):
 
 
 def _request(method: str, path: str, **kwargs):
-    return asyncio.run(_async_request(method, path, **kwargs))
+    def owned_scene(_project_id: str, scene_id: str):
+        scene = resource_access.scenes.get(scene_id)
+        if scene is None:
+            raise HTTPException(status_code=404, detail="Scene not found in project")
+        return scene
+
+    with patch.object(resource_access, "project_scene_or_404", side_effect=owned_scene):
+        return asyncio.run(_async_request(method, path, **kwargs))
 
 
 def test_manual_action_is_normalized_and_preserves_automatic_suggestions(monkeypatch):
     scene = _scene()
     persisted = []
     monkeypatch.setattr(
-        "app.player_actions.scene_store.put",
+        "app.player_action_commands.scenes.put",
         lambda value: persisted.append(deepcopy(value)) or value,
     )
 
@@ -115,11 +129,11 @@ def test_manual_action_is_normalized_and_preserves_automatic_suggestions(monkeyp
 def test_generated_action_id_is_nonempty_and_stable_across_update():
     scene = _scene()
     request = _manual_request(id=None, keypoints=[])
-    created = upsert_player_action(scene, request, persist=False)
+    created = apply_player_action_upsert(scene, request)
     assert created["id"].startswith("action-")
 
     created_at = created["createdAt"]
-    updated = upsert_player_action(
+    updated = apply_player_action_upsert(
         scene,
         {
             **request,
@@ -128,25 +142,11 @@ def test_generated_action_id_is_nonempty_and_stable_across_update():
             "start_time": 2.2,
             "end_time": 2.8,
         },
-        persist=False,
     )
     assert updated["id"] == created["id"]
     assert updated["type"] == "header"
     assert updated["createdAt"] == created_at
     assert len(scene["payload"]["playerActions"]) == 2
-
-
-def test_legacy_scene_track_id_is_a_valid_canonical_key():
-    scene = _scene()
-    scene["payload"].pop("canonicalPeople")
-    scene["payload"]["tracks"] = [{"id": "legacy-player"}]
-
-    action = upsert_player_action(
-        scene,
-        _manual_request(canonical_person_id="legacy-player"),
-        persist=False,
-    )
-    assert action["canonicalPersonId"] == "legacy-player"
 
 
 @pytest.mark.parametrize(
@@ -171,34 +171,31 @@ def test_legacy_scene_track_id_is_a_valid_canonical_key():
 )
 def test_manual_action_domain_validation_is_fail_closed(overrides, message):
     with pytest.raises(PlayerActionError, match=message):
-        upsert_player_action(
+        apply_player_action_upsert(
             _scene(),
             _manual_request(**overrides),
-            persist=False,
         )
 
 
 def test_action_id_cannot_change_owner():
     scene = _scene()
-    upsert_player_action(scene, _manual_request(), persist=False)
+    apply_player_action_upsert(scene, _manual_request())
     with pytest.raises(PlayerActionError, match="cannot be reassigned"):
-        upsert_player_action(
+        apply_player_action_upsert(
             scene,
             _manual_request(canonical_person_id="canonical-away-8"),
-            persist=False,
         )
 
 
 def test_manual_endpoint_cannot_overwrite_or_delete_automatic_suggestion():
     scene = _scene()
     with pytest.raises(PlayerActionError, match="cannot be overwritten"):
-        upsert_player_action(
+        apply_player_action_upsert(
             scene,
             _manual_request(id="suggestion-1", canonical_person_id="canonical-away-8"),
-            persist=False,
         )
     with pytest.raises(PlayerActionError, match="cannot be deleted"):
-        delete_player_action(scene, "suggestion-1", persist=False)
+        apply_player_action_delete(scene, "suggestion-1")
     assert scene["payload"]["playerActions"] == [_automatic_action()]
 
 
@@ -207,18 +204,18 @@ def test_corrupt_duplicate_saved_ids_are_rejected_without_mutation():
     scene["payload"]["playerActions"].append(deepcopy(_automatic_action()))
     before = deepcopy(scene)
     with pytest.raises(PlayerActionError, match="ids are not unique"):
-        upsert_player_action(scene, _manual_request(), persist=False)
+        apply_player_action_upsert(scene, _manual_request())
     with pytest.raises(PlayerActionError, match="ids are not unique"):
-        delete_player_action(scene, "suggestion-1", persist=False)
+        apply_player_action_delete(scene, "suggestion-1")
     assert scene == before
 
 
 def test_delete_removes_only_requested_manual_action(monkeypatch):
     scene = _scene()
-    upsert_player_action(scene, _manual_request(), persist=False)
+    apply_player_action_upsert(scene, _manual_request())
     persisted = []
     monkeypatch.setattr(
-        "app.player_actions.scene_store.put",
+        "app.player_action_commands.scenes.put",
         lambda value: persisted.append(deepcopy(value)) or value,
     )
 
@@ -270,14 +267,13 @@ def test_request_schema_accepts_camel_and_snake_case_and_forbids_server_fields()
 def test_scene_duration_is_the_only_action_upper_time_bound():
     scene = _scene()
     scene["duration"] = 180.0
-    action = upsert_player_action(
+    action = apply_player_action_upsert(
         scene,
         _manual_request(
             start_time=140.0,
             end_time=150.0,
             keypoints=[{"kind": "contact", "time": 145.0}],
         ),
-        persist=False,
     )
     assert action["startTime"] == 140.0
     assert action["endTime"] == 150.0
@@ -286,15 +282,15 @@ def test_scene_duration_is_the_only_action_upper_time_bound():
 def test_player_action_post_api_persists_camel_case_contract(monkeypatch):
     scene = _scene()
     persisted = []
-    monkeypatch.setattr("app.main.scene_store.get", lambda _: deepcopy(scene))
+    monkeypatch.setattr("app.project_resource_access.scenes.get", lambda _: deepcopy(scene))
     monkeypatch.setattr(
-        "app.player_actions.scene_store.put",
+        "app.player_action_commands.scenes.put",
         lambda value: persisted.append(deepcopy(value)) or value,
     )
 
     response = _request(
         "POST",
-        "/api/scenes/action-scene/player-actions",
+        "/api/projects/project-test/scenes/action-scene/player-actions",
         json={
             "id": "client-action-8",
             "canonicalPersonId": "canonical-home-7",
@@ -322,8 +318,8 @@ def test_player_action_api_rejects_edits_during_reconstruction(
 ):
     scene = _scene()
     scene["payload"]["videoAsset"]["reconstruction"]["status"] = status
-    monkeypatch.setattr("app.main.scene_store.get", lambda _: scene)
-    path = "/api/scenes/action-scene/player-actions"
+    monkeypatch.setattr("app.project_resource_access.scenes.get", lambda _: scene)
+    path = "/api/projects/project-test/scenes/action-scene/player-actions"
     if method == "POST":
         response = _request(
             method,
@@ -344,23 +340,23 @@ def test_player_action_api_rejects_edits_during_reconstruction(
 
 def test_player_action_delete_api_returns_updated_scene(monkeypatch):
     scene = _scene()
-    upsert_player_action(scene, _manual_request(), persist=False)
-    monkeypatch.setattr("app.main.scene_store.get", lambda _: scene)
-    monkeypatch.setattr("app.player_actions.scene_store.put", lambda value: value)
+    apply_player_action_upsert(scene, _manual_request())
+    monkeypatch.setattr("app.project_resource_access.scenes.get", lambda _: scene)
+    monkeypatch.setattr("app.player_action_commands.scenes.put", lambda value: value)
 
     response = _request(
         "DELETE",
-        "/api/scenes/action-scene/player-actions/manual-action-1",
+        "/api/projects/project-test/scenes/action-scene/player-actions/manual-action-1",
     )
     assert response.status_code == 200
     assert response.json()["payload"]["playerActions"] == [_automatic_action()]
 
 
 def test_player_action_api_reports_missing_scene_person_and_action(monkeypatch):
-    monkeypatch.setattr("app.main.scene_store.get", lambda _: None)
+    monkeypatch.setattr("app.project_resource_access.scenes.get", lambda _: None)
     missing_scene = _request(
         "POST",
-        "/api/scenes/missing/player-actions",
+        "/api/projects/project-test/scenes/missing/player-actions",
         json={
             "canonicalPersonId": "canonical-home-7",
             "type": "run",
@@ -371,11 +367,11 @@ def test_player_action_api_reports_missing_scene_person_and_action(monkeypatch):
     assert missing_scene.status_code == 404
 
     scene = _scene()
-    monkeypatch.setattr("app.main.scene_store.get", lambda _: deepcopy(scene))
-    monkeypatch.setattr("app.player_actions.scene_store.put", lambda value: value)
+    monkeypatch.setattr("app.project_resource_access.scenes.get", lambda _: deepcopy(scene))
+    monkeypatch.setattr("app.player_action_commands.scenes.put", lambda value: value)
     missing_person = _request(
         "POST",
-        "/api/scenes/action-scene/player-actions",
+        "/api/projects/project-test/scenes/action-scene/player-actions",
         json={
             "canonicalPersonId": "canonical-missing",
             "type": "run",
@@ -386,6 +382,6 @@ def test_player_action_api_reports_missing_scene_person_and_action(monkeypatch):
     assert missing_person.status_code == 404
     missing_action = _request(
         "DELETE",
-        "/api/scenes/action-scene/player-actions/manual-missing",
+        "/api/projects/project-test/scenes/action-scene/player-actions/manual-missing",
     )
     assert missing_action.status_code == 404

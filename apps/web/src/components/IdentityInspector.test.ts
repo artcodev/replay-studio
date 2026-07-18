@@ -1,7 +1,8 @@
 import { createSSRApp } from 'vue'
 import { renderToString } from '@vue/server-renderer'
 import { describe, expect, it } from 'vitest'
-import type { CanonicalPerson, ExternalPlayer } from '../types'
+import type { CanonicalPerson } from '../types/identity'
+import type { ExternalPlayer } from '../types/match'
 import IdentityInspector from './IdentityInspector.vue'
 
 const roster: ExternalPlayer[] = [
@@ -35,7 +36,7 @@ function identity(overrides: Partial<CanonicalPerson> = {}): CanonicalPerson {
     rosterCandidates: [{
       externalPlayerId: 'player-10',
       rank: 1,
-      confidence: 0.88,
+      score: 0.88,
       reasons: ['jersey number agrees', 'team agrees'],
     }],
     conflicts: [{

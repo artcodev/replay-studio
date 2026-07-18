@@ -130,13 +130,25 @@ FrameManifest (точные PTS, shot/cut)
 backend, а `projectionSource` — откуда взялась именно применённая матрица. Эти
 поля нельзя заменять общим confidence.
 
-Пока идёт миграция, тот же массив может находиться в compatibility-поле
-`reconstruction.calibrationFrames`. QA evaluator читает оба варианта.
+Массив хранится только в каноническом
+`reconstruction.calibration.frameEvidence`. Дублирующее поле
+`reconstruction.calibrationFrames` удалено: QA evaluator и Vue читают один
+контракт.
+
+Полная диагностика identity/ReID/OCR публикуется как неизменяемый
+content-addressed artifact. `reconstruction.artifactManifest` содержит его
+SHA-256, schema version и backend-neutral `artifact://` URI; в
+`reconstruction.diagnostics.identity` остаются только компактные scalar
+метрики для QA и UI. Identity review загружает artifact с обязательной
+проверкой schema, размера и checksum и явно возвращает ошибку, если evidence
+потерян или повреждён.
 
 ## 5. Реализованные runtime-метрики
 
-Вычисление находится в `apps/api/app/quality_metrics.py`. Оно не зависит от
-YOLO/PyTorch и не мутирует сцену.
+Публичный use case находится в `apps/api/app/quality_metrics.py`, а само
+вычисление разделено на `quality_measurements.py`, `quality_metric_report.py`
+и `quality_gate_report.py`. Чистые слои не зависят от YOLO/PyTorch,
+HTTP/хранилища и не мутируют сцену.
 
 | Metric | Как считается | Что обнаруживает |
 |---|---|---|
@@ -148,7 +160,7 @@ YOLO/PyTorch и не мутирует сцену.
 | `semanticAlignmentF1P10` | Десятый процентиль bidirectional line F1 | Белые пиксели совпали случайно или не покрывают модель поля |
 | `visiblePitchSideAgreement` | Доля left/right votes за доминирующую сторону | Mirror flips внутри одного shot |
 | `projectionFallbackRatio` | screen-relative observations / observations с provenance | Скрытое смешивание метров и экранных координат |
-| `boundaryClampRatio` | Явные clamp flags; для legacy — точные попадания в границу как proxy | Скопление ошибочных точек на краях поля |
+| `boundaryClampRatio` | Явные clamp flags; при отсутствии provenance — точные попадания в границу как явно помеченный conservative proxy | Скопление ошибочных точек на краях поля |
 | `playerSpeedViolationRatio` | Сегменты игрока быстрее 14 м/с | ID switch, скачок homography, неверная ассоциация |
 | `ballSpeedViolationRatio` | Сегменты мяча быстрее 50 м/с | Перескок между ложными ball candidates |
 | `trackContinuity` | observations / ожидаемые samples между первым и последним наблюдением | Пропуски внутри трека |
@@ -312,8 +324,8 @@ report = evaluate_reconstruction_quality(scene, frame_evidence)
 
 ```bash
 cd apps/api
-../../.venv/bin/python -m app.quality_metrics scene.json
-../../.venv/bin/python -m app.quality_metrics scene.json --fail-on reject
+../../.venv/bin/python -m app.quality_cli scene.json
+../../.venv/bin/python -m app.quality_cli scene.json --fail-on reject
 ```
 
 `--fail-on review` делает отсутствующие обязательные доказательства ошибкой CI;

@@ -1,13 +1,18 @@
 # WASB ball worker
 
 Optional server boundary for the pinned WASB-SBDT soccer model. It exposes
-the official three-frame HRNet checkpoint without importing its legacy
-PyTorch runtime into the main API process.
+the official three-frame HRNet checkpoint without importing its older pinned
+PyTorch environment into the main API process.
 
 The service never substitutes a random, generic, or fake detector. Liveness
 only proves that HTTP is serving; readiness verifies the checkpoint SHA-256,
 imports the pinned HRNet source, loads every state-dict key strictly, and moves
 the model to the requested device.
+
+Internally, the provider-neutral candidate/status contract, environment
+configuration, verified HRNet loader, affine/component geometry, inference
+runtime, and provider factory are separate owners. `main.py` only composes the
+contract with the factory; there is no aggregate provider facade.
 
 ## Pinned assets
 
@@ -35,8 +40,6 @@ calibrated probability.
 - `GET /health/live` — process liveness; does not claim the model works.
 - `GET /health/ready` — real asset verification and model load.
 - `POST /v1/detections` — repeated multipart `frames` plus a JSON `manifest`.
-- `POST /detect` — JSON/base64 compatibility endpoint for
-  `apps/api/app/ball_detection.py::WasbServiceBallDetector`.
 
 Example batch manifest:
 
@@ -44,6 +47,7 @@ Example batch manifest:
 {
   "contractVersion": 1,
   "maxCandidates": 12,
+  "targetIndex": 1,
   "frames": [
     {"fileIndex": 0, "frameIndex": 120, "timestampMs": 4000},
     {"fileIndex": 1, "frameIndex": 121, "timestampMs": 4040},
@@ -99,7 +103,7 @@ The API integration needs these values when WASB is selected:
 
 ```text
 BALL_DETECTION_BACKEND=wasb-service
-BALL_WASB_WORKER_URL=http://ball-worker:8092/detect
+BALL_WASB_WORKER_URL=http://ball-worker:8092/v1/detections
 ```
 
 The complete detector, resolver, QA, and fallback contract is documented in
@@ -113,7 +117,7 @@ the API; this worker itself has no silent fallback.
 
 ## Local test without Torch or checkpoint loading
 
-The contract suite injects a fake provider and does not import the legacy
+The contract suite injects a fake provider and does not import the pinned
 model runtime:
 
 ```bash

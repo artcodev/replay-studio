@@ -1,4 +1,4 @@
-import type { Keyframe } from '../types'
+import type { Keyframe } from '../types/tracking'
 
 export function interpolateKeyframes(keyframes: Keyframe[], time: number): Keyframe {
   if (keyframes.length === 0) return { t: time, x: 0, y: 0, z: 0, confidence: 0 }

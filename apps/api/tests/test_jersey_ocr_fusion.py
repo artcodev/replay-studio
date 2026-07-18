@@ -5,16 +5,21 @@ import random
 
 import pytest
 
-from app.identity_resolver import IdentityTracklet, resolve_global_identities
-from app.jersey_ocr_fusion import (
+from app.identity_resolution_contract import IdentityTracklet
+from app.identity_resolver import resolve_identities
+from app.jersey_ocr_contract import (
     JerseyFusionConfig,
     JerseyOcrObservation,
-    RosterPlayer,
+    normalize_jersey_number,
+)
+from app.jersey_ocr_fusion import (
     aggregate_canonical_people,
     aggregate_tracklet_evidence,
     aggregate_tracklets,
+)
+from app.jersey_roster_candidates import (
+    RosterPlayer,
     generate_roster_candidates,
-    normalize_jersey_number,
 )
 
 
@@ -430,7 +435,7 @@ def test_summary_fields_are_compatible_with_identity_resolver_contract() -> None
         ),
     ]
 
-    result = resolve_global_identities(tracklets)
+    result = resolve_identities(tracklets)
 
     assert len(result.groups) == 1
     assert result.groups[0].jersey_number == "8"
@@ -448,7 +453,6 @@ def test_unique_exact_roster_match_is_still_review_only() -> None:
     assert [item.external_player_id for item in result.candidates] == ["player-8"]
     assert result.candidates[0].requires_manual_confirmation is True
     assert result.requires_manual_confirmation is True
-    assert result.auto_bind_external_player_id is None
     assert result.to_payload()[0] == {
         "externalPlayerId": "player-8",
         "name": "Alex Eight",
@@ -480,7 +484,6 @@ def test_roster_duplicate_numbers_are_all_preserved_and_team_match_ranks_first()
         "away-8",
     ]
     assert all(item.requires_manual_confirmation for item in result.candidates)
-    assert result.auto_bind_external_player_id is None
 
 
 def test_roster_prior_cannot_generate_candidate_from_team_alone() -> None:
@@ -493,7 +496,6 @@ def test_roster_prior_cannot_generate_candidate_from_team_alone() -> None:
 
     assert result.candidates == ()
     assert result.reason == "reliable-jersey-required"
-    assert result.auto_bind_external_player_id is None
 
 
 def test_provisional_number_does_not_generate_roster_candidates() -> None:
@@ -612,6 +614,5 @@ def test_property_roster_candidate_generation_never_auto_binds() -> None:
             for index in range(size)
         ]
         result = generate_roster_candidates(evidence, roster, team_id="home")
-        assert result.auto_bind_external_player_id is None
         assert result.requires_manual_confirmation is True
         assert all(item.requires_manual_confirmation for item in result.candidates)

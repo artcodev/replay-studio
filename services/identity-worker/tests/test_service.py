@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import nullcontext
 import io
 import json
 import time
@@ -9,15 +10,17 @@ import time
 import httpx
 import numpy as np
 from PIL import Image
+import pytest
 
 from identity_worker_service.cache import IdentityEmbeddingCache
-from identity_worker_service.main import QualityPolicy, create_app
-from identity_worker_service.providers import (
+from identity_worker_service.evidence import QualityPolicy
+from identity_worker_service.main import create_app
+from identity_worker_service.provider_contract import (
     EmbeddingSample,
-    PRTReIDProvider,
     ProviderEmbedding,
     ProviderUnavailable,
 )
+from identity_worker_service.prtreid_provider import PRTReIDProvider
 
 
 class FakeProvider:
@@ -83,6 +86,79 @@ def test_production_provider_never_loads_without_verified_assets(monkeypatch, tm
     with np.testing.assert_raises_regex(ProviderUnavailable, "checkpoint is missing"):
         provider.load()
     assert provider.loaded is False
+
+
+class _TensorResult:
+    def __init__(self, value) -> None:
+        self.value = np.asarray(value)
+
+    def detach(self):
+        return self
+
+    def cpu(self):
+        return self
+
+    def numpy(self):
+        return self.value
+
+
+class _InferenceTorch:
+    @staticmethod
+    def no_grad():
+        return nullcontext()
+
+
+def _loaded_production_provider(role_logits: np.ndarray) -> PRTReIDProvider:
+    provider = PRTReIDProvider()
+    provider._loaded = True
+    provider._torch = _InferenceTorch()
+    provider._feature_extractor = lambda images, external_parts_masks=None: images
+    vector = np.zeros((len(role_logits), 256), dtype=np.float32)
+    vector[:, 0] = 3.0
+    vector[:, 1] = 4.0
+    provider._extract_test_embeddings = lambda _raw, _parts: (
+        _TensorResult(vector),
+        None,
+        None,
+        None,
+        {"globl": _TensorResult(role_logits)},
+    )
+    return provider
+
+
+def test_production_role_logits_use_stable_softmax_without_changing_embedding() -> None:
+    # Direct exp(logit) overflows here; subtracting the maximum must still
+    # produce the same bounded player probability.
+    logits = np.asarray([[996.0, 1000.0, 998.0, 1007.0, 1001.0]], dtype=np.float32)
+    provider = _loaded_production_provider(logits)
+
+    [result] = provider.embed(
+        [EmbeddingSample("outside-unit-range", np.zeros((80, 40, 3), dtype=np.uint8))]
+    )
+
+    expected_weights = np.exp(logits[0] - logits[0].max())
+    expected_confidence = float(expected_weights[3] / expected_weights.sum())
+    assert result.role == "player"
+    assert result.role_confidence is not None
+    assert 0.0 < result.role_confidence < 1.0
+    assert result.role_confidence == pytest.approx(expected_confidence)
+    np.testing.assert_allclose(result.embedding[:2], [0.6, 0.8], atol=1e-6)
+    assert np.linalg.norm(result.embedding) == pytest.approx(1.0)
+
+
+def test_non_finite_role_logits_omit_role_but_keep_embedding() -> None:
+    provider = _loaded_production_provider(
+        np.asarray([[0.0, np.nan, 1.0, 2.0, 3.0]], dtype=np.float32)
+    )
+
+    [result] = provider.embed(
+        [EmbeddingSample("non-finite-role", np.zeros((80, 40, 3), dtype=np.uint8))]
+    )
+
+    assert result.role is None
+    assert result.role_confidence is None
+    np.testing.assert_allclose(result.embedding[:2], [0.6, 0.8], atol=1e-6)
+    assert np.linalg.norm(result.embedding) == pytest.approx(1.0)
 
 
 def _jpeg(pattern: str = "sharp", size: tuple[int, int] = (96, 128)) -> bytes:

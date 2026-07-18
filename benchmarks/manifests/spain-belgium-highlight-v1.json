@@ -1,0 +1,35 @@
+{
+  "$schema": "../schema/benchmark-manifest-v1.schema.json",
+  "schemaVersion": "1.0",
+  "benchmark": {
+    "id": "spain-belgium-highlight-v1",
+    "name": "Spain–Belgium highlight reconstruction",
+    "description": "Draft labeling manifest for the local Spain–Belgium highlight video.",
+    "status": "draft",
+    "annotationRevision": "unlabelled",
+    "coordinateSystem": {
+      "image": "pixels-top-left",
+      "pitch": "metres-centre-origin-xz"
+    },
+    "labelingNotes": "No gold annotations have been committed yet. This draft must not be used for accuracy claims."
+  },
+  "evaluation": {
+    "personIouThreshold": 0.5,
+    "ballPointThresholdPx": 24.0
+  },
+  "samples": [
+    {
+      "id": "opening-wide-shot",
+      "source": {
+        "path": "videos/Highlights_Spain_2-1_Belgium_World_Cup_2026.mp4",
+        "segment": {
+          "startSeconds": 0.0,
+          "endSeconds": 1.0
+        }
+      },
+      "groundTruth": {
+        "frames": []
+      }
+    }
+  ]
+}

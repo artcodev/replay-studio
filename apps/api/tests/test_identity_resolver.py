@@ -4,12 +4,8 @@ from math import sqrt
 
 import pytest
 
-from app.identity_resolver import (
-    IdentityResolverConfig,
-    IdentityTracklet,
-    resolve_global_identities,
-    resolve_identities,
-)
+from app.identity_resolution_contract import IdentityResolverConfig, IdentityTracklet
+from app.identity_resolver import resolve_identities
 
 
 def _embedding_with_distance(distance: float) -> tuple[float, float]:
@@ -576,7 +572,7 @@ def test_resolution_is_deterministic_for_reversed_input_order() -> None:
     ]
 
     forward = resolve_identities(tracklets)
-    reverse = resolve_global_identities(list(reversed(tracklets)))
+    reverse = resolve_identities(list(reversed(tracklets)))
 
     assert forward == reverse
     assert forward.groups[0].id == "identity:a"

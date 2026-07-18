@@ -5,16 +5,16 @@ import cv2
 import numpy as np
 import pytest
 
-import app.pitch_calibration as pitch_calibration_module
-from app.pitch_calibration import (
-    PitchCalibration,
-    calibrate_pitch,
+import app.pitch_line_calibration as pitch_line_calibration_module
+from app.pitch_anchor_calibration import calibration_from_anchors
+from app.pitch_calibration_contract import PitchCalibration
+from app.pitch_calibration_quality import (
     calibration_alignment_error,
     calibration_alignment_metrics,
-    calibration_from_anchors,
-    projected_pitch_markings,
     semantic_line_evidence,
 )
+from app.pitch_geometry import projected_pitch_markings
+from app.pitch_line_calibration import calibrate_pitch
 
 
 def _patch_bounded_line_search(monkeypatch):
@@ -28,38 +28,38 @@ def _patch_bounded_line_search(monkeypatch):
         dtype=np.float32,
     )
     monkeypatch.setattr(
-        pitch_calibration_module,
+        pitch_line_calibration_module,
         "pitch_line_mask",
         lambda image: np.zeros(image.shape[:2], dtype=np.uint8),
     )
     monkeypatch.setattr(
-        pitch_calibration_module,
+        pitch_line_calibration_module,
         "_orientation_families",
         lambda _mask: (0.0, 90.0),
     )
     monkeypatch.setattr(
-        pitch_calibration_module,
+        pitch_line_calibration_module,
         "_candidate_lines",
         lambda *_args: lines,
     )
     monkeypatch.setattr(
-        pitch_calibration_module,
+        pitch_line_calibration_module,
         "_candidate_pairs",
         lambda *_args: [pair, pair, pair, pair],
     )
     monkeypatch.setattr(
-        pitch_calibration_module,
+        pitch_line_calibration_module,
         "_quad_points",
         lambda *_args: quad.copy(),
     )
-    monkeypatch.setattr(pitch_calibration_module, "_valid_quad", lambda *_args: True)
+    monkeypatch.setattr(pitch_line_calibration_module, "_valid_quad", lambda *_args: True)
     monkeypatch.setattr(
-        pitch_calibration_module,
+        pitch_line_calibration_module,
         "_plausible_camera",
         lambda *_args: True,
     )
     monkeypatch.setattr(
-        pitch_calibration_module,
+        pitch_line_calibration_module,
         "_score_homography",
         lambda *_args: (0.9, 4, 0.9, 1),
     )

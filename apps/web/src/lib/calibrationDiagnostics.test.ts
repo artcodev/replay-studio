@@ -6,7 +6,7 @@ import {
   calibrationPreviewWarnings,
   calibrationRejectionReasonLabel,
 } from './calibrationDiagnostics'
-import type { CalibrationFrameEvidence, PitchCalibrationDraft } from '../types'
+import type { CalibrationFrameEvidence, PitchCalibrationDraft } from '../types/calibration'
 
 const draft: PitchCalibrationDraft = {
   sceneId: 'shot-01',

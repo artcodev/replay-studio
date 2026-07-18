@@ -6,7 +6,9 @@ from pathlib import Path
 
 import pytest
 
-from validation_harness import WorkerUnavailable, load_manifest, run_http_validation
+from model_validation.manifest_loader import load_manifest
+from model_validation.orchestration import run_http_validation
+from model_validation.worker_transport import WorkerUnavailable
 
 
 def _real_manifest():

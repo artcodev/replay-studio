@@ -1,13 +1,14 @@
 import { createSSRApp } from 'vue'
 import { renderToString } from '@vue/server-renderer'
 import { describe, expect, it } from 'vitest'
-import type { PlayerAction } from '../types'
-import PlayerActionTimeline, {
+import type { PlayerAction } from '../types/playerActions'
+import PlayerActionTimeline from './PlayerActionTimeline.vue'
+import {
   clampPlayerActionTime,
   layoutPlayerActions,
   normalizePlayerAction,
   reducePlayerAction,
-} from './PlayerActionTimeline.vue'
+} from '../features/player-actions/playerActionTimelineDomain'
 
 function playerAction(overrides: Partial<PlayerAction> = {}): PlayerAction {
   return {

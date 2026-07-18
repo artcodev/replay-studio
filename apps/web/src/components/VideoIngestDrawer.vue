@@ -1,9 +1,16 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
-import { api } from '../lib/api'
-import type { VideoAsset } from '../types'
+import { mediaClient } from '../lib/api/media'
+import type { VideoAsset } from '../types/media'
 
-const props = defineProps<{ open: boolean }>()
+const props = withDefaults(defineProps<{
+  open: boolean
+  projectId?: string | null
+  projectTitle?: string | null
+}>(), {
+  projectId: null,
+  projectTitle: null,
+})
 const emit = defineEmits<{
   close: []
   ready: [asset: VideoAsset]
@@ -50,8 +57,9 @@ function onDrop(event: DragEvent) {
 }
 
 async function pollAsset(id: string) {
+  if (!props.projectId) return
   try {
-    asset.value = await api.video(id)
+    asset.value = await mediaClient.get(props.projectId, id)
     if (asset.value.status === 'ready') {
       uploading.value = false
       emit('ready', asset.value)
@@ -62,6 +70,11 @@ async function pollAsset(id: string) {
       error.value = asset.value.error || 'Video processing failed.'
       return
     }
+    if (asset.value.status === 'cancelled') {
+      uploading.value = false
+      error.value = 'Video processing was cancelled.'
+      return
+    }
     pollTimer = window.setTimeout(() => pollAsset(id), 650)
   } catch (cause) {
     uploading.value = false
@@ -70,14 +83,19 @@ async function pollAsset(id: string) {
 }
 
 async function submit() {
-  if (!selectedFile.value || uploading.value) return
+  if (!selectedFile.value || !props.projectId || uploading.value) return
   uploading.value = true
   uploadProgress.value = 1
   error.value = null
   try {
-    asset.value = await api.uploadVideo(selectedFile.value, title.value, (value) => {
-      uploadProgress.value = Math.max(1, Math.min(99, value))
-    })
+    asset.value = await mediaClient.upload(
+      props.projectId,
+      selectedFile.value,
+      title.value,
+      (value) => {
+        uploadProgress.value = Math.max(1, Math.min(99, value))
+      },
+    )
     await pollAsset(asset.value.id)
   } catch (cause) {
     uploading.value = false
@@ -115,7 +133,9 @@ onBeforeUnmount(reset)
           <div><p class="eyebrow">Video ingestion</p><h2>Build from a clip</h2></div>
           <button class="icon-button" :disabled="uploading" @click="emit('close')">×</button>
         </div>
-        <p class="drawer-copy">Upload a gameplay clip or highlight montage. We split it into continuous shots and open the strongest reconstruction candidate automatically.</p>
+        <p v-if="projectTitle" class="drawer-project">Project · <strong>{{ projectTitle }}</strong></p>
+        <p class="drawer-copy">Upload a gameplay clip or highlight montage. We split it into continuous shots and open the strongest shot candidate for review.</p>
+        <p v-if="!projectId" class="ingest-error" role="alert">Choose or create a project before uploading video.</p>
 
         <button
           class="drop-zone"
@@ -146,7 +166,7 @@ onBeforeUnmount(reset)
             <div :class="{ active: uploading && !asset, done: asset }"><i>01</i><span><strong>Upload</strong><small>Keep the source private</small></span></div>
             <div :class="{ active: asset?.stage.includes('proxy'), done: (asset?.progress || 0) > 58 }"><i>02</i><span><strong>Normalize</strong><small>H.264 browser proxy</small></span></div>
             <div :class="{ active: asset?.stage.includes('frames'), done: (asset?.progress || 0) > 90 }"><i>03</i><span><strong>Sample frames</strong><small>10 FPS analysis input</small></span></div>
-            <div :class="{ active: asset?.stage.includes('scene') || asset?.stage.includes('moments') || asset?.stage.includes('players'), done: asset?.status === 'ready' }"><i>04</i><span><strong>Reconstruct</strong><small>Rank shots, track players and sync</small></span></div>
+            <div :class="{ active: asset?.stage.includes('scene') || asset?.stage.includes('moments'), done: asset?.status === 'ready' }"><i>04</i><span><strong>Prepare moments</strong><small>Rank shots for explicit reconstruction</small></span></div>
           </div>
         </div>
 
@@ -159,7 +179,7 @@ onBeforeUnmount(reset)
 
         <div class="ingest-footer">
           <p><span>LOCAL PROCESSING</span> Source video is stored in the project media volume.</p>
-          <button class="button primary" :disabled="!selectedFile || uploading" @click="submit">
+          <button class="button primary" :disabled="!selectedFile || !projectId || uploading" @click="submit">
             {{ uploading ? stage : 'Process clip' }}
           </button>
         </div>

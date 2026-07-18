@@ -1,0 +1,106 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://replay-studio.local/schemas/predictions-v1.schema.json",
+  "title": "Replay Studio benchmark prediction export v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "benchmarkId", "run", "samples"],
+  "properties": {
+    "$schema": { "type": "string" },
+    "schemaVersion": { "const": "1.0" },
+    "benchmarkId": { "type": "string", "minLength": 1 },
+    "run": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["id", "pipelineVersion"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "pipelineVersion": { "type": "string", "minLength": 1 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "modelVersions": {
+          "type": "object",
+          "additionalProperties": { "type": "string" }
+        }
+      }
+    },
+    "samples": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["sampleId", "frames"],
+        "properties": {
+          "sampleId": { "type": "string", "minLength": 1 },
+          "frames": {
+            "type": "array",
+            "items": { "$ref": "#/$defs/predictionFrame" }
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "point": {
+      "type": "array",
+      "prefixItems": [{ "type": "number" }, { "type": "number" }],
+      "minItems": 2,
+      "maxItems": 2
+    },
+    "bbox": {
+      "type": "array",
+      "prefixItems": [
+        { "type": "number" },
+        { "type": "number" },
+        { "type": "number", "exclusiveMinimum": 0 },
+        { "type": "number", "exclusiveMinimum": 0 }
+      ],
+      "minItems": 4,
+      "maxItems": 4
+    },
+    "predictionFrame": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["frameIndex"],
+      "properties": {
+        "frameIndex": { "type": "integer", "minimum": 0 },
+        "persons": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["trackId", "bbox", "confidence"],
+            "properties": {
+              "trackId": { "type": "string", "minLength": 1 },
+              "bbox": { "$ref": "#/$defs/bbox" },
+              "confidence": { "type": "number", "minimum": 0, "maximum": 1 }
+            }
+          }
+        },
+        "ball": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["center", "confidence"],
+          "properties": {
+            "center": { "$ref": "#/$defs/point" },
+            "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+            "source": { "type": "string" }
+          }
+        },
+        "calibrationPoints": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["id"],
+            "properties": {
+              "id": { "type": "string", "minLength": 1 },
+              "image": { "$ref": "#/$defs/point" },
+              "pitch": { "$ref": "#/$defs/point" }
+            },
+            "anyOf": [{ "required": ["image"] }, { "required": ["pitch"] }]
+          }
+        }
+      }
+    }
+  }
+}

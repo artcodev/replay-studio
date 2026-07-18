@@ -1,4 +1,4 @@
-import type { CalibrationFrameEvidence } from '../types'
+import type { CalibrationFrameEvidence } from '../types/calibration'
 import type { PathTrackingSegment } from './pathTracking'
 import {
   invertHomography,

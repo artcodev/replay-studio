@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 import json
 from pathlib import Path
+from threading import Barrier
 
 import pytest
 
 from app import ball_detection_cache as cache
+from app import ball_detection_cache_contract as cache_contract
 
 
 def _detector_input() -> dict:
@@ -20,6 +23,14 @@ def _detector_input() -> dict:
         },
         "confidence": 0.05,
         "tile": {"size": 640, "overlap": 0.2, "batch": 8},
+        "adaptiveRoi": {
+            "enabled": True,
+            "algorithmVersion": "adaptive-roi-v1",
+            "fullScanIntervalFrames": 5,
+            "maxRegions": 3,
+            "paddingPixels": 320,
+            "reacquirePolicy": "same-frame-global-on-miss",
+        },
     }
 
 
@@ -68,38 +79,47 @@ def test_contract_key_is_order_independent_and_covers_every_detector_field():
     detector_input = _detector_input()
     reordered = dict(reversed(list(detector_input.items())))
 
-    first = cache.build_ball_detection_cache_contract(
+    first = cache_contract.build_ball_detection_cache_contract(
         dense_cache_key="dense-a",
         detector_input=detector_input,
     )
-    equivalent = cache.build_ball_detection_cache_contract(
+    equivalent = cache_contract.build_ball_detection_cache_contract(
         dense_cache_key="dense-a",
         detector_input=reordered,
     )
-    changed_dense = cache.build_ball_detection_cache_contract(
+    changed_dense = cache_contract.build_ball_detection_cache_contract(
         dense_cache_key="dense-b",
         detector_input=detector_input,
     )
     changed_model = _detector_input()
     changed_model["checkpoint"]["sha256"] = "replacement-checkpoint"
-    changed_checkpoint = cache.build_ball_detection_cache_contract(
+    changed_checkpoint = cache_contract.build_ball_detection_cache_contract(
         dense_cache_key="dense-a",
         detector_input=changed_model,
     )
+    changed_strategy = _detector_input()
+    changed_strategy["adaptiveRoi"]["fullScanIntervalFrames"] = 4
+    changed_adaptive = cache_contract.build_ball_detection_cache_contract(
+        dense_cache_key="dense-a",
+        detector_input=changed_strategy,
+    )
 
-    assert first["schemaVersion"] == cache.BALL_DETECTION_CACHE_SCHEMA_VERSION
+    assert first["schemaVersion"] == cache_contract.BALL_DETECTION_CACHE_SCHEMA_VERSION
     assert first["detectorInput"] == detector_input
-    assert first["detectorInputFingerprint"] == cache.ball_detection_input_fingerprint(
+    assert first["detectorInputFingerprint"] == cache_contract.ball_detection_input_fingerprint(
         detector_input
     )
-    assert cache.ball_detection_cache_key(first) == cache.ball_detection_cache_key(
+    assert cache_contract.ball_detection_cache_key(first) == cache_contract.ball_detection_cache_key(
         equivalent
     )
-    assert cache.ball_detection_cache_key(first) != cache.ball_detection_cache_key(
+    assert cache_contract.ball_detection_cache_key(first) != cache_contract.ball_detection_cache_key(
         changed_dense
     )
-    assert cache.ball_detection_cache_key(first) != cache.ball_detection_cache_key(
+    assert cache_contract.ball_detection_cache_key(first) != cache_contract.ball_detection_cache_key(
         changed_checkpoint
+    )
+    assert cache_contract.ball_detection_cache_key(first) != cache_contract.ball_detection_cache_key(
+        changed_adaptive
     )
 
 
@@ -135,12 +155,161 @@ def test_clean_primary_round_trip_returns_fresh_pipeline_values(tmp_path: Path):
     assert second_resolved[0][0][0]["x"] == 101.5
 
 
+def test_clean_prefix_checkpoint_is_resumable_but_never_a_complete_cache(
+    tmp_path: Path,
+):
+    resolved, batches = _pipeline_data()
+
+    checkpoint = cache.store_ball_detection_checkpoint(
+        tmp_path,
+        dense_cache_key="dense-a",
+        detector_input=_detector_input(),
+        primary_backend="dedicated-ultralytics",
+        resolved_frames=resolved[:1],
+        batches=batches[:1],
+        expected_frame_count=2,
+    )
+
+    assert checkpoint.path.name.endswith(".partial.json")
+    assert cache.load_ball_detection_cache(
+        tmp_path,
+        dense_cache_key="dense-a",
+        detector_input=_detector_input(),
+    ) is None
+    resumed = cache.load_ball_detection_checkpoint(
+        tmp_path,
+        dense_cache_key="dense-a",
+        detector_input=_detector_input(),
+        expected_frame_count=2,
+    )
+    assert resumed is not None
+    resumed_data, resumed_batches = resumed.as_pipeline_data()
+    assert resumed_data == resolved[:1]
+    assert resumed_batches == batches[:1]
+    assert cache.load_ball_detection_checkpoint(
+        tmp_path,
+        dense_cache_key="dense-a",
+        detector_input=_detector_input(),
+        expected_frame_count=3,
+    ) is None
+
+    cache.delete_ball_detection_checkpoint(
+        tmp_path,
+        dense_cache_key="dense-a",
+        detector_input=_detector_input(),
+    )
+    assert not checkpoint.path.exists()
+
+
+def test_checkpoint_publication_never_moves_a_clean_prefix_backwards(tmp_path: Path):
+    resolved, batches = _pipeline_data()
+
+    longest = cache.store_ball_detection_checkpoint(
+        tmp_path,
+        dense_cache_key="dense-a",
+        detector_input=_detector_input(),
+        primary_backend="dedicated-ultralytics",
+        resolved_frames=resolved,
+        batches=batches,
+        expected_frame_count=3,
+    )
+    stale = cache.store_ball_detection_checkpoint(
+        tmp_path,
+        dense_cache_key="dense-a",
+        detector_input=_detector_input(),
+        primary_backend="dedicated-ultralytics",
+        resolved_frames=resolved[:1],
+        batches=batches[:1],
+        expected_frame_count=3,
+    )
+
+    assert len(longest.frames) == 2
+    assert len(stale.frames) == 2
+    loaded = cache.load_ball_detection_checkpoint(
+        tmp_path,
+        dense_cache_key="dense-a",
+        detector_input=_detector_input(),
+        expected_frame_count=3,
+    )
+    assert loaded is not None
+    assert len(loaded.frames) == 2
+
+
+def test_concurrent_checkpoint_writers_leave_the_longest_prefix(tmp_path: Path):
+    resolved, batches = _pipeline_data()
+    barrier = Barrier(2)
+
+    def publish(prefix_length: int):
+        barrier.wait(timeout=2)
+        return cache.store_ball_detection_checkpoint(
+            tmp_path,
+            dense_cache_key="dense-a",
+            detector_input=_detector_input(),
+            primary_backend="dedicated-ultralytics",
+            resolved_frames=resolved[:prefix_length],
+            batches=batches[:prefix_length],
+            expected_frame_count=3,
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = [executor.submit(publish, length) for length in (1, 2)]
+        for future in futures:
+            future.result(timeout=5)
+
+    loaded = cache.load_ball_detection_checkpoint(
+        tmp_path,
+        dense_cache_key="dense-a",
+        detector_input=_detector_input(),
+        expected_frame_count=3,
+    )
+    assert loaded is not None
+    assert len(loaded.frames) == 2
+
+
+def test_complete_cache_prevents_a_late_worker_recreating_partial_state(
+    tmp_path: Path,
+):
+    resolved, batches = _pipeline_data()
+    partial = cache.store_ball_detection_checkpoint(
+        tmp_path,
+        dense_cache_key="dense-a",
+        detector_input=_detector_input(),
+        primary_backend="dedicated-ultralytics",
+        resolved_frames=resolved[:1],
+        batches=batches[:1],
+        expected_frame_count=2,
+    )
+    complete = cache.store_clean_ball_detection_cache(
+        tmp_path,
+        dense_cache_key="dense-a",
+        detector_input=_detector_input(),
+        primary_backend="dedicated-ultralytics",
+        resolved_frames=resolved,
+        batches=batches,
+    )
+
+    assert complete is not None
+    assert not partial.path.exists()
+    late = cache.store_ball_detection_checkpoint(
+        tmp_path,
+        dense_cache_key="dense-a",
+        detector_input=_detector_input(),
+        primary_backend="dedicated-ultralytics",
+        resolved_frames=resolved[:1],
+        batches=batches[:1],
+        expected_frame_count=2,
+    )
+
+    assert late.path == complete.path
+    assert not partial.path.exists()
+
+
 @pytest.mark.parametrize(
     ("failed", "fallback", "batch_backend", "fallback_reason"),
     [
         (1, 0, "dedicated-ultralytics", None),
         (0, 1, "dedicated-ultralytics", None),
-        (0, 0, "legacy-coco-fallback", None),
+        (0, 0, "generic-coco-fallback", None),
         (0, 0, "dedicated-ultralytics", "worker timeout"),
     ],
 )
@@ -205,6 +374,32 @@ def test_corrupt_or_tampered_artifact_is_a_cache_miss(tmp_path: Path):
     )
 
 
+def test_non_finite_payload_is_a_corrupt_cache_miss(tmp_path: Path):
+    resolved, batches = _pipeline_data()
+    stored = cache.store_clean_ball_detection_cache(
+        tmp_path,
+        dense_cache_key="dense-a",
+        detector_input=_detector_input(),
+        primary_backend="dedicated-ultralytics",
+        resolved_frames=resolved,
+        batches=batches,
+    )
+    assert stored is not None
+
+    envelope = json.loads(stored.path.read_text())
+    envelope["payload"]["frames"][0]["detections"][0]["confidence"] = float("nan")
+    stored.path.write_text(json.dumps(envelope))
+
+    assert (
+        cache.load_ball_detection_cache(
+            tmp_path,
+            dense_cache_key="dense-a",
+            detector_input=_detector_input(),
+        )
+        is None
+    )
+
+
 def test_failed_atomic_replace_preserves_existing_artifact(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -225,7 +420,7 @@ def test_failed_atomic_replace_preserves_existing_artifact(
         raise OSError("simulated publish failure")
 
     monkeypatch.setattr(cache.os, "replace", fail_replace)
-    with pytest.raises(cache.BallDetectionCacheError, match="simulated publish failure"):
+    with pytest.raises(cache_contract.BallDetectionCacheError, match="simulated publish failure"):
         cache.store_clean_ball_detection_cache(
             tmp_path,
             dense_cache_key="dense-a",

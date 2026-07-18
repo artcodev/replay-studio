@@ -1,4 +1,46 @@
-# Аудит проекта — 17 июля 2026
+# Аудит проекта — 17–18 июля 2026
+
+> **Обновление 18 июля 2026 — пере-аудит после волны модификаций.**
+> Все 149 находок (60 основных + SRV + PROV) перепроверены против нового
+> дерева 18 агентами; 8 агентов свежим взглядом отаудировали новые
+> подсистемы, их high/critical находки прошли адверсариальную верификацию.
+> Итог см. в разделе 11; статусы в разделах 1–10 отражают состояние на
+> 17 июля и скорректированы пометками раздела 11.
+>
+> **Обновление 18 июля 2026 (вечер) — аудит большой реструктуризации.**
+> Актуальные статусы всех накопленных находок и оценка новой модульной
+> архитектуры — в разделе 12; он имеет приоритет над статусами разделов
+> 1–11.
+
+> **Статус документа.** Это исторический снимок состояния до project-centric
+> этапа того же дня, а не текущий backlog. Номера строк и сводка `53/5/2` ниже
+> относятся к исходному снимку. Актуальный долг ведётся в
+> [`TECHNICAL_DEBT.md`](TECHNICAL_DEBT.md).
+
+## Дельта после аудита
+
+| Исходная находка | Текущий статус | Реализовано / что осталось |
+| --- | --- | --- |
+| CI-1, CI-2 | Закрыто для текущего scope | GitHub Actions запускает API, web, worker-contract suites и `docker compose config` |
+| BE-2 / PERF-1 | Закрыто для normalized reconstruction | Phase progress вынесен в compact `AnalysisRun`; legacy-only fixtures сохраняют compatibility fallback |
+| BE-8 | Закрыто | API только атомарно сохраняет compact reconstruction job; отдельный `reconstruction-runner` является единственным execution path локально и в Compose |
+| SRV-1 | Закрыто | Alembic принимает legacy/create-all DB, добавляет project/identity tables; API startup выполняет upgrade, а Compose gates API/runner одноразовым `migrate`; CI проверяет fresh PostgreSQL migration |
+| SRV-5/6 | В основном закрыто | Нормализованные projects и уникальные ownership links, project-scoped public listings, idempotent backfill. Глобальные legacy routes ещё существуют |
+| SRV-7 | Backend foundation закрыт | Один project владеет несколькими videos; composition принимает project segments из разных assets. Полный composition UX и alignment benchmark остаются |
+| SRV-9 | Частично | Video-processing публикует compact `AnalysisRun` и поддерживает cancellation, но всё ещё запускается через API `BackgroundTasks` без crash recovery |
+| SRV-10 | Частично | Multi-pass имеет compact progress/cancellation и cross-asset input, но durable lease/recovery runner ещё не подключён |
+| SRV-13 | Закрыто | Nginx принимает 260 MB, отключает request buffering и имеет upload/analysis timeouts |
+| SRV-14 | Частично | Host ports ограничены loopback; TLS, auth и tenant authorization не реализованы |
+| SRV-15 | Частично | `.env.example` не содержит API-Football secret; историческую ротацию ключа должен подтвердить владелец |
+| SRV-16 | Частично | Сервисы имеют restart/health policies; backup/restore и off-host media policy отсутствуют |
+| Provider split-brain | Закрыт для public project API | Canonical Match snapshot и internal IDs отделены от integration diagnostics; legacy catalog/scene routes остаются compatibility API |
+| Отсутствие quality gate | Foundation закрыт | Versioned schemas/evaluator готовы; реальный manifest остаётся draft без gold labels, поэтому accuracy claim отсутствует |
+
+Не закрыты исходные BE-1/BE-3 (`reconstruction.py`), FE-1/FE-2 (`App.vue`),
+Postgres contention и запуск concurrent CAS/lease suites на Postgres, durable
+video/multi-pass queue, object storage, auth, TLS, backups и production
+observability. Детали и приоритеты перечислены в
+актуальном technical-debt документе.
 
 Полный аудит кодовой базы Replay Studio. Все находки получены из чтения
 исходного кода рабочего дерева (commit `e0f2009` + незакоммиченные правки),
@@ -1040,7 +1082,293 @@ substitutions[], thumbnails, lineup_role/order — персистятся,
 
 ---
 
-## Приоритетный план
+## 11. Пере-аудит после модификаций — 18 июля 2026
+
+Дерево изменилось радикально: +5,5k/−1,4k строк в 58 файлах плюс ~60 новых
+файлов. Проверка своими руками: корневой `pytest` — **701 passed, 2 skipped
+за 9.4 с** (сбор больше не падает), фронтенд — **238 тестов зелёные**,
+`vue-tsc` чистый.
+
+### Статусы 149 прежних находок
+
+| Статус | Кол-во |
+|---|---|
+| Актуальны | 101 |
+| Частично устранены | 32 |
+| Полностью устранены | 16 |
+
+**Полностью закрыто этой волной:** CI-2 (пакет calibration-worker
+переименован в `calibration_worker_service` + conftest — корневой pytest
+работает), INFRA-1 (.dockerignore везде, `npm ci`), INFRA-2 (restart-политики
+на всех сервисах), INFRA-8 (healthchecks api/web, ослаблен гейт на
+calibration-worker), SRV-1 (alembic: `init_database` теперь
+`upgrade_database`, compose-сервис `migrate` через
+`service_completed_successfully`), SRV-7 (проект владеет несколькими видео),
+SRV-13 (nginx `client_max_body_size 260m`), PERF-2 (**якорная калибровка
+реализована**: `_select_calibration_anchor_frames`,
+`reconstruction.py:2728-2770`, интерьер заполняет temporal solver),
+PROV-6 (валидация формы upstream-JSON в thesportsdb), DOC-1 частично→
+`docs/ARCHITECTURE.md` создан (агент оценил как partial — см. ниже).
+
+**Существенный прогресс (partial):** BE-2/PERF-1 — прогресс project-сцен
+пишется в компактную строку `AnalysisRunRow`
+(`analysis_runtime.py:86-129`, `project_store.py:1373-1427`), full-document
+CAS остался только как fallback для legacy-сцен без проекта; BE-8/SRV-9/10 —
+выделенный сервис `reconstruction-runner` в compose
+(`docker-compose.yml:241-265`, `RECONSTRUCTION_RECOVERY_IN_API: 0`) с
+killable-подпроцессом на job, но локальный dev-дефолт остаётся in-process,
+а upload и multi-pass — см. новые находки ниже; SEC-1 — loopback-биндинги
+портов сделаны, auth нет; SRV-5/6 — слой проектов появился
+(нормализованные таблицы, UNIQUE/CASCADE-владение), но старые глобальные
+роуты живут нескоупленными рядом; CI-1 — `.github/workflows/ci.yml`
+существует, но матрица воркеров сломана (см. NEW-11).
+
+### Новые находки в новом коде (подтверждены верификацией)
+
+Свежий аудит 8 подсистем: 2 critical + 10 high подтверждено, 3 заявленных
+high отсеяно верификаторами.
+
+#### Backfill и canonical match (`project_backfill.py`, `canonical_match.py`)
+
+- **NEW-1 (critical).** Петля «миграция → backfill» на КАЖДОМ рестарте
+  чеканит дубликат Match, снапшота и перехэшированных roster-id: миграция
+  читает сцены через `project_scenes` с гидрированным overlay
+  (`source="canonical"`, `storageSource="project-snapshot"`,
+  `store.py:190`, `canonical_match.py:387-388, 473`), пересобирает биндинг
+  с потерей `storageSource` (`main.py:1272, 1281-1290`) → «изменение»
+  каждый старт; backfill затем видит новый биндинг и мintит новый Match.
+  **Фикс:** backfill пропускает канонические/проектные биндинги (или
+  проекты с `current_match_snapshot_id`); миграция сравнивает биндинги
+  семантически. Обязателен тест двойного прогона
+  миграция+backfill (идемпотентность).
+- **NEW-2 (high).** Backfill на каждом старте перезатирает живые
+  `AnalysisRun` lossy-проекцией из scene-JSON — стирает identitySync-
+  диагностику (`project_store.py:1321-1333` безусловная замена
+  status/diagnostics/таймстемпов). **Фикс:** создавать только отсутствующие
+  строки, не перезаписывать более свежие.
+- **NEW-3 (high).** Дедупликации одного реального матча между провайдерами
+  нет: `bundle.source` зашит в хэш canonical id
+  (`canonical_match.py:56-64`), а backfill использует ДРУГУЮ схему
+  деривации id (`project_backfill.py:127-142`, длина 32 против 24) — даже
+  одно и то же событие одного провайдера до/после миграции не сходится в
+  один Match. **Фикс:** провайдер-нейтральная идентичность матча + единая
+  функция деривации + миграция roster-биндингов через external references.
+
+#### Слой проектов (`project_store.py`, `project_routes.py`)
+
+- **NEW-4 (high).** Новые `PUT /projects/{id}/match` и `/match/refresh`
+  обходят обе защиты legacy-пути: не проверяют
+  queued/processing-реконструкции и durable roster-решения
+  (`project_routes.py:532-591` зовут `persist_canonical_match` без
+  прекондиций; legacy-гарды в `main.py:1383-1499`). **Фикс:** переиспользовать
+  те же гарды (вынести их из main.py в project-слой).
+- **NEW-5 (high).** Legacy bind-путь персистит canonical-снапшот ДО
+  валидации и scene-CAS (`main.py:1522-1527` → `1537-1538` → `1589`):
+  отклонённая смена матча всё равно становится current, т.к. сцены читают
+  matchBinding из проектного снапшота. **Фикс:** валидация до любого
+  коммита project-слоя; в идеале один транзакционный scope с `put_many`.
+- **NEW-6 (high).** `ProjectStore` не перенял атомарную дисциплину
+  SceneStore: `_begin_atomic_write` определён (`project_store.py:152-166`),
+  но используется только в одном методе из ~7 read-modify-write; CAS
+  `update_project` (`:442-465`) на SQLite подвержен lost-update.
+  **Фикс:** `_begin_atomic_write` в начале каждого RMW-метода, как в
+  SceneStore.
+
+#### Runner и восстановление (`reconstruction_runner/dispatch`, store)
+
+- **NEW-7 (critical).** Дети multi-pass гоняются с новыми мониторами
+  восстановления: `multi_pass.py:872` вызывает `reconstruct_scene(child)`
+  без run-токена и lease → ребёнок в `processing` без lease подпадает под
+  «брошенную работу» (`store.py:813-822`; исключён только родитель,
+  `store.py:805-806, 864-866`) — дублирование вычислений, ложные отказы,
+  навечно застрявший композит. **Фикс:** дать детям настоящий
+  claim (через `queue_reconstruction`/`reconstruct_scene_by_id`) либо
+  исключить их из recovery-скана по `parentCompositeRunId`.
+- **NEW-8 (high).** Legacy-сцены без `runId` вечно в списке recoverable, но
+  `reconstruct_scene_by_id` всегда их отвергает (`reconstruction.py:14777`
+  сравнение до claim-а, который бы обновил документ, `store.py:913-914`) —
+  бесконечный churn подпроцессов. **Фикс:** принимать `legacy-…`-токен при
+  пустом stored runId.
+- **NEW-9 (high).** SRV-10 закрыт наполовину: multi-pass по-прежнему
+  выполняет весь CPU-объём в контейнере API (`main.py:707`,
+  `project_routes.py:789` — plain BackgroundTask) без lease и recovery.
+- **NEW-10 (high).** SRV-9 закрыт наполовину: у video-upload появились
+  AnalysisRun-зеркало и cancel, но нет lease/heartbeat/восстановления после
+  рестарта: `processing` навсегда; cancel-гонка в обработчике ошибок может
+  оставить `cancelling` навечно.
+
+#### Миграции и CI
+
+- **NEW-11 (high).** Матрица worker-contracts в CI не ставит
+  тестовые зависимости: `ci.yml:75` — только `pip install pytest -r
+  requirements.txt`, а тесты трёх сервисов импортируют httpx —
+  3 из 5 ног матрицы падают на сборе. **Фикс:** ставить
+  `requirements-test.txt` (identity-worker'у — создать его).
+- **NEW-12 (high, воспроизведено).** Percent-encoded `DATABASE_URL` роняет
+  alembic на старте: URL идёт в `Config.set_main_option` через
+  configparser-интерполяцию (`schema_migrations.py:17`, `alembic/env.py:16`)
+  — пароль с `@`/`%` валит API, runner и migrate-сервис до коннекта.
+  **Фикс:** `url.replace("%", "%%")` либо передача через
+  `config.attributes`.
+
+#### Фронтенд
+
+- **NEW-13 (high).** Watcher терминальных job'ов срабатывает на исторических
+  run'ах при каждом открытии сцены (`App.vue:3784-3792` — ключ
+  `scene:job:status` без проверки наблюдённого перехода) → лишние
+  перезагрузки сцены, риск затирания несохранённых правок. **Фикс:**
+  реагировать только на переход из активного статуса.
+- Замечание тренда: `App.vue` вырос до 5 207 строк — проектный workspace
+  прикручен к god-компоненту; composables так и не появились (FE-1
+  усугубился). `reconstruction.py` — 14 847 строк (BE-1 усугубился).
+
+#### Прочее заметное (medium, без верификации не требовалось)
+
+- Anchor-калибровка: нет прямого fallback при отказе интерьерного
+  заполнения; `calibration_anchor_max_gap_seconds` не согласован с
+  хардкодом 2.0 s temporal solver'а; ложная причина отказа
+  `no-automatic-calibration` для пропущенных кадров.
+- Providers-delta: появился аккуратный `events_by_date_with_fallback` с
+  курируемым списком кодов, но fallback молчалив (нет телеметрии и
+  provenance-заголовка), thesportsdb `event_bundle` — всё ещё
+  всё-или-ничего, stats-моделей в схемах так и нет (PROV-1 актуален).
+- CI не собирает ни одного Docker-образа; api-джоба ставит CUDA-torch
+  вместо CPU-пинов Dockerfile; свежий клон не поднимет compose (веса).
+- Query-амплификация в project-слое: полный ProjectDocument грузится
+  дважды на каждое чтение сцены; поиск матчей пишет транзакцию на
+  каждый результат.
+
+### Обновлённые приоритеты после пере-аудита
+
+| Приоритет | Действия | Находки |
+|---|---|---|
+| P0 | Идемпотентность миграция+backfill (тест двойного прогона) | NEW-1, NEW-2 |
+| P0 | Lease/исключение для детей multi-pass | NEW-7 |
+| P0 | Экранирование DATABASE_URL в alembic; httpx в CI-матрице | NEW-12, NEW-11 |
+| P1 | Гарды новых match-роутов; порядок validate→persist; атомарность ProjectStore | NEW-4..6 |
+| P1 | Recovery для upload/multi-pass; legacy-runId churn | NEW-8..10 |
+| P1 | Terminal-job watcher | NEW-13 |
+| P1 | Единая идентичность матча между провайдерами | NEW-3 |
+| P2 | Остальные medium + всё актуальное из плана ниже | — |
+
+## 12. Аудит большой реструктуризации — 18 июля 2026 (вечер)
+
+Дерево реструктурировано радикально: 621 изменённый файл, 445 новых, 32
+удалённых. `reconstruction.py` 14 847 → 304 строки (оркестратор с
+`__all__ = ("reconstruct_scene",)`), `main.py` 1 799 → 78 (composition root
+c 10 роутерами, ноль inline-роутов), `App.vue` 5 207 → 15 строк. В
+`apps/api/app` теперь 330 модулей с дисциплиной
+contract/repository/phase/command/routes; largest — 613 строк. Появился
+`AGENTS.md` с политикой «каноническая архитектура важнее обратной
+совместимости; вытесненные пути удаляются». Проверка тестов своими руками:
+**бэкенд 875 passed / 2 skipped за 16.8 с, фронтенд 269 passed, vue-tsc
+чистый**.
+
+### Актуальные статусы всех 162 накопленных находок
+
+| Статус | Кол-во |
+|---|---|
+| Полностью устранены | 65 |
+| Частично устранены | 40 |
+| Актуальны | 54 |
+| Неактуальны (код удалён по политике AGENTS.md) | 3 |
+
+**Реструктуризация закрыла все структурные находки аудита:**
+
+- BE-1/BE-3 — распил по рекомендованным швам: 304-строчный fencing-wrapper,
+  ~130 `reconstruction_*`-модулей, типизированные frozen-dataclass
+  результаты фаз вместо сквозных мутируемых локалов.
+- BE-2/PERF-1 — прогресс теперь компактный lease-fenced upsert телеметрии,
+  «never reads or writes SceneRow»
+  (`reconstruction_run_repository.py:481-543`); полная публикация документа —
+  ровно один терминальный CAS. Legacy-fallback удалён вместе со `store.py`.
+- BE-4/PERF-7 — recovery-монитор переведён на индексированную
+  `ReconstructionJobRow` (`database.py:61-81`) + промоутнутые индексные
+  колонки SceneRow c `sync_scene_index`; full-table `with_for_update`-скан
+  больше не существует; локи — только по-scene на claim.
+- BE-7 — main.py как composition root, match-import в
+  `manual_match_import.py` за 49-строчным роутером.
+- FE-1/FE-2 — App.vue разложен на 2 lazy-страницы, 5 editor-контекстов и
+  20 по-контурных composables (включая рекомендованные `usePlaybackClock`
+  с rAF-часами); `appArchitecture.test.ts` защищает топологию AST-тестами.
+- NEW-1/NEW-2 — сами backfill/миграция удалены по политике AGENTS.md
+  (obsolete); NEW-4..13 — **все 10 разрешены** (гарды match-роутов,
+  validate→persist, атомарность ProjectStore, lease детей multi-pass,
+  legacy-runId churn, recovery upload/multi-pass, alembic URL-escaping,
+  httpx в CI-матрице, terminal-job watcher).
+- Инварианты конкуренции пережили распил и местами усилились: dialect-ветка
+  централизована в `database_transaction.py`, порядок scene→lease сохранён,
+  fingerprints fail-closed. Проверено отдельным агентом с фокусом именно
+  на этом.
+
+### Новые находки в реструктурированном коде (верифицированы)
+
+Свежий аудит нашёл всего 2 high (для рефакторинга такого масштаба —
+исключительный результат):
+
+- **R-1 (high).** Мутационные роуты player-action возвращают документ с
+  устаревшей ревизией: `scene_analysis_routes.py:116-141` возвращает
+  локальный dict, а `player_action_commands.py:14,20` выбрасывает результат
+  `scenes.put` (ревизию бампит только возвращаемый deepcopy —
+  `scene_repository.py:211-222`). Воспроизведено: в БД revision 2, в ответе
+  revision 1 → следующий полный save падает 409. **Фикс:** возвращать
+  результат `scenes.put` (как это делает ball-trajectory путь) + тест на
+  равенство ревизий.
+- **R-2 (high).** Ручное перемещение игрока на поле тихо теряется:
+  `useEditorCompositionContext.ts:151-189` пишет keyframes в scene и ставит
+  «Unsaved changes», но `compactSceneWrite` (`lib/api/scenes.ts:24-27`)
+  удаляет keyframes треков из PUT-тела, бэкенд сохраняет compact-документ
+  как есть, а гидрация перестраивает keyframes из артефактов — правка
+  исчезает после save. **Фикс:** выделенный endpoint track-keyframes
+  (зеркально `PUT /ball-trajectory`) либо удалить UI 3D-перемещения по
+  политике AGENTS.md.
+- **R-3 (medium, организационное).** Весь cutover существует только в
+  незакоммиченном рабочем дереве: HEAD всё ещё несёт полное legacy-дерево,
+  `git checkout -- .` воскресит монолиты, CI ни разу не прогонялся на новой
+  архитектуре. **Закоммитить и запушить реструктуризацию немедленно.**
+- Прочее medium: ORM-registry, разнесённый по side-effect-импортам двух
+  семейств; дословный дубль транзакционного примитива между
+  scene/project-персистенсом; 11 позиционных аргументов на швах фаз;
+  `/api/health` до ~8 с последовательных проб при 5-секундном
+  container-healthcheck; статус-коды из строк сообщений в пяти
+  роут-модулях; inline-объекты в props инспектора (остаток FE-2);
+  in-place мутация сцены не пробивает prop-границы; линейная интерполяция
+  в render loop (PERF-8 жив); инференс всё ещё последовательный
+  однокадровый (PERF-5 жив).
+
+### Что остаётся актуальным (54 находки, главные кластеры)
+
+1. **Провайдеры/статистика — цель переделки так и не реализована**:
+   PROV-1 (нет моделей статистики матча/игрока), PROV-15 (нет общего
+   контрактного сьюта), транспорты — копипаст-близнецы с неограниченным
+   кэшем, registry — import-time singleton (PROV-10), thesportsdb
+   всё-или-ничего (PROV-7), retryable→warnings у api-football (PROV-9),
+   минуты 45+3→48, participation-шов резолвера не подключён.
+2. **Auth/тенантность** — по-прежнему ноль Depends во всём приложении
+   (SRV-11/12, SEC-1).
+3. **Инструментальная дисциплина** — нет mypy/ruff (CI-5), нет coverage
+   (CI-4), нет Python-lockfile (RH-5), СceneDocument остаётся untyped dict
+   (BE-5 partial: 163 `scene: dict` аннотаций).
+4. **Эксплуатация** — логирование/метрики/request-id (gaps), ffmpeg без
+   таймаутов (SEC-3), FileResponse для 250 МБ, воркеры под root.
+5. **Производительность хвостом** — PERF-5 (последовательный инференс),
+   PERF-8 (render loop), JSON.stringify-watcher'ы (FE-5 residual).
+
+### Приоритеты после реструктуризации
+
+| Приоритет | Действия | Находки |
+|---|---|---|
+| P0 | **Закоммитить и запушить cutover**; прогнать CI на новой архитектуре | R-3 |
+| P0 | Ревизия в ответах player-action; судьба ручного перемещения игрока | R-1, R-2 |
+| P1 | Переделка провайдеров: stats-модели + контрактный сьют + общий транспорт (см. раздел 9) | PROV-1, 15, 6/7, 10 |
+| P1 | ffmpeg-таймауты; bearer-auth dependency | SEC-3, SRV-12 |
+| P2 | mypy/ruff + coverage в CI; типизация SceneDocument поверх scene_document.py | CI-4/5, BE-5 |
+| P2 | Батчинг инференса; interpolate-курсоры; prop-границы инспектора | PERF-5/8, FE-2 residual |
+| P3 | Остальное из кластеров выше | — |
+
+---
+
+## Приоритетный план (исторический, 17 июля)
 
 | Приоритет | Действия | Находки |
 |---|---|---|

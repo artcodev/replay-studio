@@ -1,12 +1,13 @@
 import { createSSRApp } from 'vue'
 import { renderToString } from '@vue/server-renderer'
 import { describe, expect, it } from 'vitest'
-import ManualBallTimeline, {
+import ManualBallTimeline from './ManualBallTimeline.vue'
+import {
   clampManualBallTime,
   manualBallTimelineEvents,
   normalizeManualBallTimes,
-} from './ManualBallTimeline.vue'
-import type { Keyframe } from '../types'
+} from '../features/manual-ball/manualBallTimelineDomain'
+import type { Keyframe } from '../types/tracking'
 
 function keyframe(t: number): Keyframe {
   return { t, x: t, z: t, confidence: 1, observed: true }

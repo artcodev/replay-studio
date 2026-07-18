@@ -1,15 +1,22 @@
 import asyncio
 from copy import deepcopy
+from unittest.mock import patch
 
 import httpx
 import pytest
+from fastapi import HTTPException
 
 from app.main import app
-from app.reconstruction import (
-    ReconstructionError,
-    _publish_automatic_ball_trajectory,
+import app.project_resource_access as resource_access
+from app.reconstruction_errors import ReconstructionError
+from app.reconstruction_ball_trajectory import (
+    edit_scene_ball_trajectory,
+    publish_automatic_ball_trajectory as _publish_automatic_ball_trajectory,
+)
+from app.reconstruction_ball_trajectory_command import (
     set_scene_ball_trajectory,
 )
+from app.reconstruction_artifact_hydration import hydrate_scene_reconstruction
 
 
 def _scene() -> dict:
@@ -25,6 +32,13 @@ def _scene() -> dict:
                 "reconstruction": {"status": "ready"},
             },
             "ball": {
+                "mode": "automatic",
+                "automaticKeyframes": [
+                    {"t": 0.0, "x": -2.0, "y": 0.22, "z": 1.0, "confidence": 0.7},
+                    {"t": 1.0, "x": 0.0, "y": 0.22, "z": 2.0, "confidence": 0.8},
+                ],
+                "manualKeyframes": [],
+                "automaticDiagnostics": {"observedCoverage": 0.5},
                 "keyframes": [
                     {"t": 0.0, "x": -2.0, "y": 0.22, "z": 1.0, "confidence": 0.7},
                     {"t": 1.0, "x": 0.0, "y": 0.22, "z": 2.0, "confidence": 0.8},
@@ -42,30 +56,36 @@ async def _async_request(method: str, path: str, **kwargs):
 
 
 def _request(method: str, path: str, **kwargs):
-    return asyncio.run(_async_request(method, path, **kwargs))
+    def owned_scene(_project_id: str, scene_id: str):
+        scene = resource_access.scenes.get(scene_id)
+        if scene is None:
+            raise HTTPException(status_code=404, detail="Scene not found in project")
+        return scene
+
+    with patch.object(resource_access, "project_scene_or_404", side_effect=owned_scene):
+        return asyncio.run(_async_request(method, path, **kwargs))
 
 
-def test_legacy_automatic_track_survives_manual_edit_and_mode_switch():
+def test_automatic_track_survives_manual_edit_and_mode_switch():
     scene = _scene()
     original = deepcopy(scene["payload"]["ball"]["keyframes"])
 
-    set_scene_ball_trajectory(scene, "manual", [], persist=False)
+    edit_scene_ball_trajectory(scene, "manual", [])
     ball = scene["payload"]["ball"]
     assert ball["mode"] == "manual"
     assert ball["keyframes"] == []
     assert ball["manualKeyframes"] == []
     assert ball["automaticKeyframes"] == original
 
-    set_scene_ball_trajectory(
+    edit_scene_ball_trajectory(
         scene,
         "manual",
         [{"t": 3.0, "x": 12.0, "z": -4.0}],
-        persist=False,
     )
     manual = deepcopy(scene["payload"]["ball"]["keyframes"])
     assert manual[0]["id"] == "manual-ball-003000"
 
-    set_scene_ball_trajectory(scene, "automatic", persist=False)
+    edit_scene_ball_trajectory(scene, "automatic")
     ball = scene["payload"]["ball"]
     assert ball["keyframes"] == original
     assert ball["manualKeyframes"] == manual
@@ -74,7 +94,7 @@ def test_legacy_automatic_track_survives_manual_edit_and_mode_switch():
 
 def test_manual_keyframes_are_sorted_deduplicated_and_authoritative():
     scene = _scene()
-    set_scene_ball_trajectory(
+    edit_scene_ball_trajectory(
         scene,
         "manual",
         [
@@ -84,7 +104,6 @@ def test_manual_keyframes_are_sorted_deduplicated_and_authoritative():
             # supplied value is authoritative.
             {"t": 1.00049, "x": 6.0, "z": 7.0},
         ],
-        persist=False,
     )
 
     ball = scene["payload"]["ball"]
@@ -116,21 +135,19 @@ def test_manual_keyframes_are_sorted_deduplicated_and_authoritative():
 )
 def test_manual_keyframe_validation_is_fail_closed(keyframe, message):
     with pytest.raises(ReconstructionError, match=message):
-        set_scene_ball_trajectory(
+        edit_scene_ball_trajectory(
             _scene(),
             "manual",
             [keyframe],
-            persist=False,
         )
 
 
 def test_automatic_reconstruction_updates_automatic_track_without_overwriting_manual():
     scene = _scene()
-    set_scene_ball_trajectory(
+    edit_scene_ball_trajectory(
         scene,
         "manual",
         [{"t": 2.0, "x": 8.0, "z": -3.0}],
-        persist=False,
     )
     manual = deepcopy(scene["payload"]["ball"]["keyframes"])
     latest_automatic = [{"t": 0.5, "x": -10.0, "y": 0.22, "z": 4.0}]
@@ -149,19 +166,22 @@ def test_automatic_reconstruction_updates_automatic_track_without_overwriting_ma
     assert published["automaticDiagnostics"]["trajectoryMode"] == "automatic"
     assert published["automaticDiagnostics"]["observedCoverage"] == 1.0
 
-    set_scene_ball_trajectory(scene, "automatic", persist=False)
+    edit_scene_ball_trajectory(scene, "automatic")
     assert scene["payload"]["ball"]["keyframes"] == latest_automatic
 
 
 def test_ball_trajectory_api_persists_manual_contract(monkeypatch):
     scene = _scene()
     persisted = []
-    monkeypatch.setattr("app.main.scene_store.get", lambda _: scene)
-    monkeypatch.setattr("app.reconstruction.scene_store.put", lambda value: persisted.append(deepcopy(value)) or value)
+    monkeypatch.setattr("app.project_resource_access.scenes.get", lambda _: scene)
+    monkeypatch.setattr(
+        "app.reconstruction_ball_trajectory_command.scenes.put",
+        lambda value: persisted.append(deepcopy(value)) or value,
+    )
 
     response = _request(
         "PUT",
-        "/api/scenes/manual-ball-scene/ball-trajectory",
+        "/api/projects/project-test/scenes/manual-ball-scene/ball-trajectory",
         json={
             "mode": "manual",
             "keyframes": [
@@ -174,16 +194,22 @@ def test_ball_trajectory_api_persists_manual_contract(monkeypatch):
     assert response.status_code == 200
     ball = response.json()["payload"]["ball"]
     assert ball["mode"] == "manual"
-    assert [item["t"] for item in ball["keyframes"]] == [1.0, 4.0]
+    assert "keyframes" not in ball
+    assert ball["keyframeCount"] == 2
     assert len(persisted) == 1
+    hydrate_scene_reconstruction(persisted[0], names=("ballTrajectory",))
+    assert [item["t"] for item in persisted[0]["payload"]["ball"]["keyframes"]] == [
+        1.0,
+        4.0,
+    ]
 
 
 def test_ball_trajectory_api_rejects_keyframes_in_automatic_mode(monkeypatch):
-    monkeypatch.setattr("app.main.scene_store.get", lambda _: _scene())
+    monkeypatch.setattr("app.project_resource_access.scenes.get", lambda _: _scene())
 
     response = _request(
         "PUT",
-        "/api/scenes/manual-ball-scene/ball-trajectory",
+        "/api/projects/project-test/scenes/manual-ball-scene/ball-trajectory",
         json={"mode": "automatic", "keyframes": [{"t": 1, "x": 0, "z": 0}]},
     )
 
@@ -194,13 +220,12 @@ def test_ball_trajectory_api_rejects_keyframes_in_automatic_mode(monkeypatch):
 def test_ball_trajectory_api_rejects_edits_during_reconstruction(monkeypatch):
     scene = _scene()
     scene["payload"]["videoAsset"]["reconstruction"]["status"] = "processing"
-    monkeypatch.setattr("app.main.scene_store.get", lambda _: scene)
+    monkeypatch.setattr("app.project_resource_access.scenes.get", lambda _: scene)
 
     response = _request(
         "PUT",
-        "/api/scenes/manual-ball-scene/ball-trajectory",
+        "/api/projects/project-test/scenes/manual-ball-scene/ball-trajectory",
         json={"mode": "manual", "keyframes": []},
     )
 
     assert response.status_code == 409
-

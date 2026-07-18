@@ -2,7 +2,7 @@
 
 The cache boundary is deliberately before manual annotations, calibration,
 projection, tracking, ReID and jersey OCR.  A correction rebuild may therefore
-reuse expensive person/legacy-COCO-ball inference without making any downstream
+reuse expensive person/generic-COCO-ball inference without making any downstream
 decision sticky.
 
 Every artifact represents one complete primary-provider result for one exact
@@ -24,7 +24,7 @@ from typing import Any
 from uuid import uuid4
 
 
-PERSON_DETECTION_CACHE_SCHEMA_VERSION = 1
+PERSON_DETECTION_CACHE_SCHEMA_VERSION = 2
 
 
 class PersonDetectionCacheError(RuntimeError):
@@ -107,7 +107,7 @@ class PersonDetectionCacheEntry:
     frame_sha256: str
     image_size: tuple[int, int]
     people: tuple[dict[str, Any], ...]
-    legacy_ball_candidates: tuple[dict[str, Any], ...]
+    generic_ball_candidates: tuple[dict[str, Any], ...]
 
     def as_pipeline_data(
         self,
@@ -116,7 +116,7 @@ class PersonDetectionCacheEntry:
 
         return (
             deepcopy(list(self.people)),
-            deepcopy(list(self.legacy_ball_candidates)),
+            deepcopy(list(self.generic_ball_candidates)),
             tuple(self.image_size),
         )
 
@@ -143,7 +143,7 @@ def _valid_payload(payload: Mapping[str, Any]) -> bool:
         return False
     image_size = payload.get("imageSize")
     people = payload.get("people")
-    balls = payload.get("legacyBallCandidates")
+    balls = payload.get("genericBallCandidates")
     if (
         not isinstance(image_size, list)
         or len(image_size) != 2
@@ -232,7 +232,7 @@ def _entry_from_envelope(
         frame_sha256=str(expected_contract["frameContentSha256"]),
         image_size=(int(image_size[0]), int(image_size[1])),
         people=tuple(deepcopy(payload["people"])),
-        legacy_ball_candidates=tuple(deepcopy(payload["legacyBallCandidates"])),
+        generic_ball_candidates=tuple(deepcopy(payload["genericBallCandidates"])),
     )
 
 
@@ -284,7 +284,7 @@ def store_person_detection_cache(
     detector_input: Mapping[str, Any],
     image_size: tuple[int, int],
     people: Sequence[Mapping[str, Any]],
-    legacy_ball_candidates: Sequence[Mapping[str, Any]],
+    generic_ball_candidates: Sequence[Mapping[str, Any]],
     provider_status: str = "primary-complete",
 ) -> PersonDetectionCacheEntry | None:
     """Atomically publish one complete primary frame result.
@@ -305,7 +305,7 @@ def store_person_detection_cache(
             "providerStatus": provider_status,
             "imageSize": [int(image_size[0]), int(image_size[1])],
             "people": [dict(item) for item in people],
-            "legacyBallCandidates": [dict(item) for item in legacy_ball_candidates],
+            "genericBallCandidates": [dict(item) for item in generic_ball_candidates],
         },
         label="cache payload",
     )

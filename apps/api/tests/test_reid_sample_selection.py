@@ -1,10 +1,13 @@
 import numpy as np
 
-from app.reconstruction import (
-    Detection,
-    TrackState,
-    _merge_raw_track_states,
-    _refresh_split_track_state,
+from app.reconstruction_person_detection_contract import Detection
+from app.reconstruction_track_state import TrackState
+from app.track_observation_accumulator import append_track_observation
+from app.reconstruction_identity_merging import (
+    merge_raw_track_states as _merge_raw_track_states,
+)
+from app.reconstruction_identity_split_partition import (
+    refresh_split_track_state as _refresh_split_track_state,
 )
 
 
@@ -39,13 +42,13 @@ def _detection(
 def test_later_sharp_views_replace_early_blurry_first_twelve() -> None:
     track = TrackState(id=1)
     for frame_index in range(12):
-        track.append(
+        append_track_observation(track,
             _detection(frame_index, sharpness=1.0, vector=(1.0, 0.0)),
             frame_index,
             frame_index * 0.5,
         )
     for frame_index in range(12, 15):
-        track.append(
+        append_track_observation(track,
             _detection(frame_index, sharpness=500.0, vector=(0.0, 1.0)),
             frame_index,
             frame_index * 0.5,
@@ -60,9 +63,9 @@ def test_later_sharp_views_replace_early_blurry_first_twelve() -> None:
 
 def test_reid_samples_are_temporally_independent_and_best_crop_wins() -> None:
     track = TrackState(id=2)
-    track.append(_detection(1, sharpness=1.0, vector=(1.0, 0.0)), 1, 0.10)
-    track.append(_detection(2, sharpness=500.0, vector=(0.0, 1.0)), 2, 0.20)
-    track.append(_detection(3, sharpness=500.0, vector=(1.0, 0.0)), 3, 0.70)
+    append_track_observation(track, _detection(1, sharpness=1.0, vector=(1.0, 0.0)), 1, 0.10)
+    append_track_observation(track, _detection(2, sharpness=500.0, vector=(0.0, 1.0)), 2, 0.20)
+    append_track_observation(track, _detection(3, sharpness=500.0, vector=(1.0, 0.0)), 3, 0.70)
 
     assert [item["frameIndex"] for item in track.reid_selected_metadata] == [2, 3]
     assert all(
@@ -76,7 +79,7 @@ def test_reid_samples_are_temporally_independent_and_best_crop_wins() -> None:
 
 def test_identical_pixel_fingerprint_is_one_reid_support_even_at_different_times() -> None:
     track = TrackState(id=5)
-    track.append(
+    append_track_observation(track,
         _detection(
             1,
             sharpness=100.0,
@@ -86,7 +89,7 @@ def test_identical_pixel_fingerprint_is_one_reid_support_even_at_different_times
         1,
         0.10,
     )
-    track.append(
+    append_track_observation(track,
         _detection(
             20,
             sharpness=100.0,
@@ -106,7 +109,7 @@ def test_identical_pixel_fingerprint_is_one_reid_support_even_at_different_times
 def test_manual_track_merge_deduplicates_same_pixel_fingerprint() -> None:
     target = TrackState(id=6)
     source = TrackState(id=7)
-    target.append(
+    append_track_observation(target,
         _detection(
             1,
             sharpness=100.0,
@@ -116,7 +119,7 @@ def test_manual_track_merge_deduplicates_same_pixel_fingerprint() -> None:
         1,
         0.10,
     )
-    source.append(
+    append_track_observation(source,
         _detection(
             20,
             sharpness=100.0,
@@ -137,7 +140,7 @@ def test_manual_track_merge_deduplicates_same_pixel_fingerprint() -> None:
 def test_split_partition_drops_reid_samples_from_other_observations() -> None:
     track = TrackState(id=3)
     for frame_index in range(4):
-        track.append(
+        append_track_observation(track,
             _detection(frame_index, sharpness=100.0, vector=(1.0, float(frame_index))),
             frame_index,
             frame_index * 0.5,

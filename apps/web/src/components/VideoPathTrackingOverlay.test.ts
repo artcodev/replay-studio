@@ -1,7 +1,8 @@
 import { createSSRApp } from 'vue'
 import { renderToString } from '@vue/server-renderer'
 import { describe, expect, it } from 'vitest'
-import type { CalibrationFrameEvidence, Keyframe } from '../types'
+import type { CalibrationFrameEvidence } from '../types/calibration'
+import type { Keyframe } from '../types/tracking'
 import { resolvePathProjectionContext } from '../lib/pathProjection'
 import VideoPathTrackingOverlay from './VideoPathTrackingOverlay.vue'
 

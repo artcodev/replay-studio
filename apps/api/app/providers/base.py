@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Protocol, runtime_checkable
 
-from ..schemas import EventBundle, ExternalEvent
+from ..match_contracts import EventBundle, ExternalEvent
 
 
 class MatchDataError(RuntimeError):

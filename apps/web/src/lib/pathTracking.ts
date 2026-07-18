@@ -1,4 +1,4 @@
-import type { Keyframe } from '../types'
+import type { Keyframe } from '../types/tracking'
 import { interpolateKeyframes } from './interpolate'
 
 export type PathEvidence = 'observed' | 'inferred'
@@ -65,10 +65,10 @@ export function keyframePathEvidence(keyframe: Keyframe): PathEvidence {
     || keyframe.presenceState === 'observed'
   ) return 'observed'
 
-  // Older scenes predate explicit evidence metadata. Treating their supplied
-  // keyframes as observed preserves the historical rendering contract while
-  // every newly reconstructed scene remains explicitly classified.
-  return 'observed'
+  // Missing provenance is not measured evidence. Canonical reconstruction
+  // writes an explicit state; incomplete inputs remain visible only as the
+  // conservative inferred path instead of being promoted silently.
+  return 'inferred'
 }
 
 function finiteKeyframe(keyframe: Keyframe) {

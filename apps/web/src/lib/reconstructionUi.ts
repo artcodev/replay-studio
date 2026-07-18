@@ -1,19 +1,47 @@
-import type {
-  EventBundle,
-  ExternalPlayer,
-  FrameAnalysis,
-  PersistedMatchBinding,
-  ReconstructionQuality,
-  SceneDocument,
-  Team,
-} from '../types'
-import { matchDataProviderLabel } from './matchDataProviders'
+import type { FrameAnalysis } from '../types/analysis'
+import type { ReconstructionQuality } from '../types/reconstruction'
+import type { SceneDocument } from '../types/scene'
+import type { AnalysisJob } from '../types/project'
 
 export function reconstructionLocksMutations(
-  status: 'queued' | 'processing' | 'ready' | 'failed' | undefined,
+  status: 'queued' | 'processing' | 'ready' | 'cancelled' | 'failed' | undefined,
   optimisticRunning = false,
 ): boolean {
   return optimisticRunning || status === 'queued' || status === 'processing'
+}
+
+export type ReconstructionSceneStatus =
+  | 'queued'
+  | 'processing'
+  | 'ready'
+  | 'cancelled'
+  | 'failed'
+  | undefined
+
+/**
+ * The compact AnalysisRun record is the cancellation authority. Scene payloads
+ * can lag behind it while the worker acknowledges a cancel request, so an
+ * exact run-id match must win over stale queued/processing metadata.
+ */
+export function reconstructionStatusFromAnalysisJob(
+  sceneStatus: ReconstructionSceneStatus,
+  jobStatus: AnalysisJob['status'] | undefined,
+): ReconstructionSceneStatus {
+  if (!jobStatus) return sceneStatus
+  if (jobStatus === 'queued') return 'queued'
+  if (jobStatus === 'running' || jobStatus === 'cancelling') return 'processing'
+  if (jobStatus === 'cancelled') return 'cancelled'
+  if (jobStatus === 'succeeded') return 'ready'
+  return 'failed'
+}
+
+export function matchingReconstructionAnalysisJob(
+  scene: SceneDocument | null,
+  jobs: AnalysisJob[],
+): AnalysisJob | null {
+  const runId = scene?.payload.videoAsset?.reconstruction?.runId
+  if (!runId) return null
+  return jobs.find((job) => job.id === runId) ?? null
 }
 
 /**
@@ -55,140 +83,6 @@ export function mergeFrameReconstructionMetadata(
       },
     },
   }
-}
-
-export type ProjectMatchBindingContext = {
-  binding: PersistedMatchBinding | null
-  projectSceneId: string | null
-  projectScoped: boolean
-  inherited: boolean
-  label: string
-}
-
-/**
- * Describe the effective binding returned for the current scene. The backend
- * publishes the complete project snapshot on child scenes; the UI must not
- * mistake an inherited snapshot for an unbound shot.
- */
-export function projectMatchBindingContext(
-  scene: SceneDocument | null,
-): ProjectMatchBindingContext {
-  const binding = scene?.payload.matchBinding ?? null
-  const projectSceneId = binding?.projectSceneId
-    ?? scene?.payload.videoAsset?.multiPass?.parentSceneId
-    ?? scene?.payload.videoAsset?.parentSceneId
-    ?? scene?.id
-    ?? null
-  const projectScoped = binding?.scope === 'project'
-    || binding?.inherited === true
-    || Boolean(binding?.projectSceneId)
-  const inherited = binding?.inherited === true
-    || (projectScoped && Boolean(scene?.id && projectSceneId && scene.id !== projectSceneId))
-
-  if (!binding) {
-    return {
-      binding,
-      projectSceneId,
-      projectScoped: true,
-      inherited: false,
-      label: 'Project has no match data',
-    }
-  }
-
-  const source = `${matchDataProviderLabel(binding.source)} · #${binding.eventId}`
-  return {
-    binding,
-    projectSceneId,
-    projectScoped,
-    inherited,
-    label: inherited
-      ? `Inherited from video project · ${source}`
-      : projectScoped
-        ? `Project match data · ${source}`
-        : source,
-  }
-}
-
-/** Prefer the effective match snapshot over placeholder teams on child scenes. */
-export function resolvedProjectMatchTeams(
-  scene: SceneDocument | null,
-): { home: Team; away: Team } {
-  const fallbackHome = scene?.payload.teams[0] ?? {
-    id: 'home',
-    name: 'Home',
-    color: '#46d7c2',
-    externalTeamId: null,
-  }
-  const fallbackAway = scene?.payload.teams[1] ?? {
-    id: 'away',
-    name: 'Away',
-    color: '#f2c94c',
-    externalTeamId: null,
-  }
-  const binding = scene?.payload.matchBinding
-  const home = binding?.teams?.home ?? binding?.event?.home
-  const away = binding?.teams?.away ?? binding?.event?.away
-  return {
-    home: {
-      ...fallbackHome,
-      ...(home ? {
-        id: home.id || fallbackHome.id,
-        name: home.name || fallbackHome.name,
-        externalTeamId: home.id || fallbackHome.externalTeamId,
-      } : {}),
-    },
-    away: {
-      ...fallbackAway,
-      ...(away ? {
-        id: away.id || fallbackAway.id,
-        name: away.name || fallbackAway.name,
-        externalTeamId: away.id || fallbackAway.externalTeamId,
-      } : {}),
-    },
-  }
-}
-
-/** The effective persisted v2 snapshot is the only roster authority for identity work. */
-export function resolvedRosterPlayers(
-  scene: SceneDocument | null,
-): ExternalPlayer[] {
-  return scene?.payload.matchBinding?.players ?? []
-}
-
-/** Rehydrate event UI from the same offline snapshot used by reconstruction. */
-export function persistedEventBundle(scene: SceneDocument | null): EventBundle | null {
-  const binding = scene?.payload.matchBinding
-  if (binding?.schemaVersion !== 2 || !binding.event) return null
-  const quality = binding.rosterQuality
-  return {
-    source: binding.source,
-    event: binding.event,
-    players: binding.players ?? [],
-    lineup: binding.lineup ?? [],
-    timeline: binding.timeline ?? [],
-    substitutions: binding.substitutions ?? [],
-    roster_quality: quality
-      ? {
-          status: quality.status,
-          player_count: quality.playerCount,
-          home_player_count: quality.homePlayerCount,
-          away_player_count: quality.awayPlayerCount,
-          automatic_identity_eligible: quality.automaticIdentityEligible,
-          manual_identity_eligible: quality.manualIdentityEligible,
-          reasons: [...quality.reasons],
-        }
-      : null,
-    fetched_at: binding.fetchedAt ?? '',
-    warnings: binding.warnings ?? [],
-  }
-}
-
-export function matchBindingNeedsRefresh(scene: SceneDocument | null): boolean {
-  const binding = scene?.payload.matchBinding
-  if (!binding?.eventId || binding.source === 'manual') return false
-  if (binding.schemaVersion !== 2 || !binding.event) return true
-  const quality = binding.rosterQuality
-  return !quality || quality.status !== 'automatic-ready' || !quality.automaticIdentityEligible
 }
 
 export function identityValidationSummary(

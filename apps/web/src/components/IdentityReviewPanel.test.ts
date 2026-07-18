@@ -6,7 +6,8 @@ import type {
   IdentityReviewObservation,
   IdentityReviewWorkerState,
 } from '../lib/identityReview'
-import type { CanonicalPerson, ExternalPlayer } from '../types'
+import type { CanonicalPerson } from '../types/identity'
+import type { ExternalPlayer } from '../types/match'
 import IdentityReviewPanel from './IdentityReviewPanel.vue'
 
 const roster: ExternalPlayer[] = [
@@ -42,13 +43,13 @@ function identity(overrides: Partial<CanonicalPerson> = {}): CanonicalPerson {
       {
         externalPlayerId: 'player-8',
         rank: 1,
-        confidence: 0.74,
+        score: 0.74,
         reasons: ['team agrees'],
       },
       {
         externalPlayerId: 'player-10',
         rank: 2,
-        confidence: 0.91,
+        score: 0.91,
         reasons: ['jersey number agrees', 'team agrees'],
       },
     ],

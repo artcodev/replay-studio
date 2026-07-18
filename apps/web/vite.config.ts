@@ -11,7 +11,11 @@ export default defineConfig({
       output: {
         manualChunks(id) {
           if (id.includes('/node_modules/three/')) return 'three-vendor'
-          if (id.includes('/node_modules/vue/') || id.includes('/node_modules/@vue/')) return 'vue-vendor'
+          if (
+            id.includes('/node_modules/vue/')
+            || id.includes('/node_modules/@vue/')
+            || id.includes('/node_modules/vue-router/')
+          ) return 'vue-vendor'
         },
       },
     },

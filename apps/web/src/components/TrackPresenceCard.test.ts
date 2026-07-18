@@ -2,7 +2,7 @@ import { createSSRApp } from 'vue'
 import { renderToString } from '@vue/server-renderer'
 import { describe, expect, it } from 'vitest'
 import TrackPresenceCard from './TrackPresenceCard.vue'
-import type { Track } from '../types'
+import type { Track } from '../types/tracking'
 
 const track: Track = {
   id: 'player-10',

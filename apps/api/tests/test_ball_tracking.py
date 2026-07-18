@@ -2,8 +2,9 @@ from dataclasses import fields
 
 import pytest
 
-import app.ball_tracking as ball_tracking
-from app.ball_tracking import BallTrackingConfig, resolve_ball_trajectory
+import app.ball_tracking_solver as ball_tracking_solver
+from app.ball_tracking import resolve_ball_trajectory
+from app.ball_tracking_contract import BallTrackingConfig
 
 
 FRAME_SIZE = (960, 540)
@@ -221,7 +222,7 @@ def test_top_k_and_invalid_candidates_are_reported():
     assert result.diagnostics["candidateCount"] == 4
 
 
-def test_insufficient_evidence_returns_empty_legacy_track_with_diagnostics():
+def test_insufficient_evidence_returns_empty_track_with_diagnostics():
     result = resolve_ball_trajectory(
         [([{"id": "single", "x": 100, "y": 200, "confidence": 0.9}], 0.0)],
         FRAME_SIZE,
@@ -246,13 +247,15 @@ def test_long_sequence_uses_shared_backpointers_and_keeps_beam_bounded(monkeypat
     frame_count = 2_000
     config = BallTrackingConfig(top_k_per_frame=1, beam_width=8)
     materialised_depths = []
-    original_materialise = ball_tracking._materialise_steps
+    original_materialise = ball_tracking_solver._materialise_steps
 
     def record_materialisation(tail):
         materialised_depths.append(tail.depth)
         return original_materialise(tail)
 
-    monkeypatch.setattr(ball_tracking, "_materialise_steps", record_materialisation)
+    monkeypatch.setattr(
+        ball_tracking_solver, "_materialise_steps", record_materialisation
+    )
     frames = [
         (
             [
@@ -270,7 +273,9 @@ def test_long_sequence_uses_shared_backpointers_and_keeps_beam_bounded(monkeypat
 
     result = resolve_ball_trajectory(frames, FRAME_SIZE, PITCH, config=config)
 
-    hypothesis_fields = {item.name for item in fields(ball_tracking._Hypothesis)}
+    hypothesis_fields = {
+        item.name for item in fields(ball_tracking_solver._Hypothesis)
+    }
     assert "tail" in hypothesis_fields
     assert "steps" not in hypothesis_fields
     assert materialised_depths == [frame_count]

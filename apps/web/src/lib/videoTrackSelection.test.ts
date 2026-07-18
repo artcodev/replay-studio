@@ -19,16 +19,15 @@ const analysis = {
 
 describe('video and 3D track selection', () => {
   it('uses only detector-backed frame matches for the video highlight', () => {
-    expect(selectedFramePeople(analysis, 'track-7').map((person) => person.id)).toEqual(['person-3'])
-    expect(selectedFramePeople(analysis, 'track-7', 'canonical-7').map((person) => person.id)).toEqual([
+    expect(selectedFramePeople(analysis, 'canonical-7').map((person) => person.id)).toEqual([
       'person-1', 'person-3',
     ])
-    expect(selectedFramePeople(analysis, 'track-8')).toEqual([])
-    expect(selectedFramePeople(null, 'track-7')).toEqual([])
+    expect(selectedFramePeople(analysis, 'canonical-8')).toEqual([])
+    expect(selectedFramePeople(null, 'canonical-7')).toEqual([])
   })
 
   it('uses canonical identity before a stale render-track match', () => {
-    expect(selectedFramePeople(analysis, 'track-wrong', 'canonical-7').map((person) => person.id)).toEqual([
+    expect(selectedFramePeople(analysis, 'canonical-7').map((person) => person.id)).toEqual([
       'person-1', 'person-3',
     ])
   })
@@ -48,9 +47,10 @@ describe('video and 3D track selection', () => {
     }, [{ id: 'track-7', canonicalPersonId: 'canonical-7' }])).toBeNull()
   })
 
-  it('falls back to matchedTrackId for legacy frame analyses without canonical ids', () => {
-    const legacy = { people: [{ id: 'legacy', matchedTrackId: 'track-7' }] }
-    expect(selectedFramePeople(legacy, 'track-7', 'canonical-7')).toEqual(legacy.people)
+  it('does not bind unresolved frame detections through render-track ids', () => {
+    const unresolved = { people: [{ id: 'unresolved', matchedTrackId: 'track-7' }] }
+    expect(selectedFramePeople(unresolved, 'canonical-7')).toEqual([])
+    expect(renderTrackForFramePerson(unresolved.people[0], [{ id: 'track-7' }])).toBeNull()
   })
 
   it('reports a visible selected track and preserves duplicate match evidence', () => {
@@ -116,11 +116,11 @@ describe('video and 3D track selection', () => {
     expect(selectionAfterFrameAnalysis(null, null, 'track-7')).toBe('track-7')
   })
 
-  it('does not attach the first canonical identity to a selected legacy track', () => {
+  it('does not attach the first canonical identity to a selected unbound track', () => {
     expect(canonicalSelectionAfterFrameAnalysis(
       null,
       null,
-      'legacy-track-8',
+      'unbound-track-8',
       null,
       'canonical-first-result',
     )).toBeNull()
@@ -150,6 +150,7 @@ describe('video and 3D track selection', () => {
   it('keeps visible identity evidence distinct from an uncertain 3D position', () => {
     const person = {
       matchedTrackId: 'track-7',
+      canonicalPersonId: 'canonical-7',
       metricStatus: 'rejected' as const,
       metricReason: 'outside calibrated pitch',
       positionSource: 'track-inferred' as const,
@@ -167,6 +168,7 @@ describe('video and 3D track selection', () => {
   it('marks accepted observation projections as metric without overriding visible status', () => {
     const person = {
       matchedTrackId: 'track-7',
+      canonicalPersonId: 'canonical-7',
       metricStatus: 'accepted' as const,
       metricReason: null,
       positionSource: 'observation' as const,
@@ -179,6 +181,7 @@ describe('video and 3D track selection', () => {
   it('treats a track-inferred position as uncertain even for a linked bbox', () => {
     const person = {
       matchedTrackId: 'track-7',
+      canonicalPersonId: 'canonical-7',
       metricStatus: null,
       metricReason: null,
       positionSource: 'track-inferred' as const,
@@ -186,7 +189,7 @@ describe('video and 3D track selection', () => {
 
     expect(frameMetricBadge(person)).toBe('UNCERTAIN')
     expect(linkedFrameMetricSelectionStatus(person, null)?.detail).toBe(
-      'track-7 · using a track-inferred 3D position',
+      'canonical-7 · using a track-inferred 3D position',
     )
   })
 

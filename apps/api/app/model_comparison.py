@@ -3,30 +3,37 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from math import hypot
 from time import perf_counter
+from typing import Callable
 
 import numpy as np
 
 from .config import get_settings
-from .pitch_calibration import PitchCalibration
-from .reconstruction import (
-    METRIC_CALIBRATION_THRESHOLD,
-    Detection,
-    TrackState,
-    _camera_step,
-    _frame_paths,
-    _load_model,
-    _person_detections,
-    _project_unclamped,
-    _saved_pitch_calibration,
-    _scene_tracks,
-    _stabilize_detections,
-    _team_clusters,
-    _track_people,
+from .model_comparison_contract import BASELINE_MODEL, CANDIDATE_MODEL
+from .pitch_calibration_contract import PitchCalibration
+from .reconstruction_calibration_policy import METRIC_CALIBRATION_THRESHOLD
+from .reconstruction_person_detection_contract import Detection
+from .reconstruction_track_state import TrackState
+from .reconstruction_identity_read_model import (
+    saved_pitch_calibration as _saved_pitch_calibration,
+)
+from .reconstruction_person_tracking import track_people as _track_people
+from .reconstruction_team_classification import team_clusters as _team_clusters
+from .reconstruction_inputs import frame_paths as _frame_paths, load_model as _load_model
+from .reconstruction_motion import (
+    camera_step as _camera_step,
+    stabilize_detections as _stabilize_detections,
+)
+from .ultralytics_person_inference import (
+    parse_person_detections as _parse_person_detections,
+)
+from .reconstruction_scene_track_publisher import (
+    publish_scene_tracks as _scene_tracks,
+)
+from .reconstruction_pitch_projection import (
+    project_pitch_point_unclamped as _project_pitch_point_unclamped,
 )
 
 
-BASELINE_MODEL = "yolo26n.pt"
-CANDIDATE_MODEL = "yolo26m.pt"
 MODEL_COMPARISON_IMAGE_SIZE = 1280
 MODEL_COMPARISON_CONFIDENCE = 0.035
 OUTSIDE_PITCH_MARGIN_METRES = 1.5
@@ -49,7 +56,7 @@ def _observation(
     calibration: PitchCalibration | None,
 ) -> dict:
     width, height = frame_size
-    pitch_position = _project_unclamped(
+    pitch_position = _project_pitch_point_unclamped(
         detection.x,
         detection.y,
         width,
@@ -124,7 +131,7 @@ def _run_model(scene: dict, model_name: str) -> tuple[dict, list[list[dict]]]:
         )[0]
         inference_seconds += perf_counter() - started
         frame_size = (result.orig_img.shape[1], result.orig_img.shape[0])
-        people, balls = _person_detections(result)
+        people, balls = _parse_person_detections(result)
         if previous_image is not None:
             camera_transform = camera_transform @ _camera_step(previous_image, result.orig_img)
         _stabilize_detections(people, balls, camera_transform)
@@ -254,8 +261,15 @@ def _comparison_summary(
     }
 
 
-def compare_scene_models(scene: dict) -> dict:
+def compare_scene_models(
+    scene: dict,
+    on_progress: Callable[[str, int, int], None] | None = None,
+) -> dict:
+    if on_progress is not None:
+        on_progress("baseline", 0, 2)
     baseline, baseline_frames = _run_model(scene, BASELINE_MODEL)
+    if on_progress is not None:
+        on_progress("candidate", 1, 2)
     candidate, candidate_frames = _run_model(scene, CANDIDATE_MODEL)
     calibration = _saved_pitch_calibration(scene)
     metric_projection = calibration is not None and calibration.confidence >= METRIC_CALIBRATION_THRESHOLD

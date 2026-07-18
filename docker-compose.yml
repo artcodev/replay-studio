@@ -1,6 +1,7 @@
 services:
   postgres:
     image: postgres:17-alpine
+    restart: unless-stopped
     environment:
       POSTGRES_DB: replay_studio
       POSTGRES_USER: replay
@@ -15,26 +16,22 @@ services:
 
   redis:
     image: redis:7-alpine
+    restart: unless-stopped
     command: redis-server --save 60 1
     volumes:
       - redis-data:/data
-
-  minio:
-    image: minio/minio:latest
-    command: server /data --console-address ":9001"
-    environment:
-      MINIO_ROOT_USER: replay
-      MINIO_ROOT_PASSWORD: replay-studio
-    ports:
-      - "9001:9001"
-    volumes:
-      - minio-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
 
   calibration-worker:
     # The pinned SoccerNet/OpenMMLab stack has reliable x86_64 wheels only.
     # Docker Desktop runs these through Rosetta on Apple Silicon.
     platform: ${ML_WORKER_PLATFORM:-linux/amd64}
     build: ./services/calibration-worker
+    restart: unless-stopped
     environment:
       PNLCALIB_DEVICE: cpu
       PNLCALIB_BATCH_SIZE: 2
@@ -48,7 +45,7 @@ services:
       retries: 20
       start_period: 90s
     ports:
-      - "8090:8090"
+      - "127.0.0.1:8090:8090"
 
   identity-worker:
     platform: ${ML_WORKER_PLATFORM:-linux/amd64}
@@ -57,6 +54,7 @@ services:
       args:
         SOCCERNET_COMMIT: 1c958345067218297d221e45e1a6405f975f83e0
         REID_DOWNLOAD_MODELS: ${REID_DOWNLOAD_MODELS:-1}
+    restart: unless-stopped
     environment:
       REID_DEVICE: ${REID_DEVICE:-cpu}
       REID_BATCH_SIZE: ${REID_BATCH_SIZE:-8}
@@ -75,7 +73,7 @@ services:
       retries: 20
       start_period: 90s
     ports:
-      - "8091:8091"
+      - "127.0.0.1:8091:8091"
 
   jersey-ocr-worker:
     platform: ${ML_WORKER_PLATFORM:-linux/amd64}
@@ -84,6 +82,7 @@ services:
       args:
         JERSEY_OCR_PROVIDER: ${JERSEY_OCR_PROVIDER:-mmocr}
         JERSEY_OCR_DOWNLOAD_MODELS: ${JERSEY_OCR_DOWNLOAD_MODELS:-1}
+    restart: unless-stopped
     environment:
       JERSEY_OCR_PROVIDER: ${JERSEY_OCR_PROVIDER:-mmocr}
       JERSEY_OCR_DEVICE: ${JERSEY_OCR_DEVICE:-cpu}
@@ -107,7 +106,7 @@ services:
       retries: 20
       start_period: 120s
     ports:
-      - "8093:8093"
+      - "127.0.0.1:8093:8093"
 
   ball-worker:
     profiles: ["challengers"]
@@ -116,6 +115,7 @@ services:
       args:
         TORCH_VERSION: 2.2.2
         TORCH_INDEX_URL: ${WASB_TORCH_INDEX_URL:-https://download.pytorch.org/whl/cpu}
+    restart: unless-stopped
     environment:
       WASB_DEVICE: ${WASB_DEVICE:-cpu}
       WASB_PRELOAD: ${WASB_PRELOAD:-1}
@@ -132,10 +132,21 @@ services:
       retries: 20
       start_period: 120s
     ports:
-      - "8092:8092"
+      - "127.0.0.1:8092:8092"
+
+  migrate:
+    build: ./apps/api
+    restart: "no"
+    command: ["alembic", "-c", "/app/alembic.ini", "upgrade", "head"]
+    environment:
+      DATABASE_URL: postgresql+psycopg://replay:replay@postgres:5432/replay_studio
+    depends_on:
+      postgres:
+        condition: service_healthy
 
   api:
     build: ./apps/api
+    restart: unless-stopped
     environment:
       DATABASE_URL: postgresql+psycopg://replay:replay@postgres:5432/replay_studio
       REDIS_URL: redis://redis:6379/0
@@ -149,6 +160,7 @@ services:
       CALIBRATION_WORKER_URL: http://calibration-worker:8090
       CALIBRATION_WORKER_TIMEOUT: 900
       CALIBRATION_WORKER_BATCH_SIZE: 2
+      CALIBRATION_ANCHOR_MAX_GAP_SECONDS: ${CALIBRATION_ANCHOR_MAX_GAP_SECONDS:-1.0}
       IDENTITY_WORKER_URL: http://identity-worker:8091
       IDENTITY_WORKER_TIMEOUT: 900
       IDENTITY_WORKER_BATCH_SIZE: 4
@@ -160,7 +172,7 @@ services:
       RECONSTRUCTION_LEASE_TTL_SECONDS: 180
       RECONSTRUCTION_LEASE_HEARTBEAT_SECONDS: 15
       RECONSTRUCTION_RECOVERY_POLL_SECONDS: 5
-      RECONSTRUCTION_RECOVERY_MAX_WORKERS: 2
+      RECONSTRUCTION_RECOVERY_MAX_WORKERS: 1
       BALL_DETECTION_BACKEND: ${BALL_DETECTION_BACKEND:-dedicated-ultralytics}
       BALL_DETECTION_MODEL: /app/models/football-ball-detection.pt
       BALL_DETECTION_CONFIDENCE: ${BALL_DETECTION_CONFIDENCE:-0.05}
@@ -168,19 +180,27 @@ services:
       BALL_DETECTION_TILE_SIZE: 640
       BALL_DETECTION_TILE_OVERLAP: 0.20
       BALL_DETECTION_INFERENCE_BATCH_SIZE: ${BALL_DETECTION_INFERENCE_BATCH_SIZE:-8}
+      BALL_DETECTION_CHECKPOINT_INTERVAL: ${BALL_DETECTION_CHECKPOINT_INTERVAL:-4}
+      BALL_DETECTION_FULL_SCAN_INTERVAL: ${BALL_DETECTION_FULL_SCAN_INTERVAL:-5}
+      BALL_DETECTION_ROI_REGION_COUNT: ${BALL_DETECTION_ROI_REGION_COUNT:-3}
+      BALL_DETECTION_ROI_PADDING: ${BALL_DETECTION_ROI_PADDING:-320}
       BALL_DETECTION_NMS_IOU: 0.10
       BALL_DETECTION_MAX_CANDIDATES: 12
       BALL_ANALYSIS_FRAME_RATE: ${BALL_ANALYSIS_FRAME_RATE:-25}
-      BALL_WASB_WORKER_URL: http://ball-worker:8092/detect
+      BALL_WASB_WORKER_URL: http://ball-worker:8092/v1/detections
       BALL_WASB_TIMEOUT: 120
       BALL_DETECTION_FAILURE_POLICY: fallback
     depends_on:
       postgres:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
       redis:
-        condition: service_started
-      calibration-worker:
         condition: service_healthy
+      calibration-worker:
+        # Calibration readiness is reported by /api/health, but a missing
+        # checkpoint must not prevent catalog/editor workflows from starting.
+        condition: service_started
       identity-worker:
         # Missing ReID assets must remain observable, but must not prevent the
         # API from serving calibration/editor workflows.
@@ -190,19 +210,137 @@ services:
         # A failed model remains visible through /api/health.
         condition: service_started
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"
     volumes:
       - media-data:/data/media
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=5)"]
+      interval: 10s
+      timeout: 6s
+      retries: 12
+      start_period: 20s
+
+  reconstruction-runner:
+    build: ./apps/api
+    restart: unless-stopped
+    command: ["python", "-m", "app.reconstruction_runner"]
+    environment:
+      DATABASE_URL: postgresql+psycopg://replay:replay@postgres:5432/replay_studio
+      MEDIA_ROOT: /data/media
+      CALIBRATION_WORKER_URL: http://calibration-worker:8090
+      CALIBRATION_WORKER_TIMEOUT: 900
+      CALIBRATION_WORKER_BATCH_SIZE: 2
+      CALIBRATION_ANCHOR_MAX_GAP_SECONDS: ${CALIBRATION_ANCHOR_MAX_GAP_SECONDS:-1.0}
+      IDENTITY_WORKER_URL: http://identity-worker:8091
+      IDENTITY_WORKER_TIMEOUT: 900
+      IDENTITY_WORKER_BATCH_SIZE: 4
+      JERSEY_OCR_WORKER_URL: http://jersey-ocr-worker:8093
+      JERSEY_OCR_WORKER_TIMEOUT: 900
+      JERSEY_OCR_WORKER_BATCH_SIZE: 32
+      RECONSTRUCTION_FRAME_RATE: 10
+      RECONSTRUCTION_MODEL: yolo26m.pt
+      RECONSTRUCTION_LEASE_TTL_SECONDS: 180
+      RECONSTRUCTION_LEASE_HEARTBEAT_SECONDS: 15
+      RECONSTRUCTION_RECOVERY_POLL_SECONDS: 5
+      RECONSTRUCTION_RECOVERY_MAX_WORKERS: 1
+      BALL_DETECTION_BACKEND: ${BALL_DETECTION_BACKEND:-dedicated-ultralytics}
+      BALL_DETECTION_MODEL: /app/models/football-ball-detection.pt
+      BALL_DETECTION_CONFIDENCE: ${BALL_DETECTION_CONFIDENCE:-0.05}
+      BALL_DETECTION_IMAGE_SIZE: 640
+      BALL_DETECTION_TILE_SIZE: 640
+      BALL_DETECTION_TILE_OVERLAP: 0.20
+      BALL_DETECTION_INFERENCE_BATCH_SIZE: ${BALL_DETECTION_INFERENCE_BATCH_SIZE:-8}
+      BALL_DETECTION_CHECKPOINT_INTERVAL: ${BALL_DETECTION_CHECKPOINT_INTERVAL:-4}
+      BALL_DETECTION_FULL_SCAN_INTERVAL: ${BALL_DETECTION_FULL_SCAN_INTERVAL:-5}
+      BALL_DETECTION_ROI_REGION_COUNT: ${BALL_DETECTION_ROI_REGION_COUNT:-3}
+      BALL_DETECTION_ROI_PADDING: ${BALL_DETECTION_ROI_PADDING:-320}
+      BALL_DETECTION_NMS_IOU: 0.10
+      BALL_DETECTION_MAX_CANDIDATES: 12
+      BALL_ANALYSIS_FRAME_RATE: ${BALL_ANALYSIS_FRAME_RATE:-25}
+      BALL_WASB_WORKER_URL: http://ball-worker:8092/v1/detections
+      BALL_WASB_TIMEOUT: 120
+      BALL_DETECTION_FAILURE_POLICY: fallback
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+      calibration-worker:
+        condition: service_started
+      identity-worker:
+        condition: service_started
+      jersey-ocr-worker:
+        condition: service_started
+    volumes:
+      - media-data:/data/media
+    healthcheck:
+      test: ["CMD-SHELL", "kill -0 1"]
+      interval: 15s
+      timeout: 3s
+      retries: 5
+
+  pipeline-runner:
+    build: ./apps/api
+    restart: unless-stopped
+    command: ["python", "-m", "app.pipeline_runner"]
+    environment:
+      DATABASE_URL: postgresql+psycopg://replay:replay@postgres:5432/replay_studio
+      MEDIA_ROOT: /data/media
+      CALIBRATION_WORKER_URL: http://calibration-worker:8090
+      CALIBRATION_WORKER_TIMEOUT: 900
+      CALIBRATION_WORKER_BATCH_SIZE: 2
+      CALIBRATION_ANCHOR_MAX_GAP_SECONDS: ${CALIBRATION_ANCHOR_MAX_GAP_SECONDS:-1.0}
+      IDENTITY_WORKER_URL: http://identity-worker:8091
+      IDENTITY_WORKER_TIMEOUT: 900
+      IDENTITY_WORKER_BATCH_SIZE: 4
+      JERSEY_OCR_WORKER_URL: http://jersey-ocr-worker:8093
+      JERSEY_OCR_WORKER_TIMEOUT: 900
+      JERSEY_OCR_WORKER_BATCH_SIZE: 32
+      RECONSTRUCTION_FRAME_RATE: 10
+      RECONSTRUCTION_MODEL: yolo26m.pt
+      PIPELINE_LEASE_TTL_SECONDS: 120
+      PIPELINE_LEASE_HEARTBEAT_SECONDS: 10
+      PIPELINE_RECOVERY_POLL_SECONDS: 2
+      PIPELINE_RECOVERY_MAX_WORKERS: 2
+      PIPELINE_DEPENDENCY_POLL_SECONDS: 2
+      BALL_DETECTION_BACKEND: ${BALL_DETECTION_BACKEND:-dedicated-ultralytics}
+      BALL_DETECTION_MODEL: /app/models/football-ball-detection.pt
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+      calibration-worker:
+        condition: service_started
+      identity-worker:
+        condition: service_started
+      jersey-ocr-worker:
+        condition: service_started
+    volumes:
+      - media-data:/data/media
+    healthcheck:
+      test: ["CMD-SHELL", "kill -0 1"]
+      interval: 15s
+      timeout: 3s
+      retries: 5
 
   web:
-    build: ./apps/web
+    build:
+      context: .
+      dockerfile: apps/web/Dockerfile
+    restart: unless-stopped
     depends_on:
-      - api
+      api:
+        condition: service_healthy
     ports:
-      - "8080:80"
+      - "127.0.0.1:8080:80"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1/"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
 
 volumes:
   postgres-data:
   redis-data:
-  minio-data:
   media-data:

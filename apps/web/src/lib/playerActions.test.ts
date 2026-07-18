@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import type { PlayerAction, PlayerActionType } from '../types'
+import type { PlayerAction, PlayerActionType } from '../types/playerActions'
 import {
   PLAYER_ACTION_CATEGORY_META,
   PLAYER_ACTION_TAXONOMY,

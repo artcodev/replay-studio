@@ -10,47 +10,15 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
-import app.store as store_module
 from app.database import Base
-from app.main import _manual_match_bundle, app
-from app.schemas import ManualMatchImportRequest
-from app.store import SceneStore, reconstruction_input_fingerprint
-
-
-def _scene(*, status: str = "ready") -> dict:
-    scene = {
-        "id": "manual-import-scene",
-        "title": "Manual import",
-        "version": 1,
-        "duration": 4.0,
-        "payload": {
-            "videoAsset": {
-                "id": "asset-manual",
-                "selectedSegmentId": "segment-1",
-                "sourceStart": 0.0,
-                "sourceEnd": 4.0,
-                "analysisFps": 10.0,
-                "processingState": "tracks-ready",
-                "reconstruction": {
-                    "status": status,
-                    "model": "yolo26m.pt",
-                    "runId": "run-current",
-                    "runRevision": 3,
-                    "frameAnnotations": [],
-                },
-            },
-            "teams": [
-                {"id": "home", "name": "Old Home", "color": "#f00"},
-                {"id": "away", "name": "Old Away", "color": "#00f"},
-            ],
-            "canonicalPeople": [],
-            "tracks": [],
-            "ball": {"keyframes": []},
-        },
-    }
-    reconstruction = scene["payload"]["videoAsset"]["reconstruction"]
-    reconstruction["inputFingerprint"] = reconstruction_input_fingerprint(scene)
-    return scene
+from app.main import app
+import app.match_import_routes as match_import_routes
+from app.manual_match_import import build_manual_match_bundle
+from app.external_reference_repository import ExternalReferenceRepository
+from app.project_match_repository import ProjectMatchRepository
+from app.project_lifecycle_contract import ProjectCreate
+from app.project_store import ProjectStore
+from app.match_contracts import ManualMatchImportRequest
 
 
 def _request_body(*, player_count: int = 22) -> dict:
@@ -62,7 +30,11 @@ def _request_body(*, player_count: int = 22) -> dict:
                 "id": f"player-{index}",
                 "name": f"Player {index}",
                 "team_id": "team-home" if home else "team-away",
-                "number": str(index + 1 if home else index + 1 - (player_count + 1) // 2),
+                "number": str(
+                    index + 1
+                    if home
+                    else index + 1 - (player_count + 1) // 2
+                ),
                 "position": "Midfielder",
                 "lineup_role": "starter",
             }
@@ -90,7 +62,10 @@ def _request_body(*, player_count: int = 22) -> dict:
 
 async def _async_request(method: str, path: str, **kwargs):
     transport = httpx.ASGITransport(app=app)
-    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+    async with httpx.AsyncClient(
+        transport=transport,
+        base_url="http://testserver",
+    ) as client:
         return await client.request(method, path, **kwargs)
 
 
@@ -99,132 +74,82 @@ def _request(method: str, path: str, **kwargs):
 
 
 @pytest.fixture
-def isolated_store(monkeypatch) -> SceneStore:
+def match_persistence(monkeypatch):
     engine = create_engine(
         "sqlite+pysqlite://",
         connect_args={"check_same_thread": False},
         poolclass=StaticPool,
     )
     Base.metadata.create_all(engine)
-    session_local = sessionmaker(bind=engine, expire_on_commit=False)
-    monkeypatch.setattr(store_module, "SessionLocal", session_local)
-    return SceneStore()
+    sessions = sessionmaker(bind=engine, expire_on_commit=False)
+    store = ProjectStore(sessions)
+    matches = ProjectMatchRepository(sessions)
+    references = ExternalReferenceRepository(sessions)
+    store.create_project(ProjectCreate(id="project-manual", title="Manual match"))
+    monkeypatch.setattr(match_import_routes, "project_store", store)
+    monkeypatch.setattr(match_import_routes, "project_matches", matches)
+    monkeypatch.setattr(match_import_routes, "external_references", references)
+    yield store, matches
+    Base.metadata.drop_all(engine)
+    engine.dispose()
 
 
-def test_manual_json_import_persists_v2_snapshot_and_queues_rebuild(
-    isolated_store: SceneStore,
-    monkeypatch,
+def test_manual_json_import_updates_only_the_canonical_project_match(
+    match_persistence,
 ) -> None:
-    isolated_store.put(_scene())
-    monkeypatch.setattr("app.main.reconstruct_scene_by_id", lambda *_: None)
-    monkeypatch.setattr("app.reconstruction._frame_paths", lambda _: [("frame", 0.0)])
+    _projects, matches = match_persistence
     body = _request_body()
     body["timeline"] = [
         {
-            "id": "timeline-sub-1",
+            "id": "goal-1",
             "minute": 61,
-            "type": "substitution",
-            "label": "Substitution",
+            "type": "goal",
+            "label": "Goal",
             "player_id": "player-0",
-            "secondary_player_id": "player-1",
-        }
-    ]
-    body["substitutions"] = [
-        {
-            "id": "sub-1",
-            "minute": 61,
-            "player_out_id": "player-0",
-            "player_in_id": "player-1",
-            "label": "Substitution",
         }
     ]
 
     response = _request(
         "POST",
-        "/api/scenes/manual-import-scene/match-binding/import",
+        "/api/projects/project-manual/match/import",
         json=body,
     )
 
     assert response.status_code == 200, response.text
-    payload = response.json()
-    binding = payload["scene"]["payload"]["matchBinding"]
-    assert binding["schemaVersion"] == 2
-    assert binding["source"] == "manual"
-    assert binding["eventId"] == "manual-event-1"
-    assert binding["event"]["home"]["id"] == "team-home"
-    assert len(binding["players"]) == 22
-    assert len(binding["lineup"]) == 22
-    assert binding["lineup"][0]["id"] == "manual-lineup-player-0"
-    assert binding["timeline"][0]["player_name"] == "Player 0"
-    assert binding["timeline"][0]["team_id"] == "team-home"
-    assert binding["substitutions"][0]["player_in_name"] == "Player 1"
-    assert binding["rosterQuality"] == {
-        "status": "automatic-ready",
-        "playerCount": 22,
-        "homePlayerCount": 11,
-        "awayPlayerCount": 11,
-        "automaticIdentityEligible": True,
-        "manualIdentityEligible": True,
-        "reasons": [],
-    }
-    assert binding["fetchedAt"] == binding["provenance"]["importedAt"]
-    assert binding["provenance"]["kind"] == "manual-json"
-    assert binding["provenance"]["capturedAt"] == "2026-07-17T12:30:00+00:00"
-    assert payload["bundle"]["source"] == "manual"
-    assert payload["bundle"]["roster_quality"]["automatic_identity_eligible"] is True
-    reconstruction = payload["scene"]["payload"]["videoAsset"]["reconstruction"]
-    assert reconstruction["status"] == "queued"
-    assert reconstruction["runId"] != "run-current"
-    assert reconstruction["inputFingerprint"] == reconstruction_input_fingerprint(
-        payload["scene"]
-    )
+    match = response.json()
+    assert match["sync"]["state"] == "manual"
+    assert match["homeTeam"]["name"] == "Manual Home"
+    assert match["awayTeam"]["name"] == "Manual Away"
+    assert len(match["roster"]) == 22
+    assert len(match["events"]) == 1
+    assert match["events"][0]["label"] == "Goal"
+    # Provider/upstream ids stay behind the canonical Project API boundary.
+    assert match["homeTeam"]["id"] != "team-home"
+    assert match["roster"][0]["id"] != "player-0"
+    assert "provider" not in str(match).lower()
+
+    snapshot = matches.current_payload("project-manual")
+    assert snapshot is not None
+    assert snapshot["id"] == match["id"]
+    assert len(snapshot["roster"]) == 22
 
 
-def test_bundled_spain_belgium_roster_stays_strict_and_automatic_ready() -> None:
-    fixture_path = (
-        Path(__file__).resolve().parents[3]
-        / "data"
-        / "matches"
-        / "spain-belgium-2026-qf.json"
-    )
-    request = ManualMatchImportRequest.model_validate(
-        json.loads(fixture_path.read_text(encoding="utf-8"))
-    )
-
-    bundle, provenance = _manual_match_bundle(request)
-
-    assert len(bundle.players) == 52
-    assert len(bundle.lineup) == 52
-    assert len(bundle.timeline) == 7
-    assert len(bundle.substitutions) == 9
-    assert bundle.roster_quality.automatic_identity_eligible is True
-    assert provenance["kind"] == "manual-json"
-
-
-def test_minimal_partial_manual_roster_remains_available_for_manual_binding(
-    isolated_store: SceneStore,
-    monkeypatch,
+def test_partial_manual_roster_remains_available_for_manual_identity(
+    match_persistence,
 ) -> None:
-    isolated_store.put(_scene())
-    monkeypatch.setattr("app.main.reconstruct_scene_by_id", lambda *_: None)
-    monkeypatch.setattr("app.reconstruction._frame_paths", lambda _: [("frame", 0.0)])
-    body = _request_body(player_count=2)
-
+    _projects, matches = match_persistence
     response = _request(
         "POST",
-        "/api/scenes/manual-import-scene/match-binding/import",
-        json=body,
+        "/api/projects/project-manual/match/import",
+        json=_request_body(player_count=2),
     )
 
     assert response.status_code == 200, response.text
-    binding = response.json()["scene"]["payload"]["matchBinding"]
-    assert binding["rosterQuality"]["automaticIdentityEligible"] is False
-    assert binding["rosterQuality"]["manualIdentityEligible"] is True
-    assert binding["rosterQuality"]["reasons"] == [
-        "fewer-than-eleven-players-per-team"
-    ]
-    assert "provider-five-player-cap" not in binding["rosterQuality"]["reasons"]
-    assert len(binding["players"]) == 2
+    assert len(response.json()["roster"]) == 2
+    snapshot = matches.current_payload("project-manual")
+    assert snapshot is not None
+    assert snapshot["rosterQuality"]["automaticIdentityEligible"] is False
+    assert snapshot["rosterQuality"]["manualIdentityEligible"] is True
 
 
 @pytest.mark.parametrize(
@@ -245,70 +170,47 @@ def test_minimal_partial_manual_roster_remains_available_for_manual_binding(
         ),
     ],
 )
-def test_manual_import_is_strict_and_never_partially_persists(
-    isolated_store: SceneStore,
+def test_invalid_manual_import_never_changes_the_current_project_snapshot(
+    match_persistence,
     mutation,
     detail: str,
 ) -> None:
-    initial = isolated_store.put(_scene())
+    projects, _matches = match_persistence
+    before = projects.get_project("project-manual")
+    assert before is not None
     body = _request_body()
     mutation(body)
 
     response = _request(
         "POST",
-        "/api/scenes/manual-import-scene/match-binding/import",
+        "/api/projects/project-manual/match/import",
         json=body,
     )
 
     assert response.status_code == 422
     assert detail in response.text
-    saved = isolated_store.get("manual-import-scene")
-    assert saved is not None
-    assert saved["revision"] == initial["revision"]
-    assert saved["payload"].get("matchBinding") is None
+    after = projects.get_project("project-manual")
+    assert after is not None
+    assert after.revision == before.revision
+    assert after.current_match_snapshot_id is None
 
 
-def test_manual_import_rejects_running_reconstruction_before_mutation(
-    isolated_store: SceneStore,
-) -> None:
-    isolated_store.put(_scene(status="processing"))
-
-    response = _request(
-        "POST",
-        "/api/scenes/manual-import-scene/match-binding/import",
-        json=_request_body(),
+def test_bundled_spain_belgium_roster_stays_strict_and_automatic_ready() -> None:
+    fixture_path = (
+        Path(__file__).resolve().parents[3]
+        / "data"
+        / "matches"
+        / "spain-belgium-2026-qf.json"
+    )
+    request = ManualMatchImportRequest.model_validate(
+        json.loads(fixture_path.read_text(encoding="utf-8"))
     )
 
-    assert response.status_code == 409
-    assert "Wait for reconstruction" in response.json()["detail"]
+    bundle, provenance = build_manual_match_bundle(request)
 
-
-def test_manual_import_cannot_orphan_an_existing_roster_binding(
-    isolated_store: SceneStore,
-) -> None:
-    scene = _scene()
-    scene["payload"]["canonicalPeople"] = [
-        {
-            "id": "canonical-0",
-            "canonicalPersonId": "canonical-0",
-            "teamId": "home",
-            "role": "player",
-            "externalPlayerId": "player-0",
-        }
-    ]
-    isolated_store.put(scene)
-    body = _request_body()
-    body["players"][0]["team_id"] = "team-away"
-    body["players"][0]["number"] = "99"
-
-    response = _request(
-        "POST",
-        "/api/scenes/manual-import-scene/match-binding/import",
-        json=body,
-    )
-
-    assert response.status_code == 409
-    assert "Unbind canonical roster player player-0" in response.json()["detail"]
-    saved = isolated_store.get("manual-import-scene")
-    assert saved is not None
-    assert saved["payload"].get("matchBinding") is None
+    assert len(bundle.players) == 52
+    assert len(bundle.lineup) == 52
+    assert len(bundle.timeline) == 7
+    assert len(bundle.substitutions) == 9
+    assert bundle.roster_quality.automatic_identity_eligible is True
+    assert provenance["kind"] == "manual-json"

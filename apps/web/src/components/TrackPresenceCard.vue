@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import { trackPresenceAtTime, trackPresenceSummary } from '../lib/trackPresence'
-import type { Track } from '../types'
+import type { Track } from '../types/tracking'
 
 const props = defineProps<{
   track: Track

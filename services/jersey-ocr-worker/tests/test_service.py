@@ -8,8 +8,9 @@ import httpx
 import numpy as np
 from PIL import Image
 
-from jersey_ocr_worker_service.main import QualityPolicy, create_app
-from jersey_ocr_worker_service.providers import (
+from jersey_ocr_worker_service.analysis_policy import QualityPolicy
+from jersey_ocr_worker_service.main import create_app
+from jersey_ocr_worker_service.provider_contract import (
     OcrResult,
     OcrSample,
     ProviderUnavailable,

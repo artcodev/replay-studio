@@ -1,21 +1,32 @@
 from __future__ import annotations
 
-from contextvars import ContextVar
 from typing import Any
 
 from ..config import Settings, get_settings
-from ..schemas import EventBundle, ExternalEvent
-from .api_football import ApiFootballProvider
+from ..match_contracts import EventBundle, ExternalEvent
+from .api_football_provider import ApiFootballProvider
 from .base import (
+    MatchDataError,
     MatchDataProvider,
     MatchDataProviderNotConfigured,
     UnknownMatchDataProvider,
 )
-from .thesportsdb import TheSportsDbProvider
+from .thesportsdb_provider import TheSportsDbProvider
 
 
 class MatchDataProviderRegistry:
-    """Registry and compatibility facade for all server-side providers."""
+    """Strict registry for all server-side match-data providers."""
+
+    _implicit_fallback_error_codes = frozenset(
+        {
+            "invalid-provider-response",
+            "provider-auth-or-coverage",
+            "provider-rate-limit",
+            "provider-request-rejected",
+            "provider-unreachable",
+            "upstream-error",
+        }
+    )
 
     def __init__(
         self,
@@ -28,31 +39,19 @@ class MatchDataProviderRegistry:
             TheSportsDbProvider(self.settings),
         ]
         self._providers = {provider.id: provider for provider in provider_list}
-        self._override: ContextVar[str | None] = ContextVar(
-            "match_data_provider_override", default=None
-        )
         if self.settings.match_data_provider not in self._providers:
             raise UnknownMatchDataProvider(self.settings.match_data_provider)
 
     @property
     def default_provider(self) -> str:
-        preferred = self._providers[self.settings.match_data_provider]
-        if preferred.configured:
-            return preferred.id
-        # Omitted provider is the legacy contract. Resolve its default before
-        # issuing any request so old installations keep working while an
-        # explicit provider (including a saved event source) never falls back.
-        for provider in self._providers.values():
-            if provider.configured:
-                return provider.id
-        return preferred.id
+        return self.settings.match_data_provider
 
     @property
     def preferred_provider(self) -> str:
         return self.settings.match_data_provider
 
     def get(self, provider_id: str | None = None) -> MatchDataProvider:
-        selected = provider_id or self._override.get() or self.default_provider
+        selected = provider_id or self.default_provider
         provider = self._providers.get(selected)
         if provider is None:
             raise UnknownMatchDataProvider(selected)
@@ -83,6 +82,45 @@ class MatchDataProviderRegistry:
     async def events_by_date(self, date: str) -> list[ExternalEvent]:
         return await self.get().events_by_date(date)
 
+    async def events_by_date_with_fallback(
+        self,
+        date: str,
+    ) -> tuple[str, list[ExternalEvent]]:
+        """Resolve an omitted provider while retaining honest provenance.
+
+        Fixture-by-date coverage is plan-dependent. A configured preferred
+        provider can therefore reject this single capability while its team
+        search and fixture-detail APIs remain healthy. Provider-neutral callers
+        may try another configured adapter, but explicit provider routes must
+        continue to use :meth:`events_by_date_for` and surface its error.
+        """
+
+        default_id = self.default_provider
+        # Provider omission means "use the configured default", never "pick
+        # any provider that happens to have credentials". The bounded date
+        # fallback below is available only after that explicit default has
+        # passed configuration validation and then rejects/fails the request.
+        primary = self.get(default_id)
+        provider_ids = [
+            provider_id
+            for provider_id in (primary.id, *self._providers)
+            if self._providers[provider_id].configured
+        ]
+        provider_ids = list(dict.fromkeys(provider_ids))
+
+        for index, provider_id in enumerate(provider_ids):
+            provider = self.get(provider_id)
+            try:
+                return provider.id, await provider.events_by_date(date)
+            except MatchDataError as exc:
+                can_fallback = (
+                    exc.code in self._implicit_fallback_error_codes
+                    and index + 1 < len(provider_ids)
+                )
+                if not can_fallback:
+                    raise
+        raise AssertionError("unreachable")
+
     async def search_events(self, query: str) -> list[ExternalEvent]:
         return await self.get().search_events(query)
 
@@ -92,32 +130,17 @@ class MatchDataProviderRegistry:
     async def events_by_date_for(
         self, provider_id: str | None, date: str
     ) -> list[ExternalEvent]:
-        token = self._override.set(provider_id)
-        try:
-            return await self.events_by_date(date)
-        finally:
-            self._override.reset(token)
+        return await self.get(provider_id).events_by_date(date)
 
     async def search_events_for(
         self, provider_id: str | None, query: str
     ) -> list[ExternalEvent]:
-        token = self._override.set(provider_id)
-        try:
-            return await self.search_events(query)
-        finally:
-            self._override.reset(token)
+        return await self.get(provider_id).search_events(query)
 
     async def event_bundle_for(
         self, provider_id: str | None, event_id: str
     ) -> EventBundle:
-        # The indirection through event_bundle deliberately preserves the
-        # long-standing ``app.main.sports_provider.event_bundle`` test/plugin
-        # seam while selecting a provider safely via a task-local ContextVar.
-        token = self._override.set(provider_id)
-        try:
-            return await self.event_bundle(event_id)
-        finally:
-            self._override.reset(token)
+        return await self.get(provider_id).event_bundle(event_id)
 
 
 sports_provider = MatchDataProviderRegistry()

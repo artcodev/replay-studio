@@ -50,7 +50,6 @@ def make_demo_scene(scene_id: str = "moment-01", title: str = "The impossible pa
 
     payload = {
         "pitch": {"length": 105, "width": 68},
-        "matchBinding": None,
         "teams": [
             {"id": "aurora", "name": "Aurora", "color": "#ff5f4a", "externalTeamId": None},
             {"id": "atlas", "name": "Atlas", "color": "#6ee7f2", "externalTeamId": None},
@@ -75,7 +74,6 @@ def make_video_scene(
 ) -> dict:
     payload = {
         "pitch": {"length": 105, "width": 68},
-        "matchBinding": None,
         "videoAsset": video_asset,
         "teams": [
             {"id": "home", "name": "Home", "color": "#ff5f4a", "externalTeamId": None},

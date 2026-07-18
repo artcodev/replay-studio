@@ -1,7 +1,7 @@
 import cv2
 import numpy as np
 
-from app.reconstruction import _camera_motion_estimate
+from app.reconstruction_motion import camera_motion_estimate as _camera_motion_estimate
 
 
 def _textured_pitch(seed: int = 7) -> np.ndarray:

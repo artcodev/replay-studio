@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from hashlib import sha256
-from typing import Any
+from typing import Any, Mapping
 
 
 ROSTER_REJECTION_SCHEMA = "roster-candidate-rejection-v1"
@@ -44,6 +44,8 @@ def reject_roster_candidate(
     scene: dict,
     canonical_person_id: str,
     external_player_id: str,
+    *,
+    match_snapshot: Mapping[str, object] | None,
 ) -> dict[str, Any]:
     person = _canonical_person(scene, canonical_person_id)
     external_player_id = str(external_player_id or "").strip()
@@ -64,8 +66,10 @@ def reject_roster_candidate(
     roster_ids = {
         str(item.get("id") or "")
         for item in (
-            scene.get("payload", {}).get("matchBinding", {}).get("players") or []
-        )
+            match_snapshot.get("roster")
+            if isinstance(match_snapshot, Mapping)
+            else []
+        ) or []
         if str(item.get("id") or "")
     }
     if external_player_id not in roster_ids:

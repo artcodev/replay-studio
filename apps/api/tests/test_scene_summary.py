@@ -1,4 +1,4 @@
-from app.store import scene_kind
+from app.scene_document import scene_kind
 
 
 def test_scene_kind_hides_internal_scenes_from_project_navigation():

@@ -1,9 +1,4 @@
-import type {
-  CalibrationEvidenceLine,
-  CalibrationEvidencePoint,
-  CalibrationFrameEvidence,
-  PitchCalibrationDraft,
-} from '../types'
+import type { CalibrationEvidenceLine, CalibrationEvidencePoint, CalibrationFrameEvidence, PitchCalibrationDraft } from '../types/calibration'
 
 export type CalibrationFrameDiagnostics = {
   evidence: CalibrationFrameEvidence | null

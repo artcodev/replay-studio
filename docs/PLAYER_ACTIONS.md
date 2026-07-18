@@ -104,7 +104,7 @@ not a recognition or animation-quality claim.
 Create or update one manual action:
 
 ```http
-POST /api/scenes/{sceneId}/player-actions
+POST /api/projects/{projectId}/scenes/{sceneId}/player-actions
 Content-Type: application/json
 
 {
@@ -123,7 +123,7 @@ Content-Type: application/json
 Delete one manual action:
 
 ```http
-DELETE /api/scenes/{sceneId}/player-actions/{actionId}
+DELETE /api/projects/{projectId}/scenes/{sceneId}/player-actions/{actionId}
 ```
 
 Both endpoints return the updated `SceneDocument`. They validate the canonical

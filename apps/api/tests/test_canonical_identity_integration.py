@@ -3,17 +3,26 @@ from types import SimpleNamespace
 
 import numpy as np
 
-from app.reconstruction import (
-    Detection,
-    TrackState,
-    _assign_persistent_canonical_person_ids,
-    _attach_identity_embeddings,
-    _canonical_people_documents,
-    _capture_detection_observations,
-    _identity_embedding_requests,
-    _resolve_canonical_track_states,
-    analyze_scene_frame,
-    upsert_frame_person_annotation,
+from app.reconstruction_person_detection_contract import Detection
+from app.reconstruction_track_state import TrackState
+from app.track_observation_accumulator import append_track_observation
+from app.reconstruction_frame_analysis import analyze_scene_frame
+from app.reconstruction_identity_annotation_draft import (
+    draft_frame_person_annotation_upsert as upsert_frame_person_annotation,
+)
+from app.reconstruction_canonical_people_projection import (
+    canonical_people_documents as _canonical_people_documents,
+)
+from app.reconstruction_identity_persistence import (
+    assign_persistent_canonical_person_ids as _assign_persistent_canonical_person_ids,
+)
+from app.reconstruction_reid_evidence import (
+    attach_identity_embeddings as _attach_identity_embeddings,
+    capture_detection_observations as _capture_detection_observations,
+    identity_embedding_requests as _identity_embedding_requests,
+)
+from app.reconstruction_canonical_identity_resolution import (
+    resolve_canonical_track_states as _resolve_canonical_track_states,
 )
 
 
@@ -149,10 +158,10 @@ def test_offline_reid_stitch_publishes_one_canonical_person_without_3d_actor():
     second = TrackState(id=2)
     for frame_index, time, x in ((101, 0.0, 100.0), (105, 0.5, 102.0)):
         detection, _ = _detection(frame_index, time, x, embedding)
-        first.append(detection, frame_index, time)
+        append_track_observation(first, detection, frame_index, time)
     for frame_index, time, x in ((110, 1.0, 108.0), (115, 1.5, 110.0)):
         detection, _ = _detection(frame_index, time, x, embedding)
-        second.append(detection, frame_index, time)
+        append_track_observation(second, detection, frame_index, time)
 
     resolved, resolver_diagnostics = _resolve_canonical_track_states(
         [first, second],
@@ -191,7 +200,7 @@ def test_canonical_id_survives_rebuild_from_authoritative_bbox_overlap():
         (105, 0.4, 108.0),
     ):
         detection, _ = _detection(frame_index, time, x)
-        track.append(detection, frame_index, time)
+        append_track_observation(track, detection, frame_index, time)
     previous_observations = [
         {
             "frameIndex": point["frameIndex"],
@@ -217,7 +226,7 @@ def test_canonical_id_survives_rebuild_from_authoritative_bbox_overlap():
 def test_one_crossing_frame_cannot_transfer_previous_canonical_id():
     track = TrackState(id=9)
     detection, _ = _detection(101, 0.0, 100.0)
-    track.append(detection, 101, 0.0)
+    append_track_observation(track, detection, 101, 0.0)
     previous = {
         "canonicalPersonId": "canonical-home-player",
         "teamId": "home",
@@ -247,7 +256,7 @@ def test_ambiguous_bidirectional_remap_keeps_previous_ids_reserved():
             (105, 0.4, 108.0),
         ):
             detection, _ = _detection(frame_index, time, x)
-            track.append(detection, frame_index, time)
+            append_track_observation(track, detection, frame_index, time)
     observations = [
         {"frameIndex": point["frameIndex"], "bbox": point["bbox"]}
         for point in tracks[0].points
@@ -316,10 +325,13 @@ def test_frame_analysis_links_canonical_person_even_without_render_track(monkeyp
     )
     result = SimpleNamespace(orig_img=np.zeros((540, 960, 3), dtype=np.uint8))
     detection = Detection(112, 200, 24, 48, 0.9, np.zeros(12, dtype=np.float32))
-    monkeypatch.setattr("app.reconstruction._frame_paths", lambda _: [(frame_path, 0.0)])
-    monkeypatch.setattr("app.reconstruction._load_model", lambda _: object())
-    monkeypatch.setattr("app.reconstruction._predict_frame", lambda *_: result)
-    monkeypatch.setattr("app.reconstruction._person_detections", lambda _: ([detection], []))
+    monkeypatch.setattr("app.reconstruction_frame_analysis.frame_paths", lambda _: [(frame_path, 0.0)])
+    monkeypatch.setattr("app.reconstruction_frame_analysis.load_model", lambda _: object())
+    monkeypatch.setattr("app.ultralytics_person_inference.predict_frame", lambda *_: result)
+    monkeypatch.setattr(
+        "app.ultralytics_person_inference.parse_person_detections",
+        lambda _: ([detection], []),
+    )
 
     analysis = analyze_scene_frame(scene, 0.0)
     person = analysis["people"][0]
@@ -351,9 +363,11 @@ def test_annotation_accepts_canonical_person_separately_from_legacy_track(monkey
             }
         ]
     )
-    monkeypatch.setattr("app.reconstruction._frame_paths", lambda _: [(frame_path, 0.0)])
     monkeypatch.setattr(
-        "app.reconstruction.cv2.imread",
+        "app.reconstruction_frame_annotation_target.frame_paths", lambda _: [(frame_path, 0.0)]
+    )
+    monkeypatch.setattr(
+        "app.reconstruction_frame_annotation_target.cv2.imread",
         lambda _: np.zeros((540, 960, 3), dtype=np.uint8),
     )
 
@@ -367,8 +381,7 @@ def test_annotation_accepts_canonical_person_separately_from_legacy_track(monkey
             "scope": "identity",
             "canonical_person_id": "canonical-1",
             "source_track_id": None,
-        },
-        persist=False,
+        }
     )
 
     assert annotation["canonicalPersonId"] == "canonical-1"

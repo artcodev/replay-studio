@@ -1,5 +1,36 @@
 # Replay Studio UI information architecture
 
+## Project shell
+
+The application now opens in a project workspace instead of treating a scene
+list as the top-level product model:
+
+```text
+Projects
+└── Selected project
+    ├── Overview (assets and segments)
+    ├── Match (canonical snapshot and search)
+    ├── Identities (project people and scene memberships)
+    └── Analysis (compact jobs and cancellation)
+        └── Open segment -> Editor
+```
+
+Project switching reloads match, assets, segments and analysis runs together.
+Uploading footage targets the selected project. Opening a segment is the
+explicit transition into the compatibility editor; returning to Projects does
+not start or cancel work implicitly.
+
+The project shell deliberately does not expose provider choice. Match search
+uses the configured server adapter and returns internal IDs. Provider
+provenance belongs to the explicit integration-diagnostics surface.
+
+The Identities tab reviews durable people, roster links and scene memberships.
+Each membership can be reassigned to another existing project person through an
+explicit select + **Assign** action with busy/error/no-op guards and a reload
+after success. Project-level split/undo history, cross-video composition
+authoring, and project settings are still planned; their persistence and API
+foundations must not be represented as finished UI until those controls exist.
+
 ## Problem
 
 The former stage toolbar mixed camera navigation, view visibility, CV model

@@ -8,15 +8,12 @@ import json
 import os
 import sys
 
-from validation_harness import (
-    ManifestError,
-    WorkerProtocolError,
-    WorkerUnavailable,
-    build_unavailable_report,
-    load_manifest,
-    run_http_validation,
-    write_report,
-)
+from model_validation.manifest_contract import ManifestError
+from model_validation.manifest_loader import load_manifest
+from model_validation.orchestration import run_http_validation
+from model_validation.report_writer import write_report
+from model_validation.reports import build_unavailable_report
+from model_validation.worker_transport import WorkerProtocolError, WorkerUnavailable
 
 
 def _arguments() -> argparse.Namespace:

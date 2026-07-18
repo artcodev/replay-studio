@@ -4,16 +4,21 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from app.ball_detection import BallCandidate, BallDetectionBatch
+from app.ball_detection_contract import BallCandidate, BallDetectionBatch
 from app.ball_frames import DenseBallFrameSet
-from app.reconstruction import (
-    ReconstructionError,
-    _ball_world_projection_status,
-    _configured_ball_detectors,
-    _detect_ball_frames,
-    _verify_queued_ball_checkpoint,
-    analyze_scene_frame,
+from app.reconstruction_errors import ReconstructionError
+from app.reconstruction_frame_analysis import analyze_scene_frame
+from app.ball_detection_configuration import (
+    verify_queued_ball_checkpoint as _verify_queued_ball_checkpoint,
 )
+from app.reconstruction_ball_detector_selection import (
+    configured_ball_detectors as _configured_ball_detectors,
+)
+from app.reconstruction_ball_detection import detect_ball_frames as _detect_ball_frames
+from app.reconstruction_ball_projection_status import (
+    ball_world_projection_status as _ball_world_projection_status,
+)
+from app.reconstruction_ball_roi import ball_roi_regions as _ball_roi_regions
 
 
 class RecordingDetector:
@@ -65,6 +70,96 @@ class RecordingDetector:
         )
 
 
+class AdaptiveRecordingDetector(RecordingDetector):
+    def __init__(
+        self,
+        backend_name: str = "dedicated-ultralytics",
+        *,
+        global_empty_frames: set[int] | None = None,
+        roi_empty_frames: set[int] | None = None,
+        global_error_frames: set[int] | None = None,
+    ) -> None:
+        super().__init__(backend_name)
+        self.global_empty_frames = global_empty_frames or set()
+        self.roi_empty_frames = roi_empty_frames or set()
+        self.global_error_frames = global_error_frames or set()
+        self.global_calls: list[dict] = []
+        self.roi_calls: list[dict] = []
+
+    def _batch(self, frame_index: int, *, empty: bool, metadata: dict):
+        candidate = BallCandidate(
+            bbox=(120.0 + frame_index, 620.0, 130.0 + frame_index, 630.0),
+            confidence=0.8,
+            backend=self.backend_name,
+            metadata={
+                "tile": {
+                    "index": 0,
+                    "x": 0,
+                    "y": 440,
+                    "width": 640,
+                    "height": 640,
+                }
+            },
+        )
+        return BallDetectionBatch(
+            candidates=() if empty else (candidate,),
+            image_size=(1920, 1080),
+            backend=self.backend_name,
+            metadata=metadata,
+        )
+
+    def detect(
+        self,
+        frame,
+        *,
+        frame_index=None,
+        timestamp=None,
+        context_frames=(),
+    ) -> BallDetectionBatch:
+        call = {
+            "frame": Path(frame),
+            "frameIndex": int(frame_index),
+            "timestamp": timestamp,
+            "contextFrames": tuple(Path(item) for item in context_frames),
+        }
+        self.calls.append(call)
+        self.global_calls.append(call)
+        if int(frame_index) in self.global_error_frames:
+            raise RuntimeError("global detector failure")
+        return self._batch(
+            int(frame_index),
+            empty=int(frame_index) in self.global_empty_frames,
+            metadata={"tileCount": 8, "scanMode": "global"},
+        )
+
+    def detect_regions(
+        self,
+        frame,
+        regions,
+        *,
+        frame_index=None,
+        timestamp=None,
+        context_frames=(),
+    ) -> BallDetectionBatch:
+        call = {
+            "frame": Path(frame),
+            "frameIndex": int(frame_index),
+            "timestamp": timestamp,
+            "contextFrames": tuple(Path(item) for item in context_frames),
+            "regions": tuple(tuple(float(value) for value in item) for item in regions),
+        }
+        self.roi_calls.append(call)
+        return self._batch(
+            int(frame_index),
+            empty=int(frame_index) in self.roi_empty_frames,
+            metadata={
+                "tileCount": len(regions),
+                "roiRegionCount": len(regions),
+                "scanMode": "roi",
+            },
+        )
+
+
 def _scene() -> dict:
     return {
         "id": "ball-detection-test",
@@ -88,14 +183,37 @@ def _dense_frames(tmp_path, count=3, frame_rate=25.0) -> DenseBallFrameSet:
 
 
 def _patch_runtime(monkeypatch, dense, *, failure_policy="fallback") -> None:
-    monkeypatch.setattr("app.reconstruction.dense_ball_frame_paths", lambda _: dense)
     monkeypatch.setattr(
-        "app.reconstruction.get_settings",
-        lambda: SimpleNamespace(
+        "app.reconstruction_ball_detection_source.dense_ball_frame_paths", lambda _: dense
+    )
+    def settings():
+        return SimpleNamespace(
             ball_detection_failure_policy=failure_policy,
             reconstruction_frame_rate=10.0,
-        ),
-    )
+            ball_detection_checkpoint_interval=1,
+            media_root=str(dense.frames[0][0].parent) if dense.frames else ".",
+        )
+
+    monkeypatch.setattr("app.reconstruction_ball_detection.get_settings", settings)
+    monkeypatch.setattr("app.reconstruction_ball_detection_source.get_settings", settings)
+
+
+def _adaptive_input(*, interval: int = 5, max_regions: int = 3, padding: int = 320):
+    return {
+        "schemaVersion": 1,
+        "backend": "dedicated-ultralytics",
+        "checkpoint": {"name": "ball.pt", "size": 123, "mtimeNs": 456},
+        "confidence": 0.05,
+        "tileSize": 640,
+        "adaptiveRoi": {
+            "enabled": True,
+            "algorithmVersion": "adaptive-roi-v1",
+            "fullScanIntervalFrames": interval,
+            "maxRegions": max_regions,
+            "paddingPixels": padding,
+            "reacquirePolicy": "same-frame-global-on-miss",
+        },
+    }
 
 
 def test_dense_detection_receives_centered_temporal_context_with_edge_repeats(
@@ -126,19 +244,162 @@ def test_dense_detection_receives_centered_temporal_context_with_edge_repeats(
     assert warnings == []
 
 
+def test_adaptive_dedicated_detector_uses_initial_periodic_and_final_global_scans(
+    monkeypatch, tmp_path
+):
+    dense = _dense_frames(tmp_path, count=8)
+    _patch_runtime(monkeypatch, dense)
+    detector = AdaptiveRecordingDetector()
+
+    resolved, metadata, batches, warnings = _detect_ball_frames(
+        _scene(),
+        detector,
+        None,
+        [],
+        [],
+        detector_input=_adaptive_input(),
+    )
+
+    assert len(resolved) == 8
+    assert [call["frameIndex"] for call in detector.global_calls] == [0, 5, 7]
+    assert [call["frameIndex"] for call in detector.roi_calls] == [1, 2, 3, 4, 6]
+    assert [item["scanMode"] for item in batches] == [
+        "global",
+        "roi",
+        "roi",
+        "roi",
+        "roi",
+        "global",
+        "roi",
+        "global",
+    ]
+    assert batches[0]["metadata"]["globalScanReason"] == "initial-frame"
+    assert batches[5]["metadata"]["globalScanReason"] == "periodic"
+    assert batches[7]["metadata"]["globalScanReason"] == "final-frame"
+    # The exact source tile which produced the global candidate is reused;
+    # a naive centered crop is not equivalent for this checkpoint.
+    assert detector.roi_calls[0]["regions"] == ((0.0, 440.0, 640.0, 1080.0),)
+    assert metadata["adaptiveRoi"] == {
+        "enabled": True,
+        "algorithmVersion": "adaptive-roi-v1",
+        "fullScanIntervalFrames": 5,
+        "maxRegions": 3,
+        "paddingPixels": 320,
+        "globalScanFrameCount": 3,
+        "roiScanFrameCount": 5,
+        "roiReacquireFrameCount": 0,
+        "globalInferenceFrameCount": 3,
+        "roiInferenceFrameCount": 5,
+        "globalCropCount": 24,
+        "roiCropCount": 5,
+        "totalModelCropCount": 29,
+        "referenceFullScanCropCount": 8,
+        "estimatedFullScanBaselineCropCount": 64,
+        "estimatedCropReductionRatio": 0.5469,
+    }
+    assert warnings == []
+
+
+def test_adaptive_roi_miss_reacquires_globally_on_the_same_timestamp(
+    monkeypatch, tmp_path
+):
+    dense = _dense_frames(tmp_path, count=4)
+    _patch_runtime(monkeypatch, dense)
+    detector = AdaptiveRecordingDetector(roi_empty_frames={1})
+
+    _, metadata, batches, _ = _detect_ball_frames(
+        _scene(), detector, None, [], [], detector_input=_adaptive_input()
+    )
+
+    assert [call["frameIndex"] for call in detector.global_calls] == [0, 1, 3]
+    assert [call["frameIndex"] for call in detector.roi_calls] == [1, 2]
+    assert batches[1]["scanMode"] == "global-reacquire"
+    assert batches[1]["metadata"]["globalScanReason"] == "roi-miss"
+    assert batches[1]["metadata"]["roiAttempt"]["roiRegionCount"] == 1
+    assert metadata["adaptiveRoi"]["roiReacquireFrameCount"] == 1
+    assert metadata["adaptiveRoi"]["globalCropCount"] == 24
+    assert metadata["adaptiveRoi"]["roiCropCount"] == 2
+    assert metadata["adaptiveRoi"]["totalModelCropCount"] == 26
+
+
+def test_camera_cut_discards_roi_seed_and_forces_global_scan(monkeypatch, tmp_path):
+    dense = _dense_frames(tmp_path, count=4)
+    _patch_runtime(monkeypatch, dense)
+    detector = AdaptiveRecordingDetector()
+    scene = _scene()
+    scene["payload"]["cameraCuts"] = [{"t": 0.08, "preset": "broadcast"}]
+
+    _, _, batches, _ = _detect_ball_frames(
+        scene, detector, None, [], [], detector_input=_adaptive_input()
+    )
+
+    assert [call["frameIndex"] for call in detector.global_calls] == [0, 2, 3]
+    assert [call["frameIndex"] for call in detector.roi_calls] == [1]
+    assert batches[2]["metadata"]["globalScanReason"] == "camera-cut"
+
+
+def test_roi_builder_keeps_multiple_seeds_deduplicates_tiles_and_shifts_border():
+    seeds = [
+        {
+            "x": 110,
+            "y": 620,
+            "confidence": 0.9,
+            "detectorMetadata": {
+                "tile": {"x": 0, "y": 440, "width": 640, "height": 640}
+            },
+        },
+        {
+            "x": 120,
+            "y": 630,
+            "confidence": 0.8,
+            "detectorMetadata": {
+                "tile": {"x": 0, "y": 440, "width": 640, "height": 640}
+            },
+        },
+        {
+            "x": 900,
+            "y": 400,
+            "confidence": 0.7,
+            "detectorMetadata": {
+                "tile": {"x": 640, "y": 0, "width": 640, "height": 640}
+            },
+        },
+        # A manual/unscaled seed without tile provenance uses a shifted 640px
+        # window instead of shrinking at the right/bottom border.
+        {"x": 1910, "y": 1070, "confidence": 0.6},
+    ]
+
+    regions = _ball_roi_regions(
+        seeds,
+        (1920, 1080),
+        max_regions=3,
+        padding_pixels=320,
+    )
+
+    assert regions == [
+        (0.0, 440.0, 640.0, 1080.0),
+        (640.0, 0.0, 1280.0, 640.0),
+        (1280.0, 440.0, 1920.0, 1080.0),
+    ]
+
+
 def test_clean_dense_detection_is_reused_from_raw_candidate_cache(
     monkeypatch, tmp_path
 ):
     dense = _dense_frames(tmp_path)
-    monkeypatch.setattr("app.reconstruction.dense_ball_frame_paths", lambda _: dense)
     monkeypatch.setattr(
-        "app.reconstruction.get_settings",
-        lambda: SimpleNamespace(
+        "app.reconstruction_ball_detection_source.dense_ball_frame_paths", lambda _: dense
+    )
+    def settings():
+        return SimpleNamespace(
             ball_detection_failure_policy="fallback",
+            ball_detection_checkpoint_interval=4,
             reconstruction_frame_rate=10.0,
             media_root=str(tmp_path),
-        ),
-    )
+        )
+
+    monkeypatch.setattr("app.reconstruction_ball_detection.get_settings", settings)
+    monkeypatch.setattr("app.reconstruction_ball_detection_source.get_settings", settings)
     detector_input = {
         "schemaVersion": 1,
         "backend": "dedicated-ultralytics",
@@ -183,6 +444,163 @@ def test_clean_dense_detection_is_reused_from_raw_candidate_cache(
     assert second_warnings == []
 
 
+def test_interrupted_clean_detection_resumes_from_periodic_checkpoint(
+    monkeypatch, tmp_path
+):
+    dense = _dense_frames(tmp_path)
+    _patch_runtime(monkeypatch, dense)
+    detector_input = {
+        "schemaVersion": 1,
+        "backend": "dedicated-ultralytics",
+        "checkpoint": {"name": "ball.pt", "size": 123, "mtimeNs": 456},
+        "confidence": 0.05,
+        "tileSize": 640,
+    }
+    interrupted = RecordingDetector("dedicated-ultralytics", candidate=True)
+
+    def stop_after_two(completed, _total, _detail):
+        if completed == 2:
+            raise RuntimeError("cancel checkpoint")
+
+    with pytest.raises(RuntimeError, match="cancel checkpoint"):
+        _detect_ball_frames(
+            _scene(),
+            interrupted,
+            None,
+            [],
+            [],
+            on_progress=stop_after_two,
+            detector_input=detector_input,
+        )
+    assert len(interrupted.calls) == 2
+
+    resumed_detector = RecordingDetector("dedicated-ultralytics", candidate=True)
+    resolved, metadata, batches, warnings = _detect_ball_frames(
+        _scene(),
+        resumed_detector,
+        None,
+        [],
+        [],
+        detector_input=detector_input,
+    )
+
+    assert len(resumed_detector.calls) == 1
+    assert len(resolved) == len(batches) == 3
+    assert metadata["detectionCheckpointHit"] is True
+    assert metadata["resumedFrameCount"] == 2
+    assert metadata["detectionCacheStored"] is True
+    assert warnings == []
+
+
+def test_adaptive_checkpoint_resume_reconstructs_identical_seed_and_schedule(
+    monkeypatch, tmp_path
+):
+    uninterrupted_dense = _dense_frames(tmp_path / "uninterrupted", count=7)
+    _patch_runtime(monkeypatch, uninterrupted_dense)
+    uninterrupted = AdaptiveRecordingDetector()
+    full_resolved, _, full_batches, _ = _detect_ball_frames(
+        _scene(),
+        uninterrupted,
+        None,
+        [],
+        [],
+        detector_input=_adaptive_input(),
+    )
+
+    resumed_dense = _dense_frames(tmp_path / "resumed", count=7)
+    _patch_runtime(monkeypatch, resumed_dense)
+    interrupted = AdaptiveRecordingDetector()
+
+    def stop_after_four(completed, _total, _detail):
+        if completed == 4:
+            raise RuntimeError("cancel adaptive checkpoint")
+
+    with pytest.raises(RuntimeError, match="cancel adaptive checkpoint"):
+        _detect_ball_frames(
+            _scene(),
+            interrupted,
+            None,
+            [],
+            [],
+            on_progress=stop_after_four,
+            detector_input=_adaptive_input(),
+        )
+
+    resumed = AdaptiveRecordingDetector()
+    resumed_resolved, metadata, resumed_batches, warnings = _detect_ball_frames(
+        _scene(),
+        resumed,
+        None,
+        [],
+        [],
+        detector_input=_adaptive_input(),
+    )
+
+    assert metadata["detectionCheckpointHit"] is True
+    assert metadata["resumedFrameCount"] == 4
+    assert resumed_resolved == full_resolved
+    assert [item["scanMode"] for item in resumed_batches] == [
+        item["scanMode"] for item in full_batches
+    ]
+    assert [call["frameIndex"] for call in resumed.roi_calls] == [4]
+    assert resumed.roi_calls[0]["regions"] == uninterrupted.roi_calls[3]["regions"]
+    assert [call["frameIndex"] for call in resumed.global_calls] == [5, 6]
+    assert warnings == []
+
+
+def test_missing_seed_and_previous_failure_force_global_reacquisition(
+    monkeypatch, tmp_path
+):
+    no_seed_dense = _dense_frames(tmp_path / "no-seed", count=4)
+    _patch_runtime(monkeypatch, no_seed_dense)
+    no_seed_detector = AdaptiveRecordingDetector(global_empty_frames={0})
+    _, _, no_seed_batches, _ = _detect_ball_frames(
+        _scene(),
+        no_seed_detector,
+        None,
+        [],
+        [],
+        detector_input=_adaptive_input(),
+    )
+    assert [call["frameIndex"] for call in no_seed_detector.global_calls] == [0, 1, 3]
+    assert no_seed_batches[1]["metadata"]["globalScanReason"] == "no-seed"
+
+    failed_dense = _dense_frames(tmp_path / "failure", count=4)
+    _patch_runtime(monkeypatch, failed_dense)
+    failed_detector = AdaptiveRecordingDetector(global_error_frames={0})
+    _, _, failed_batches, warnings = _detect_ball_frames(
+        _scene(),
+        failed_detector,
+        None,
+        [],
+        [],
+        detector_input=_adaptive_input(),
+    )
+    assert [call["frameIndex"] for call in failed_detector.global_calls] == [0, 1, 3]
+    assert failed_batches[1]["metadata"]["globalScanReason"] == (
+        "previous-frame-fallback"
+    )
+    assert any("failed on 1/4 frames" in warning for warning in warnings)
+
+
+@pytest.mark.parametrize("backend", ["generic-ultralytics", "wasb-service"])
+def test_adaptive_roi_is_never_applied_to_other_backends(
+    monkeypatch, tmp_path, backend
+):
+    dense = _dense_frames(tmp_path / backend, count=3)
+    _patch_runtime(monkeypatch, dense)
+    detector = AdaptiveRecordingDetector(backend)
+    detector_input = {**_adaptive_input(), "backend": backend}
+
+    _, metadata, _, _ = _detect_ball_frames(
+        _scene(), detector, None, [], [], detector_input=detector_input
+    )
+
+    assert [call["frameIndex"] for call in detector.global_calls] == [0, 1, 2]
+    assert detector.roi_calls == []
+    assert metadata["adaptiveRoi"] == {"enabled": False}
+
+
 def test_first_primary_failure_opens_circuit_and_all_frames_use_fallback(
     monkeypatch, tmp_path
 ):
@@ -213,13 +631,13 @@ def test_first_primary_failure_opens_circuit_and_all_frames_use_fallback(
     assert any("explicit fallback on 3/3 frames" in warning for warning in warnings)
 
 
-def test_failed_detector_maps_one_legacy_observation_to_only_one_dense_frame(
+def test_failed_detector_maps_one_generic_fallback_observation_to_one_dense_frame(
     monkeypatch, tmp_path
 ):
     dense = _dense_frames(tmp_path)
     _patch_runtime(monkeypatch, dense)
     detector = RecordingDetector("broken", fail=RuntimeError("no model"))
-    legacy = [
+    generic_fallback = [
         (
             [
                 {
@@ -234,19 +652,21 @@ def test_failed_detector_maps_one_legacy_observation_to_only_one_dense_frame(
     ]
 
     resolved, metadata, batches, warnings = _detect_ball_frames(
-        _scene(), detector, None, [], legacy
+        _scene(), detector, None, [], generic_fallback
     )
 
     assert [len(candidates) for candidates, _ in resolved] == [0, 1, 0]
     assert sum(len(candidates) for candidates, _ in resolved) == 1
-    assert resolved[1][0][0]["candidateId"] == "ball-f00001-legacy-01"
-    assert [batch["metadata"]["legacyCandidateAccepted"] for batch in batches] == [
+    assert resolved[1][0][0]["candidateId"] == "ball-f00001-generic-01"
+    assert [
+        batch["metadata"]["genericFallbackCandidateAccepted"] for batch in batches
+    ] == [
         False,
         True,
         False,
     ]
     assert metadata["failedFrameCount"] == 3
-    assert metadata["backendCounts"] == {"legacy-coco-fallback": 3}
+    assert metadata["backendCounts"] == {"generic-coco-fallback": 3}
     assert any("failed on 3/3 frames" in warning for warning in warnings)
 
 
@@ -274,7 +694,7 @@ def test_strict_wasb_does_not_load_unrelated_dedicated_checkpoint(monkeypatch):
         reconstruction_device="cpu",
         ball_detection_max_candidates=12,
         ball_detection_nms_iou=0.1,
-        ball_wasb_worker_url="http://ball-worker:8092/detect",
+        ball_wasb_worker_url="http://ball-worker:8092/v1/detections",
         ball_wasb_timeout=30.0,
     )
     built: list[str] = []
@@ -283,10 +703,16 @@ def test_strict_wasb_does_not_load_unrelated_dedicated_checkpoint(monkeypatch):
         built.append(config.backend)
         return RecordingDetector(config.backend)
 
-    monkeypatch.setattr("app.reconstruction.get_settings", lambda: settings)
-    monkeypatch.setattr("app.reconstruction.build_ball_detector", build)
     monkeypatch.setattr(
-        "app.reconstruction._load_model",
+        "app.reconstruction_ball_detector_selection.get_settings",
+        lambda: settings,
+    )
+    monkeypatch.setattr(
+        "app.reconstruction_ball_detector_selection.build_ball_detector",
+        build,
+    )
+    monkeypatch.setattr(
+        "app.reconstruction_ball_detector_selection.load_model",
         lambda *_: (_ for _ in ()).throw(AssertionError("dedicated model loaded")),
     )
 
@@ -299,7 +725,7 @@ def test_strict_wasb_does_not_load_unrelated_dedicated_checkpoint(monkeypatch):
             "failurePolicy": "raise",
             "maxCandidates": 12,
             "nmsIou": 0.1,
-            "workerEndpoint": "http://ball-worker:8092/detect",
+            "workerEndpoint": "http://ball-worker:8092/v1/detections",
             "timeoutSeconds": 30.0,
         },
     )
@@ -359,21 +785,18 @@ def test_frame_analysis_uses_one_sampled_frame_for_video_people_and_ball(
             },
         },
     }
-    monkeypatch.setattr("app.reconstruction._frame_paths", lambda _: frames)
-    monkeypatch.setattr("app.reconstruction._load_model", lambda _: object())
-    monkeypatch.setattr("app.reconstruction._predict_frame", lambda *_: result)
-    monkeypatch.setattr("app.reconstruction._person_detections", lambda _: ([], []))
+    monkeypatch.setattr("app.reconstruction_frame_analysis.frame_paths", lambda _: frames)
+    monkeypatch.setattr("app.reconstruction_frame_analysis.load_model", lambda _: object())
+    monkeypatch.setattr("app.ultralytics_person_inference.predict_frame", lambda *_: result)
     monkeypatch.setattr(
-        "app.reconstruction._configured_ball_detectors",
+        "app.ultralytics_person_inference.parse_person_detections",
+        lambda _: ([], []),
+    )
+    monkeypatch.setattr(
+            "app.reconstruction_frame_ball_analysis.configured_ball_detectors",
         lambda *_: (detector, None),
     )
-    monkeypatch.setattr("app.reconstruction.cv2.imread", lambda *_: None)
-    monkeypatch.setattr(
-        "app.reconstruction.dense_ball_frame_paths",
-        lambda *_: (_ for _ in ()).throw(
-            AssertionError("interactive frame analysis mixed in a dense frame")
-        ),
-    )
+    monkeypatch.setattr("app.reconstruction_frame_context.cv2.imread", lambda *_: None)
 
     analysis = analyze_scene_frame(scene, 0.08)
 

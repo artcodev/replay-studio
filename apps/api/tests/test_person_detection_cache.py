@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from hashlib import sha256
 from pathlib import Path
 
 import cv2
@@ -8,7 +9,11 @@ import numpy as np
 import pytest
 
 from app import person_detection_cache as cache
-from app import reconstruction
+from app import person_base_detection_cache as base_cache
+from app import person_detector_provenance as provenance
+from app import reconstruction_reid_evidence as identity_evidence
+from app import reconstruction_person_annotations as person_annotations
+from app import ultralytics_person_inference as person_inference
 
 
 def _detector_input(model: str = "players-v1.pt") -> dict:
@@ -16,14 +21,14 @@ def _detector_input(model: str = "players-v1.pt") -> dict:
         "schemaVersion": 1,
         "provider": {"backend": "ultralytics-yolo", "version": "9.0.0"},
         "checkpoint": {"name": model, "sha256": f"sha-{model}"},
-        "classes": {"person": 0, "legacyGenericBall": 32},
+        "classes": {"person": 0, "genericBallFallback": 32},
         "inference": {
             "imageSize": 1280,
             "confidence": 0.035,
             "providerNmsIou": 0.7,
         },
         "personFilter": {"version": "pitch-person-v3", "localNmsIou": 0.48},
-        "legacyBallFilter": {"version": "legacy-coco-ball-v2"},
+        "genericBallFallbackFilter": {"version": "generic-coco-ball-v2"},
     }
 
 
@@ -42,6 +47,37 @@ def _people_payload() -> list[dict]:
 
 def _ball_payload() -> list[dict]:
     return [{"x": 62.0, "y": 42.0, "confidence": 0.73}]
+
+
+def test_detector_provenance_fingerprints_checkpoint_and_processing_policy(
+    tmp_path: Path,
+) -> None:
+    checkpoint = tmp_path / "players.pt"
+    checkpoint.write_bytes(b"detector-weights")
+
+    detector_input = provenance.person_detection_input(str(checkpoint))
+
+    assert detector_input["checkpoint"]["sha256"] == sha256(
+        b"detector-weights"
+    ).hexdigest()
+    assert detector_input["checkpoint"]["contentAvailable"] is True
+    assert detector_input["inference"]["providerNmsIou"] == 0.70
+    assert detector_input["personFilter"] == {
+        "version": "pitch-person-v3",
+        "localNmsIou": 0.48,
+        "minimumFootYRatio": 0.18,
+        "shallowFootYRatio": 0.34,
+        "shallowConfidence": 0.12,
+        "shallowGrassRatio": 0.52,
+        "appearanceFeatureSchema": "hsv-histogram-v1",
+    }
+    assert detector_input["genericBallFallbackFilter"] == {
+        "version": "generic-coco-ball-v2",
+        "minimumCenterYRatio": 0.30,
+        "maximumBoxSizePixels": 24.0,
+        "minimumGrassRatio": 0.24,
+        "deduplicationRadiusPixels": 10.0,
+    }
 
 
 def test_contract_covers_exact_frame_model_nms_and_filter_policy() -> None:
@@ -89,7 +125,7 @@ def test_atomic_round_trip_returns_detached_base_evidence(tmp_path: Path) -> Non
         detector_input=_detector_input(),
         image_size=(100, 80),
         people=_people_payload(),
-        legacy_ball_candidates=_ball_payload(),
+        generic_ball_candidates=_ball_payload(),
     )
     assert stored is not None
     assert stored.path.is_file()
@@ -118,7 +154,7 @@ def test_corrupt_or_tampered_artifact_is_a_safe_miss(tmp_path: Path) -> None:
         detector_input=_detector_input(),
         image_size=(100, 80),
         people=_people_payload(),
-        legacy_ball_candidates=_ball_payload(),
+        generic_ball_candidates=_ball_payload(),
     )
     assert stored is not None
     envelope = json.loads(stored.path.read_text())
@@ -152,7 +188,7 @@ def test_partial_or_fallback_provider_output_is_not_published(tmp_path: Path) ->
                 detector_input=_detector_input(),
                 image_size=(100, 80),
                 people=_people_payload(),
-                legacy_ball_candidates=_ball_payload(),
+                generic_ball_candidates=_ball_payload(),
                 provider_status=provider_status,
             )
             is None
@@ -170,7 +206,7 @@ def test_failed_atomic_replace_preserves_previous_artifact(
         detector_input=_detector_input(),
         image_size=(100, 80),
         people=_people_payload(),
-        legacy_ball_candidates=_ball_payload(),
+        generic_ball_candidates=_ball_payload(),
     )
     assert stored is not None
     original = stored.path.read_bytes()
@@ -186,7 +222,7 @@ def test_failed_atomic_replace_preserves_previous_artifact(
             detector_input=_detector_input(),
             image_size=(100, 80),
             people=_people_payload(),
-            legacy_ball_candidates=_ball_payload(),
+            generic_ball_candidates=_ball_payload(),
         )
     assert stored.path.read_bytes() == original
     assert not list(stored.path.parent.glob("*.tmp"))
@@ -239,12 +275,12 @@ def _predictor(monkeypatch: pytest.MonkeyPatch) -> list[str]:
         assert image is not None
         return _Result(image)
 
-    monkeypatch.setattr(reconstruction, "_predict_frame", predict)
+    monkeypatch.setattr(person_inference, "predict_frame", predict)
     return calls
 
 
 def _diagnostics(detector_input: dict, frame_count: int = 1) -> dict:
-    return reconstruction._base_detection_cache_diagnostics(
+    return base_cache.base_detection_cache_diagnostics(
         frame_count,
         detector_input,
     )
@@ -259,20 +295,20 @@ def test_pipeline_helper_second_identical_run_has_no_provider_call_and_is_detach
     calls = _predictor(monkeypatch)
     detector_input = _detector_input()
     first_diagnostics = _diagnostics(detector_input)
-    _, first_people, first_balls = reconstruction._cached_base_frame_detections(
+    _, first_people, first_balls = base_cache.cached_base_frame_detections(
         object(), frame, tmp_path, detector_input, first_diagnostics
     )
-    reconstruction._capture_detection_observations(first_people, 1)
+    identity_evidence.capture_detection_observations(first_people, 1)
     first_observation_id = first_people[0].observation_id
     first_people[0].x = -500
     first_people[0].feature[0] = 99
     first_balls[0]["x"] = -500
 
     second_diagnostics = _diagnostics(detector_input)
-    _, second_people, second_balls = reconstruction._cached_base_frame_detections(
+    _, second_people, second_balls = base_cache.cached_base_frame_detections(
         object(), frame, tmp_path, detector_input, second_diagnostics
     )
-    reconstruction._capture_detection_observations(second_people, 1)
+    identity_evidence.capture_detection_observations(second_people, 1)
 
     assert calls == [frame.name]
     assert first_diagnostics["providerCalls"] == 1
@@ -295,7 +331,7 @@ def test_one_changed_frame_content_causes_exactly_one_miss(
     calls = _predictor(monkeypatch)
     detector_input = _detector_input()
     for path in frames:
-        reconstruction._cached_base_frame_detections(
+        base_cache.cached_base_frame_detections(
             object(), path, tmp_path, detector_input, _diagnostics(detector_input)
         )
     assert len(calls) == 2
@@ -303,7 +339,7 @@ def test_one_changed_frame_content_causes_exactly_one_miss(
     _write_frame(frames[1], 180)
     diagnostics = _diagnostics(detector_input, frame_count=2)
     for path in frames:
-        reconstruction._cached_base_frame_detections(
+        base_cache.cached_base_frame_detections(
             object(), path, tmp_path, detector_input, diagnostics
         )
 
@@ -321,17 +357,17 @@ def test_model_or_filter_policy_change_invalidates_pipeline_cache(
     _write_frame(frame, 150)
     calls = _predictor(monkeypatch)
     first = _detector_input()
-    reconstruction._cached_base_frame_detections(
+    base_cache.cached_base_frame_detections(
         object(), frame, tmp_path, first, _diagnostics(first)
     )
 
     changed_model = _detector_input("players-v2.pt")
-    reconstruction._cached_base_frame_detections(
+    base_cache.cached_base_frame_detections(
         object(), frame, tmp_path, changed_model, _diagnostics(changed_model)
     )
     changed_policy = _detector_input()
     changed_policy["personFilter"]["localNmsIou"] = 0.40
-    reconstruction._cached_base_frame_detections(
+    base_cache.cached_base_frame_detections(
         object(), frame, tmp_path, changed_policy, _diagnostics(changed_policy)
     )
 
@@ -346,7 +382,7 @@ def test_corrupt_pipeline_artifact_recomputes_and_replaces_it(
     _write_frame(frame, 150)
     calls = _predictor(monkeypatch)
     detector_input = _detector_input()
-    reconstruction._cached_base_frame_detections(
+    base_cache.cached_base_frame_detections(
         object(), frame, tmp_path, detector_input, _diagnostics(detector_input)
     )
     frame_digest = cache.frame_content_sha256(frame)
@@ -359,7 +395,7 @@ def test_corrupt_pipeline_artifact_recomputes_and_replaces_it(
     lookup.entry.path.write_text("broken")
 
     diagnostics = _diagnostics(detector_input)
-    reconstruction._cached_base_frame_detections(
+    base_cache.cached_base_frame_detections(
         object(), frame, tmp_path, detector_input, diagnostics
     )
 
@@ -386,10 +422,10 @@ def test_manual_bbox_is_applied_after_cache_and_does_not_invalidate_base_artifac
     _write_frame(frame, 150)
     calls = _predictor(monkeypatch)
     detector_input = _detector_input()
-    image, base_people, _ = reconstruction._cached_base_frame_detections(
+    image, base_people, _ = base_cache.cached_base_frame_detections(
         object(), frame, tmp_path, detector_input, _diagnostics(detector_input)
     )
-    annotated = reconstruction._apply_person_annotations(
+    annotated = person_annotations.apply_person_annotations(
         image,
         base_people,
         [
@@ -402,7 +438,7 @@ def test_manual_bbox_is_applied_after_cache_and_does_not_invalidate_base_artifac
             }
         ],
     )
-    _, rebuilt_base_people, _ = reconstruction._cached_base_frame_detections(
+    _, rebuilt_base_people, _ = base_cache.cached_base_frame_detections(
         object(), frame, tmp_path, detector_input, _diagnostics(detector_input)
     )
 

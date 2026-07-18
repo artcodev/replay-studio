@@ -11,7 +11,8 @@ import {
   topRosterCandidates,
   type ResolvedRosterCandidate,
 } from '../lib/identityResolution'
-import type { CanonicalIdentityEvidence, CanonicalPerson, ExternalPlayer } from '../types'
+import type { CanonicalIdentityEvidence, CanonicalPerson } from '../types/identity'
+import type { ExternalPlayer } from '../types/match'
 
 const props = withDefaults(defineProps<{
   identity: CanonicalPerson

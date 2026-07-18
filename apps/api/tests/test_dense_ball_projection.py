@@ -3,10 +3,12 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from app.pitch_calibration import PitchCalibration
-from app.reconstruction import (
-    _apply_dense_ball_projection,
-    _dense_ball_projection_context,
+from app.pitch_calibration_contract import PitchCalibration
+from app.reconstruction_ball_candidate_projection import (
+    apply_dense_ball_projection as _apply_dense_ball_projection,
+)
+from app.reconstruction_dense_ball_projection_context import (
+    dense_ball_projection_context as _dense_ball_projection_context,
 )
 
 
@@ -187,4 +189,3 @@ def test_dense_projection_enforces_bracket_time_bound():
         == "sample-bracket-exceeds-interpolation-bound"
     )
     assert context.provenance["alpha"] == pytest.approx(1.0 / 3.0)
-

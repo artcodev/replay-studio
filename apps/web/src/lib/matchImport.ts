@@ -1,4 +1,4 @@
-import type { ManualMatchImportRequest } from '../types'
+import type { ManualMatchImportRequest } from '../types/match'
 
 function record(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value)

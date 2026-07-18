@@ -20,6 +20,7 @@ html, body, #app { margin: 0; min-width: 320px; min-height: 100%; height: 100%; 
 button, input, select { font: inherit; }
 button { color: inherit; }
 .app-shell { min-height: 100%; height: 100%; background: var(--ink); display: flex; flex-direction: column; }
+.editor-workspace-surface { min-width: 0; min-height: 0; flex: 1 1 auto; overflow: hidden; display: flex; flex-direction: column; }
 
 .topbar { height: 72px; padding: 0 18px; flex: 0 0 72px; border-bottom: 1px solid var(--line); display: grid; grid-template-columns: 290px minmax(200px, 1fr) auto; align-items: center; gap: 18px; background: #0b0e0f; }
 .brand-block { display: flex; align-items: center; gap: 11px; }
@@ -30,6 +31,7 @@ button { color: inherit; }
 .brand-block h1 span { margin-left: 3px; color: var(--accent); font: 500 9px 'DM Mono'; vertical-align: top; }
 .moment-title { min-width: 0; display: flex; align-items: center; justify-content: center; gap: 10px; }
 .moment-title input { width: min(480px, 100%); border: 0; background: transparent; outline: none; color: #f5f7f1; text-align: center; font-size: 14px; font-weight: 600; text-overflow: ellipsis; }
+.moment-title.project-title strong { min-width: 0; max-width: 520px; overflow: hidden; color: #f5f7f1; font-size: 14px; text-overflow: ellipsis; white-space: nowrap; }
 .status-pill { flex: 0 0 auto; padding: 5px 7px; border: 1px solid var(--line); border-radius: 3px; color: var(--muted); font: 500 9px 'DM Mono'; text-transform: uppercase; }
 .status-pill i { display: inline-block; width: 5px; height: 5px; margin-right: 5px; border-radius: 50%; background: var(--accent); }
 .top-actions { display: flex; align-items: center; gap: 9px; }
@@ -40,6 +42,14 @@ button { color: inherit; }
 .button.ghost { background: transparent; }
 .button.import-button { border-color: rgba(255,211,106,.38); background: rgba(255,211,106,.07); color: var(--accent); }
 .button:disabled { opacity: .5; cursor: wait; }
+
+.project-workspace { min-height: 0; flex: 1; overflow: auto; padding: clamp(18px, 3vw, 40px); background: radial-gradient(circle at 50% -20%, rgba(50,104,157,.2), transparent 42%), #0b1017; }
+.project-workspace > .project-dashboard { width: min(1180px, 100%); margin: 0 auto; }
+.project-error-banner { width: min(1180px, 100%); min-height: 42px; margin: 0 auto 14px; padding: 9px 12px; border: 1px solid rgba(255,120,103,.38); border-radius: 7px; display: flex; align-items: center; justify-content: space-between; gap: 12px; color: #ffc2b8; background: rgba(86,31,30,.62); font-size: 12px; }
+.project-error-banner button { width: 28px; height: 28px; border: 0; background: transparent; color: inherit; font-size: 18px; cursor: pointer; }
+.project-workspace-fatal { width: min(620px, 100%); margin: 9vh auto 0; padding: 28px; border: 1px solid var(--line-strong); border-radius: 8px; background: rgba(16,19,20,.94); box-shadow: 0 24px 80px rgba(0,0,0,.38); }
+.project-workspace-fatal h2 { margin: 8px 0; }
+.project-workspace-fatal p { margin: 0 0 18px; color: var(--muted); }
 
 .studio-grid { min-height: 0; flex: 1; display: grid; grid-template-columns: 252px minmax(480px, 1fr) 400px; }
 .panel { min-height: 0; background: var(--panel); }
@@ -123,6 +133,9 @@ select, input { color-scheme: dark; }
 .reconstruction-menu-heading > b.verdict-review,
 .reconstruction-menu-heading > b.verdict-pending { color: var(--accent); border-color: rgba(255,211,106,.38); }
 .reconstruction-menu-heading > b.verdict-reject { color: #ff7867; border-color: rgba(255,120,103,.4); }
+.reconstruction-input-warning { display: grid; gap: 4px; margin: 0 0 10px; padding: 9px 10px; border: 1px solid rgba(255,211,106,.36); border-radius: 4px; background: rgba(255,211,106,.08); }
+.reconstruction-input-warning strong { color: var(--accent); font-size: 11px; }
+.reconstruction-input-warning span { color: #b8b49f; font-size: 9px; line-height: 1.45; }
 .reconstruction-model-field { display: grid; grid-template-columns: 1fr 150px; align-items: center; gap: 10px; margin-bottom: 8px; color: #89938d; font-size: 11px; }
 .reconstruction-model-field select { width: 100%; height: 36px; padding: 0 8px; border: 1px solid var(--line); border-radius: 3px; background: #090c0c; color: #d8ded9; font-size: 11px; }
 .reconstruction-menu-primary { width: 100%; min-height: 38px; border: 1px solid rgba(255,211,106,.5); border-radius: 3px; background: rgba(255,211,106,.09); color: var(--accent); font-size: 12px; font-weight: 650; cursor: pointer; }
@@ -133,6 +146,7 @@ select, input { color-scheme: dark; }
 .reconstruction-menu-actions button { min-height: 48px; display: flex; flex-direction: column; align-items: flex-start; justify-content: center; gap: 2px; padding: 6px; border: 0; border-radius: 3px; background: transparent; text-align: left; cursor: pointer; }
 .reconstruction-menu-actions button:hover,
 .reconstruction-menu-actions button.active { background: rgba(255,255,255,.04); }
+.reconstruction-menu-actions button.cancel-reconstruction-action span { color: #ff8b7c; }
 .reconstruction-menu-actions span { color: #d7ddd8; font-size: 11px; font-weight: 600; }
 .reconstruction-menu-actions small { color: #6e7872; font-size: 9px; }
 .tool-toggle { border: 1px solid var(--line); border-radius: 3px; }
@@ -146,16 +160,22 @@ select, input { color-scheme: dark; }
 .viewport-wrap.split-view { display: grid; grid-template-columns: minmax(260px, 42%) minmax(0, 1fr); gap: 1px; background: var(--line-strong); }
 .viewport-wrap.video-only { display: block; background: #050607; }
 .viewport-wrap.video-only .reference-pane { width: 100%; height: 100%; }
+.viewport-wrap.three-only { display: block; background: #090c0c; }
+.viewport-wrap.three-only .three-pane { width: 100%; height: 100%; }
 .viewport-wrap.calibrating { display: block; background: #050607; }
 .viewport-wrap.calibrating .reference-pane { width: 100%; height: 100%; }
 .viewport-wrap.calibrating .three-pane { display: none; }
-.analysis-progress-panel { position: absolute; z-index: 8; left: 50%; bottom: 18px; width: min(780px, calc(100% - 30px)); transform: translateX(-50%); padding: 13px 14px 12px; border: 1px solid rgba(255,211,106,.28); border-radius: 4px; background: rgba(9,13,12,.94); box-shadow: 0 18px 54px rgba(0,0,0,.56), inset 0 1px rgba(255,255,255,.025); backdrop-filter: blur(18px); pointer-events: none; }
+.analysis-progress-panel { position: absolute; z-index: 8; left: 50%; bottom: 18px; width: min(780px, calc(100% - 30px)); transform: translateX(-50%); padding: 13px 14px 12px; border: 1px solid rgba(255,211,106,.28); border-radius: 4px; background: rgba(9,13,12,.94); box-shadow: 0 18px 54px rgba(0,0,0,.56), inset 0 1px rgba(255,255,255,.025); backdrop-filter: blur(18px); }
 .analysis-progress-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 20px; }
 .analysis-progress-heading > div { min-width: 0; display: flex; flex-direction: column; gap: 3px; }
 .analysis-progress-heading span { color: #8b8166; font: 500 7px 'DM Mono'; letter-spacing: .12em; }
 .analysis-progress-heading strong { color: #f2f4ef; font-size: 12px; letter-spacing: -.01em; }
 .analysis-progress-heading small { color: #8a948e; font-size: 8px; line-height: 1.4; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.analysis-progress-heading > b { flex: 0 0 auto; color: var(--accent); font: 600 22px/1 'DM Mono'; letter-spacing: -.08em; }
+.analysis-progress-actions { flex: 0 0 auto; display: flex; flex-direction: row; align-items: center; gap: 10px; }
+.analysis-progress-actions > b { color: var(--accent); font: 600 22px/1 'DM Mono'; letter-spacing: -.08em; }
+.analysis-progress-actions button { min-width: 70px; height: 28px; padding: 0 10px; border: 1px solid rgba(255,104,87,.4); border-radius: 3px; background: rgba(255,104,87,.08); color: #ff8b7c; font: 600 8px 'DM Mono'; text-transform: uppercase; cursor: pointer; }
+.analysis-progress-actions button:hover:not(:disabled) { background: rgba(255,104,87,.14); }
+.analysis-progress-actions button:disabled { opacity: .5; cursor: wait; }
 .analysis-overall-track { height: 3px; margin: 10px 0 7px; overflow: hidden; background: rgba(255,255,255,.08); }
 .analysis-overall-track i { display: block; width: 0; height: 100%; background: linear-gradient(90deg, #71e2aa, var(--accent)); box-shadow: 0 0 12px rgba(255,211,106,.55); transition: width .4s ease; }
 .analysis-progress-meta { display: flex; align-items: center; gap: 13px; color: #717a75; font: 500 7px 'DM Mono'; }

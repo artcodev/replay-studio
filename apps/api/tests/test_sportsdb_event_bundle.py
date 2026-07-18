@@ -1,8 +1,29 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Awaitable, Callable
+from typing import Any
 
-from app.providers.thesportsdb import TheSportsDbProvider
+from app.providers.thesportsdb_provider import TheSportsDbProvider
+
+
+class FakeTheSportsDbClient:
+    configured = True
+    unavailable_reason = None
+
+    def __init__(
+        self,
+        get: Callable[[str, dict[str, Any], int], Awaitable[dict[str, Any]]],
+    ) -> None:
+        self._get = get
+
+    async def get(
+        self,
+        endpoint: str,
+        params: dict[str, Any],
+        ttl: int = 300,
+    ) -> dict[str, Any]:
+        return await self._get(endpoint, params, ttl)
 
 
 def _event_payload() -> dict:
@@ -35,9 +56,33 @@ def _lineup_player(index: int) -> dict:
     }
 
 
-def test_event_bundle_preserves_lineup_timeline_and_substitution(monkeypatch) -> None:
-    provider = TheSportsDbProvider()
+def test_search_events_accepts_singular_event_root() -> None:
+    async def fake_get(endpoint: str, params: dict, ttl: int = 300) -> dict:
+        del ttl
+        assert endpoint == "searchevents.php"
+        assert params == {"e": "Spain_vs_Belgium"}
+        return {
+            "event": [
+                {
+                    "idEvent": "2519345",
+                    "strEvent": "Spain vs Belgium",
+                    "strSport": "Soccer",
+                    "idHomeTeam": "133909",
+                    "strHomeTeam": "Spain",
+                    "idAwayTeam": "134515",
+                    "strAwayTeam": "Belgium",
+                }
+            ]
+        }
 
+    provider = TheSportsDbProvider(client=FakeTheSportsDbClient(fake_get))
+
+    events = asyncio.run(provider.search_events("Spain vs Belgium"))
+
+    assert [event.id for event in events] == ["2519345"]
+
+
+def test_event_bundle_preserves_lineup_timeline_and_substitution() -> None:
     async def fake_get(endpoint: str, _params: dict, ttl: int = 300) -> dict:
         del ttl
         if endpoint == "lookupevent.php":
@@ -62,7 +107,7 @@ def test_event_bundle_preserves_lineup_timeline_and_substitution(monkeypatch) ->
             ]
         }
 
-    monkeypatch.setattr(provider, "_get", fake_get)
+    provider = TheSportsDbProvider(client=FakeTheSportsDbClient(fake_get))
 
     bundle = asyncio.run(provider.event_bundle("event-1"))
 
@@ -81,9 +126,7 @@ def test_event_bundle_preserves_lineup_timeline_and_substitution(monkeypatch) ->
     assert bundle.warnings == []
 
 
-def test_event_bundle_flags_the_free_five_player_cap_as_manual_only(monkeypatch) -> None:
-    provider = TheSportsDbProvider()
-
+def test_event_bundle_flags_the_free_five_player_cap_as_manual_only() -> None:
     async def fake_get(endpoint: str, _params: dict, ttl: int = 300) -> dict:
         del ttl
         if endpoint == "lookupevent.php":
@@ -92,7 +135,7 @@ def test_event_bundle_flags_the_free_five_player_cap_as_manual_only(monkeypatch)
             return {"lineup": [_lineup_player(index) for index in range(5)]}
         return {"timeline": []}
 
-    monkeypatch.setattr(provider, "_get", fake_get)
+    provider = TheSportsDbProvider(client=FakeTheSportsDbClient(fake_get))
 
     bundle = asyncio.run(provider.event_bundle("event-1"))
 

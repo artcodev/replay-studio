@@ -1,21 +1,23 @@
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
 import pytest
 
-from app.ball_detection import (
+from app.ball_candidate_selection import parse_ultralytics_ball_candidates
+from app.ball_detection_contract import (
     BallCandidate,
     BallDetectionBatch,
     BallDetectorConfig,
     BallDetectorConfigurationError,
     BallDetectorUnavailable,
-    UltralyticsBallDetector,
     UltralyticsBallDetectorConfig,
+)
+from app.ball_detector_factory import build_ball_detector
+from app.ultralytics_ball_detector import UltralyticsBallDetector
+from app.wasb_ball_detector import (
     WasbServiceBallDetector,
-    WasbSubprocessBallDetector,
-    build_ball_detector,
-    parse_ultralytics_ball_candidates,
 )
 
 
@@ -145,6 +147,59 @@ def test_tiled_detector_respects_configured_inference_batch_size():
     assert [len(call[0]) for call in model.calls] == [2, 2, 1]
 
 
+def test_region_detector_preserves_full_frame_coordinates_at_border_and_nms():
+    image = np.zeros((60, 100, 3), dtype=np.uint8)
+    left_crop = image[0:60, 0:60]
+    border_crop = image[20:60, 40:100]
+    model = _FakeModel(
+        [
+            _result(left_crop, [[50, 25, 58, 33]], [0.80], [0]),
+            # Same full-frame box after the x/y region offset. Cross-region
+            # NMS must collapse it, even though the second crop touches both
+            # the right and bottom image borders.
+            _result(border_crop, [[10, 5, 18, 13]], [0.95], [0]),
+        ]
+    )
+    detector = UltralyticsBallDetector(
+        UltralyticsBallDetectorConfig(
+            backend_name="dedicated-ultralytics",
+            class_ids=(0,),
+            tile_size=(60, 60),
+            inference_batch_size=8,
+            nms_iou=0.1,
+        ),
+        model=model,
+    )
+
+    batch = detector.detect_regions(
+        image,
+        [(0, 0, 60, 60), (40, 20, 120, 90)],
+        frame_index=9,
+        timestamp=0.36,
+    )
+
+    assert batch.image_size == (100, 60)
+    assert batch.metadata == {
+        "rawCandidateCount": 2,
+        "tileCount": 2,
+        "roiRegionCount": 2,
+        "roiRegions": [[0, 0, 60, 60], [40, 20, 100, 60]],
+        "inferenceBatchSize": 8,
+        "inferenceBatchCount": 1,
+        "scanMode": "roi",
+    }
+    assert len(batch.candidates) == 1
+    assert batch.candidates[0].bbox == (50.0, 25.0, 58.0, 33.0)
+    assert batch.candidates[0].confidence == pytest.approx(0.95)
+    assert batch.candidates[0].metadata["tile"] == {
+        "index": 1,
+        "x": 40,
+        "y": 20,
+        "width": 60,
+        "height": 40,
+    }
+
+
 def test_detector_refuses_missing_checkpoint_instead_of_triggering_download(tmp_path: Path):
     loader_called = False
 
@@ -204,26 +259,52 @@ class _FallbackDetector:
         )
 
 
+def _wasb_response(request, candidates=None):
+    frames = []
+    for index, item in enumerate(request.manifest["frames"]):
+        frames.append(
+            {
+                **item,
+                "imageSize": [100, 60],
+                "temporalPadding": len(set(
+                    frame["fileIndex"] for frame in request.manifest["frames"]
+                )) < 3,
+                "candidates": (
+                    list(candidates or [])
+                    if index == request.target_index
+                    else []
+                ),
+            }
+        )
+    return {
+        "contractVersion": 1,
+        "backend": "wasb-sbdt-soccer",
+        "modelVersion": "wasb-soccer@sha256:test",
+        "frames": frames,
+        "metadata": {"model": "wasb_soccer_best"},
+    }
+
+
 def test_wasb_service_sends_temporal_context_and_parses_candidates():
     captured = {}
 
-    def transport(url, payload, timeout):
-        captured.update(url=url, payload=payload, timeout=timeout)
-        return {
-            "imageSize": [100, 60],
-            "candidates": [
+    def transport(url, request, timeout):
+        captured.update(url=url, request=request, timeout=timeout)
+        return _wasb_response(
+            request,
+            [
                 {
                     "position": [50, 30],
                     "radius": 3,
                     "confidence": 0.91,
                     "temporalScore": 0.88,
+                    "modelVersion": "wasb-soccer@sha256:test",
                 }
             ],
-            "metadata": {"model": "wasb_soccer_best"},
-        }
+        )
 
     detector = WasbServiceBallDetector(
-        "http://wasb-worker:8092/detect",
+        "http://wasb-worker:8092/v1/detections",
         timeout=12.0,
         transport=transport,
     )
@@ -232,24 +313,29 @@ def test_wasb_service_sends_temporal_context_and_parses_candidates():
 
     batch = detector.detect(frame, frame_index=4, timestamp=0.4, context_frames=(context,))
 
-    assert captured["url"] == "http://wasb-worker:8092/detect"
+    assert captured["url"] == "http://wasb-worker:8092/v1/detections"
     assert captured["timeout"] == 12.0
-    assert captured["payload"]["targetIndex"] == 1
-    assert len(captured["payload"]["frames"]) == 2
+    request = captured["request"]
+    assert request.target_index == 2
+    assert request.manifest["targetIndex"] == 2
+    assert [item["fileIndex"] for item in request.manifest["frames"]] == [0, 0, 1]
+    assert len(request.uploads) == 2
     assert batch.candidates[0].bbox == (47.0, 27.0, 53.0, 33.0)
     assert batch.candidates[0].metadata["temporalScore"] == 0.88
-    assert batch.metadata["worker"] == {"model": "wasb_soccer_best"}
+    assert batch.metadata["temporalContextMode"] == "causal"
+    assert batch.metadata["worker"]["model"] == "wasb_soccer_best"
+    assert batch.metadata["worker"]["modelVersion"] == "wasb-soccer@sha256:test"
 
 
 def test_wasb_service_centres_offline_previous_and_next_context():
     captured = {}
 
-    def transport(_url, payload, _timeout):
-        captured["payload"] = payload
-        return {"imageSize": [20, 10], "candidates": []}
+    def transport(_url, request, _timeout):
+        captured["request"] = request
+        return _wasb_response(request)
 
     detector = WasbServiceBallDetector(
-        "http://wasb-worker:8092/detect",
+        "http://wasb-worker:8092/v1/detections",
         transport=transport,
     )
     previous = np.full((10, 20, 3), 1, dtype=np.uint8)
@@ -258,24 +344,26 @@ def test_wasb_service_centres_offline_previous_and_next_context():
 
     batch = detector.detect(current, context_frames=(previous, following))
 
-    assert captured["payload"]["targetIndex"] == 1
-    assert len(captured["payload"]["frames"]) == 3
+    request = captured["request"]
+    assert request.target_index == 1
+    assert [item["fileIndex"] for item in request.manifest["frames"]] == [0, 1, 2]
+    assert len(request.uploads) == 3
     assert batch.metadata["temporalContextMode"] == "centered"
 
 
 def test_wasb_failure_is_explicit_or_uses_configured_fallback():
-    def broken_transport(_url, _payload, _timeout):
+    def broken_transport(_url, _request, _timeout):
         raise TimeoutError("worker timeout")
 
     strict = WasbServiceBallDetector(
-        "http://wasb-worker:8092/detect",
+        "http://wasb-worker:8092/v1/detections",
         transport=broken_transport,
     )
     with pytest.raises(BallDetectorUnavailable, match="worker timeout"):
         strict.detect(np.zeros((10, 20, 3), dtype=np.uint8))
 
     fallback = WasbServiceBallDetector(
-        "http://wasb-worker:8092/detect",
+        "http://wasb-worker:8092/v1/detections",
         failure_policy="fallback",
         fallback=_FallbackDetector(),
         transport=broken_transport,
@@ -291,28 +379,67 @@ def test_wasb_failure_is_explicit_or_uses_configured_fallback():
 def test_wasb_fallback_policy_requires_a_detector():
     with pytest.raises(BallDetectorConfigurationError, match="explicit fallback"):
         WasbServiceBallDetector(
-            "http://wasb-worker:8092/detect",
+            "http://wasb-worker:8092/v1/detections",
             failure_policy="fallback",
         )
 
 
-def test_wasb_subprocess_uses_argument_vector_without_shell():
+def test_wasb_service_rejects_retired_detection_endpoint():
+    with pytest.raises(
+        BallDetectorConfigurationError,
+        match="must target /v1/detections",
+    ):
+        WasbServiceBallDetector("http://wasb-worker:8092/detect")
+
+
+def test_wasb_service_rejects_partial_or_wrong_backend_responses():
+    frame = np.zeros((10, 20, 3), dtype=np.uint8)
+
+    def wrong_backend(_url, request, _timeout):
+        payload = _wasb_response(request)
+        payload["backend"] = "some-other-model"
+        return payload
+
+    detector = WasbServiceBallDetector(
+        "http://wasb-worker:8092/v1/detections",
+        transport=wrong_backend,
+    )
+    with pytest.raises(BallDetectorUnavailable, match="unexpected backend"):
+        detector.detect(frame)
+
+
+def test_wasb_http_transport_serializes_multipart_without_base64(monkeypatch):
     captured = {}
 
-    def transport(command, payload, timeout):
-        captured.update(command=command, payload=payload, timeout=timeout)
-        return {
-            "imageSize": [20, 10],
-            "candidates": [{"x": 8, "y": 4, "confidence": 0.7}],
-        }
+    class Response:
+        def raise_for_status(self):
+            return None
 
-    detector = WasbSubprocessBallDetector(
-        ("python", "wasb_adapter.py"),
-        transport=transport,
+        def json(self):
+            manifest = json.loads(captured["data"]["manifest"])
+            request = SimpleNamespace(
+                manifest=manifest,
+                target_index=manifest["targetIndex"],
+            )
+            return _wasb_response(request)
+
+    def post(url, **kwargs):
+        captured.update(url=url, **kwargs)
+        return Response()
+
+    monkeypatch.setattr("app.wasb_ball_transport.httpx.post", post)
+    detector = WasbServiceBallDetector(
+        "http://wasb-worker:8092/v1/detections"
     )
-    batch = detector.detect(np.zeros((10, 20, 3), dtype=np.uint8))
+    detector.detect(np.zeros((10, 20, 3), dtype=np.uint8))
 
-    assert captured["command"] == ("python", "wasb_adapter.py")
-    assert captured["payload"]["contractVersion"] == 1
-    assert batch.candidates[0].x == 8.0
-    assert batch.candidates[0].y == 4.0
+    assert captured["url"].endswith("/v1/detections")
+    assert len(captured["files"]) == 1
+    field_name, (filename, image_bytes, media_type) = captured["files"][0]
+    assert field_name == "frames"
+    assert filename.endswith(".png")
+    assert image_bytes.startswith(b"\x89PNG")
+    assert media_type == "image/png"
+    manifest = captured["data"]["manifest"]
+    assert "dataBase64" not in manifest
+    assert '"targetIndex":1' in manifest

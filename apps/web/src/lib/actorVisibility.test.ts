@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import type { Track } from '../types'
+import type { Track } from '../types/tracking'
 import { shouldRenderActor, shouldRenderBall, shouldRenderPlayerVisual } from './actorVisibility'
 
 describe('shouldRenderActor', () => {

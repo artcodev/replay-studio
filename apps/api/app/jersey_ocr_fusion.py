@@ -1,4 +1,4 @@
-"""Conservative jersey-number OCR fusion and roster candidate generation.
+"""Conservative sampling and fusion of correlated jersey OCR observations.
 
 The detector/OCR worker is expected to emit many correlated readings for a
 person tracklet.  This module deliberately does not treat every video frame as
@@ -6,255 +6,28 @@ an independent vote.  It keeps the best readable frame in each temporal
 window, combines the remaining evidence, and publishes a jersey number only
 when both support and confidence thresholds pass.
 
-The API is pure and reconstruction-agnostic.  In particular, roster data is a
-review prior only: :func:`generate_roster_candidates` can rank possible
-players, but its result has no field that can automatically bind a canonical
-person to an external player.
+The algorithm is pure and reconstruction-agnostic. Contracts and review-only
+roster ranking have their own owners so consumers do not depend on this engine
+merely to exchange evidence DTOs.
 """
 
 from __future__ import annotations
 
 from collections import Counter, defaultdict
-from dataclasses import dataclass, field, replace
-from math import floor, isfinite
-from typing import Iterable, Literal, Mapping, Sequence
+from dataclasses import replace
+from math import floor
+from typing import Iterable, Mapping, Sequence
 
-
-JerseyEvidenceScope = Literal["tracklet", "canonical"]
-JerseyEvidenceStatus = Literal["reliable", "provisional", "conflict", "no-evidence"]
-
-
-def normalize_jersey_number(
-    value: str | int | None,
-    *,
-    minimum: int = 0,
-    maximum: int = 99,
-) -> str | None:
-    """Return a canonical decimal jersey number, or ``None`` when unsafe.
-
-    OCR character substitutions (for example ``O -> 0``) are intentionally
-    not guessed here.  A worker may provide such alternatives as separate OCR
-    observations with their own confidence instead.
-    """
-
-    if isinstance(value, bool) or value is None:
-        return None
-    if isinstance(value, int):
-        number = value
-    else:
-        text = str(value).strip()
-        if text.startswith("#"):
-            text = text[1:].strip()
-        if not text or not text.isascii() or not text.isdigit():
-            return None
-        number = int(text)
-    if number < minimum or number > maximum:
-        return None
-    return str(number)
-
-
-def _probability(value: float, field_name: str) -> float:
-    result = float(value)
-    if not isfinite(result) or not 0.0 <= result <= 1.0:
-        raise ValueError(f"{field_name} must be finite and between 0 and 1")
-    return result
-
-
-def _identifier(value: str, field_name: str) -> str:
-    result = str(value).strip()
-    if not result:
-        raise ValueError(f"{field_name} must not be empty")
-    return result
-
-
-@dataclass(frozen=True)
-class JerseyOcrObservation:
-    """One OCR reading from one crop of a local person tracklet."""
-
-    id: str
-    tracklet_id: str
-    timestamp_seconds: float
-    raw_number: str | int | None
-    ocr_confidence: float
-    frame_quality: float = 1.0
-    back_visibility: float = 1.0
-    frame_index: int | None = None
-    source: str = "jersey-ocr"
-    evidence_fingerprint: str | None = None
-
-    def __post_init__(self) -> None:
-        timestamp = float(self.timestamp_seconds)
-        if not isfinite(timestamp) or timestamp < 0.0:
-            raise ValueError("timestamp_seconds must be finite and non-negative")
-        frame_index = None if self.frame_index is None else int(self.frame_index)
-        if frame_index is not None and frame_index < 0:
-            raise ValueError("frame_index must be non-negative")
-        object.__setattr__(self, "id", _identifier(self.id, "JerseyOcrObservation.id"))
-        object.__setattr__(
-            self,
-            "tracklet_id",
-            _identifier(self.tracklet_id, "JerseyOcrObservation.tracklet_id"),
-        )
-        object.__setattr__(self, "timestamp_seconds", timestamp)
-        object.__setattr__(
-            self,
-            "ocr_confidence",
-            _probability(self.ocr_confidence, "ocr_confidence"),
-        )
-        object.__setattr__(
-            self,
-            "frame_quality",
-            _probability(self.frame_quality, "frame_quality"),
-        )
-        object.__setattr__(
-            self,
-            "back_visibility",
-            _probability(self.back_visibility, "back_visibility"),
-        )
-        object.__setattr__(self, "frame_index", frame_index)
-        object.__setattr__(self, "source", str(self.source).strip() or "jersey-ocr")
-        fingerprint = self.evidence_fingerprint
-        if fingerprint is not None:
-            if (
-                not isinstance(fingerprint, str)
-                or not fingerprint
-                or len(fingerprint) > 160
-                or not fingerprint.isascii()
-                or any(character.isspace() for character in fingerprint)
-            ):
-                raise ValueError("evidence_fingerprint must be a stable opaque string")
-        object.__setattr__(self, "evidence_fingerprint", fingerprint)
-
-    @property
-    def effective_score(self) -> float:
-        """Quality-aware confidence used for sampling and voting."""
-
-        return self.ocr_confidence * self.frame_quality * self.back_visibility
-
-
-@dataclass(frozen=True)
-class JerseyFusionConfig:
-    """Thresholds for conservative sampling and evidence publication."""
-
-    sampling_window_seconds: float = 0.50
-    min_ocr_confidence: float = 0.55
-    min_frame_quality: float = 0.35
-    min_back_visibility: float = 0.35
-    min_effective_score: float = 0.30
-    max_selected_frames: int = 16
-    reliable_confidence: float = 0.80
-    reliable_support_count: int = 2
-    # An exact 2:1 majority is allowed when its confidence/margin also passes;
-    # two equally supported readings still fail closed as a conflict.
-    conflict_vote_share: float = 0.34
-    minimum_vote_margin: float = 0.20
-    minimum_number: int = 0
-    maximum_number: int = 99
-
-    def __post_init__(self) -> None:
-        if not isfinite(float(self.sampling_window_seconds)) or self.sampling_window_seconds <= 0:
-            raise ValueError("sampling_window_seconds must be finite and positive")
-        for name in (
-            "min_ocr_confidence",
-            "min_frame_quality",
-            "min_back_visibility",
-            "min_effective_score",
-            "reliable_confidence",
-            "conflict_vote_share",
-            "minimum_vote_margin",
-        ):
-            _probability(getattr(self, name), name)
-        if int(self.max_selected_frames) < 1:
-            raise ValueError("max_selected_frames must be positive")
-        if int(self.reliable_support_count) < 1:
-            raise ValueError("reliable_support_count must be positive")
-        if int(self.minimum_number) < 0 or int(self.maximum_number) < int(
-            self.minimum_number
-        ):
-            raise ValueError("jersey number range is invalid")
-
-
-@dataclass(frozen=True)
-class JerseyVote:
-    number: str
-    support_count: int
-    weight: float
-    weight_share: float
-    mean_effective_score: float
-    observation_ids: tuple[str, ...]
-
-
-@dataclass(frozen=True)
-class JerseyEvidenceSummary:
-    """Fused evidence for one tracklet or one canonical person.
-
-    ``jersey_number`` is fail-closed: it is non-null only for ``reliable``
-    evidence.  ``candidate_number`` may expose a non-conflicting but
-    provisional top OCR reading to a review UI.
-    """
-
-    subject_id: str
-    scope: JerseyEvidenceScope
-    status: JerseyEvidenceStatus
-    jersey_number: str | None
-    candidate_number: str | None
-    confidence: float
-    support_count: int
-    selected_sample_count: int
-    selected_observations: tuple[JerseyOcrObservation, ...]
-    votes: tuple[JerseyVote, ...]
-    tracklet_ids: tuple[str, ...]
-    rejection_counts: Mapping[str, int] = field(default_factory=dict)
-    conflict_reasons: tuple[str, ...] = ()
-
-    def identity_resolver_fields(self) -> dict[str, str | float | int | None]:
-        """Fields accepted by :class:`identity_resolver.IdentityTracklet`.
-
-        Provisional/conflicting evidence returns a null jersey and zero sample
-        count, so it cannot become weak or reliable identity evidence by
-        accident at the integration boundary.
-        """
-
-        if self.jersey_number is None:
-            return {
-                "jersey_number": None,
-                "jersey_confidence": 0.0,
-                "jersey_sample_count": 0,
-            }
-        return {
-            "jersey_number": self.jersey_number,
-            "jersey_confidence": self.confidence,
-            "jersey_sample_count": self.support_count,
-        }
-
-    def to_payload(self) -> dict:
-        """JSON-ready diagnostics suitable for canonical-person documents."""
-
-        return {
-            "subjectId": self.subject_id,
-            "scope": self.scope,
-            "status": self.status,
-            "jerseyNumber": self.jersey_number,
-            "candidateNumber": self.candidate_number,
-            "confidence": round(self.confidence, 6),
-            "supportCount": self.support_count,
-            "selectedSampleCount": self.selected_sample_count,
-            "selectedObservationIds": [item.id for item in self.selected_observations],
-            "trackletIds": list(self.tracklet_ids),
-            "votes": [
-                {
-                    "number": item.number,
-                    "supportCount": item.support_count,
-                    "weight": round(item.weight, 6),
-                    "weightShare": round(item.weight_share, 6),
-                    "meanEffectiveScore": round(item.mean_effective_score, 6),
-                    "observationIds": list(item.observation_ids),
-                }
-                for item in self.votes
-            ],
-            "rejectionCounts": dict(sorted(self.rejection_counts.items())),
-            "conflictReasons": list(self.conflict_reasons),
-        }
+from .jersey_ocr_contract import (
+    JerseyEvidenceScope,
+    JerseyEvidenceStatus,
+    JerseyEvidenceSummary,
+    JerseyFusionConfig,
+    JerseyOcrObservation,
+    JerseyVote,
+    identifier,
+    normalize_jersey_number,
+)
 
 
 def _observation_order(item: JerseyOcrObservation) -> tuple:
@@ -449,18 +222,20 @@ def aggregate_tracklet_evidence(
 ) -> JerseyEvidenceSummary:
     """Sample and fuse OCR readings belonging to exactly one tracklet."""
 
-    identifier = _identifier(tracklet_id, "tracklet_id")
+    tracklet_identifier = identifier(tracklet_id, "tracklet_id")
     rows = tuple(observations)
-    mismatches = sorted({item.tracklet_id for item in rows if item.tracklet_id != identifier})
+    mismatches = sorted(
+        {item.tracklet_id for item in rows if item.tracklet_id != tracklet_identifier}
+    )
     if mismatches:
         raise ValueError(
-            f"observations for {identifier!r} include other tracklets: {mismatches!r}"
+            f"observations for {tracklet_identifier!r} include other tracklets: {mismatches!r}"
         )
     return _fuse(
-        identifier,
+        tracklet_identifier,
         "tracklet",
         rows,
-        (identifier,),
+        (tracklet_identifier,),
         config or JerseyFusionConfig(),
     )
 
@@ -509,7 +284,7 @@ def aggregate_canonical_people(
         canonical_id = tracklet_to_canonical.get(item.subject_id)
         if canonical_id is None:
             raise ValueError(f"missing canonical mapping for tracklet {item.subject_id!r}")
-        canonical_id = _identifier(canonical_id, "canonical person id")
+        canonical_id = identifier(canonical_id, "canonical person id")
         by_canonical[canonical_id].append(item)
 
     result: dict[str, JerseyEvidenceSummary] = {}
@@ -555,152 +330,8 @@ def aggregate_canonical_people(
     return result
 
 
-@dataclass(frozen=True)
-class RosterPlayer:
-    """Minimal roster record used only to propose review candidates."""
-
-    external_player_id: str
-    display_name: str
-    jersey_number: str | int | None = None
-    team_id: str | None = None
-    role: str | None = None
-
-    def __post_init__(self) -> None:
-        object.__setattr__(
-            self,
-            "external_player_id",
-            _identifier(self.external_player_id, "RosterPlayer.external_player_id"),
-        )
-        object.__setattr__(
-            self,
-            "display_name",
-            _identifier(self.display_name, "RosterPlayer.display_name"),
-        )
-        team_id = str(self.team_id).strip() if self.team_id is not None else ""
-        role = str(self.role).strip() if self.role is not None else ""
-        object.__setattr__(self, "team_id", team_id or None)
-        object.__setattr__(self, "role", role or None)
-        object.__setattr__(
-            self,
-            "jersey_number",
-            normalize_jersey_number(self.jersey_number),
-        )
-
-
-@dataclass(frozen=True)
-class RosterCandidate:
-    external_player_id: str
-    display_name: str
-    jersey_number: str
-    team_id: str | None
-    role: str | None
-    score: float
-    reasons: tuple[str, ...]
-    requires_manual_confirmation: bool = field(default=True, init=False)
-
-    def to_payload(self) -> dict:
-        return {
-            "externalPlayerId": self.external_player_id,
-            "name": self.display_name,
-            "number": self.jersey_number,
-            "teamId": self.team_id,
-            "position": self.role,
-            "confidence": round(self.score, 6),
-            "reasons": list(self.reasons),
-            "requiresManualConfirmation": True,
-        }
-
-
-@dataclass(frozen=True)
-class RosterCandidateSet:
-    subject_id: str
-    candidates: tuple[RosterCandidate, ...]
-    reason: str
-    requires_manual_confirmation: bool = field(default=True, init=False)
-
-    @property
-    def auto_bind_external_player_id(self) -> None:
-        """Roster evidence is never sufficient for an automatic identity bind."""
-
-        return None
-
-    def to_payload(self) -> list[dict]:
-        return [item.to_payload() for item in self.candidates]
-
-
-def generate_roster_candidates(
-    evidence: JerseyEvidenceSummary,
-    roster: Iterable[RosterPlayer],
-    *,
-    team_id: str | None = None,
-    limit: int = 10,
-) -> RosterCandidateSet:
-    """Rank exact-number roster matches without selecting or binding one.
-
-    Team membership is only a ranking hint.  A team match without reliable OCR
-    never creates a candidate, and even one exact team+number match still
-    requires an explicit manual decision by the caller.
-    """
-
-    if int(limit) < 1:
-        raise ValueError("limit must be positive")
-    rows = tuple(roster)
-    ids = [item.external_player_id for item in rows]
-    if len(ids) != len(set(ids)):
-        raise ValueError("roster external_player_id values must be unique")
-    if evidence.jersey_number is None or evidence.status != "reliable":
-        return RosterCandidateSet(
-            subject_id=evidence.subject_id,
-            candidates=(),
-            reason="reliable-jersey-required",
-        )
-
-    normalized_team = str(team_id).strip() or None if team_id is not None else None
-    candidates: list[RosterCandidate] = []
-    for player in rows:
-        if player.jersey_number != evidence.jersey_number:
-            continue
-        if normalized_team is not None and player.team_id == normalized_team:
-            multiplier = 1.0
-            team_reason = "team-match"
-        elif normalized_team is None or player.team_id is None:
-            multiplier = 0.90
-            team_reason = "team-unavailable"
-        else:
-            multiplier = 0.50
-            team_reason = "team-conflict"
-        candidates.append(
-            RosterCandidate(
-                external_player_id=player.external_player_id,
-                display_name=player.display_name,
-                jersey_number=player.jersey_number,
-                team_id=player.team_id,
-                role=player.role,
-                score=evidence.confidence * multiplier,
-                reasons=("reliable-jersey-number-match", team_reason),
-            )
-        )
-    candidates.sort(
-        key=lambda item: (-item.score, item.display_name.casefold(), item.external_player_id)
-    )
-    return RosterCandidateSet(
-        subject_id=evidence.subject_id,
-        candidates=tuple(candidates[: int(limit)]),
-        reason="manual-confirmation-required" if candidates else "no-number-match",
-    )
-
-
 __all__ = [
-    "JerseyEvidenceSummary",
-    "JerseyFusionConfig",
-    "JerseyOcrObservation",
-    "JerseyVote",
-    "RosterCandidate",
-    "RosterCandidateSet",
-    "RosterPlayer",
     "aggregate_canonical_people",
     "aggregate_tracklet_evidence",
     "aggregate_tracklets",
-    "generate_roster_candidates",
-    "normalize_jersey_number",
 ]

@@ -5,6 +5,30 @@ This opt-in harness measures the already configured `identity-worker` and
 either model runtime, fetch checkpoints, build images, or download weights. It
 only calls workers that are already `ready` over their public HTTP contracts.
 
+The implementation is split by capability under `model_validation/`:
+
+- `manifest_contract.py` owns only immutable DTOs, schema constants and the
+  domain error; `manifest_parsing.py` owns strict primitives and relative-path
+  safety;
+- `manifest_crop_labels.py`, `manifest_identity_pairs.py`,
+  `manifest_thresholds.py` and `manifest_dataset.py` validate their independent
+  sections and cross-label invariants;
+- `manifest_fingerprint.py` alone owns the byte-and-label content hash, while
+  `manifest_loader.py` is the thin composition loader;
+- `identity_evaluator.py` and `jersey_evaluator.py` are deterministic, I/O-free
+  metric evaluators;
+- `reports.py` builds report documents, while `report_writer.py` alone owns
+  their atomic filesystem persistence;
+- `identity_worker_client.py` and `jersey_worker_client.py` translate their
+  independently versioned public protocols; `worker_transport.py` owns shared
+  readiness and transport failures;
+- `orchestration.py` is the application service and the only module that
+  optionally imports the HTTP runtime.
+
+`run_validation.py` is only the command-line composition root. There is no
+aggregate harness/manifest module or package-root re-export API; first-party
+consumers import the contract or canonical loader directly.
+
 The canonical input contract is
 [`manifest.schema.json`](manifest.schema.json). Start from
 [`manifest.example.json`](manifest.example.json), replace every placeholder,
