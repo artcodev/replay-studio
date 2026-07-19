@@ -13,6 +13,7 @@ describe('threeViewOptions', () => {
       labels: true,
       trajectory: true,
       pathTracking: false,
+      allPaths: false,
       ball: true,
       analysisMarkers: true,
     })

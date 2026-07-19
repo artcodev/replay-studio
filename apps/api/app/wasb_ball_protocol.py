@@ -98,6 +98,130 @@ def build_wasb_multipart_request(
     )
 
 
+def build_wasb_sequence_request(
+    frames: Sequence[tuple[FrameInput, int, float | None]],
+    *,
+    max_candidates: int,
+) -> WasbMultipartRequest:
+    """Build one multipart request for a contiguous run of dense frames.
+
+    Every frame is uploaded exactly once; the worker tiles the sequence into
+    its fixed 3-frame windows and returns per-frame candidates.
+    """
+
+    if not frames:
+        raise BallDetectorUnavailable("WASB sequence request requires frames")
+    uploads: list[FrameInput] = []
+    manifest_frames: list[dict[str, Any]] = []
+    for file_index, (frame, frame_index, timestamp) in enumerate(frames):
+        if frame_index < 0:
+            raise BallDetectorUnavailable("WASB frame_index must not be negative")
+        uploads.append(frame)
+        item: dict[str, Any] = {
+            "fileIndex": file_index,
+            "frameIndex": int(frame_index),
+        }
+        if timestamp is not None:
+            item["timestamp"] = float(timestamp)
+        manifest_frames.append(item)
+    return WasbMultipartRequest(
+        uploads=tuple(uploads),
+        manifest={
+            "contractVersion": CONTRACT_VERSION,
+            "maxCandidates": max_candidates,
+            "frames": manifest_frames,
+        },
+        target_index=0,
+        context_mode="tiled-window-sequence",
+    )
+
+
+def parse_wasb_sequence_response(
+    response: Mapping[str, Any],
+    *,
+    request: WasbMultipartRequest,
+    backend_name: str,
+    max_candidates: int,
+    nms_iou: float,
+) -> list[WasbTargetResponse]:
+    """Validate the batch response and return one result per requested frame."""
+
+    if response.get("contractVersion") != CONTRACT_VERSION:
+        raise BallDetectorUnavailable(
+            "WASB service returned an unsupported contractVersion"
+        )
+    if response.get("backend") != WASB_WORKER_BACKEND:
+        raise BallDetectorUnavailable(
+            "WASB service returned an unexpected backend"
+        )
+    model_version = response.get("modelVersion")
+    if not isinstance(model_version, str) or not model_version:
+        raise BallDetectorUnavailable(
+            "WASB service response has no modelVersion"
+        )
+    raw_frames = response.get("frames")
+    expected_frames = request.manifest["frames"]
+    if (
+        not isinstance(raw_frames, Sequence)
+        or isinstance(raw_frames, (str, bytes))
+        or len(raw_frames) != len(expected_frames)
+    ):
+        raise BallDetectorUnavailable(
+            "WASB service returned an invalid frames array"
+        )
+    metadata = response.get("metadata")
+    if not isinstance(metadata, Mapping):
+        raise BallDetectorUnavailable(
+            "WASB service response metadata must be an object"
+        )
+    results: list[WasbTargetResponse] = []
+    for sequence_index, (raw_frame, expected) in enumerate(
+        zip(raw_frames, expected_frames, strict=True)
+    ):
+        if not isinstance(raw_frame, Mapping):
+            raise BallDetectorUnavailable(
+                f"WASB service frame {sequence_index} must be an object"
+            )
+        if raw_frame.get("fileIndex") != expected["fileIndex"]:
+            raise BallDetectorUnavailable(
+                f"WASB service frame {sequence_index} fileIndex does not match"
+            )
+        if raw_frame.get("frameIndex") != expected["frameIndex"]:
+            raise BallDetectorUnavailable(
+                f"WASB service frame {sequence_index} frameIndex does not match"
+            )
+        temporal_padding = raw_frame.get("temporalPadding")
+        if not isinstance(temporal_padding, bool):
+            raise BallDetectorUnavailable(
+                f"WASB service frame {sequence_index} temporalPadding must be a boolean"
+            )
+        image_size = _strict_image_size(raw_frame.get("imageSize"))
+        candidates = _parse_wasb_candidates(
+            raw_frame.get("candidates"),
+            backend_name=backend_name,
+            image_size=image_size,
+            max_candidates=max_candidates,
+            nms_iou=nms_iou,
+            frame_index=int(expected["frameIndex"]),
+            timestamp=expected.get("timestamp"),
+            model_version=model_version,
+        )
+        results.append(
+            WasbTargetResponse(
+                image_size=image_size,
+                candidates=candidates,
+                worker_metadata={
+                    **dict(metadata),
+                    "backend": WASB_WORKER_BACKEND,
+                    "modelVersion": model_version,
+                    "sequenceIndex": sequence_index,
+                    "temporalPadding": temporal_padding,
+                },
+            )
+        )
+    return results
+
+
 def _logical_frame_indices(
     target_frame_index: int,
     *,

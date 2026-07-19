@@ -10,12 +10,14 @@ from .scene_repository import scenes
 
 
 def upsert_player_action(scene: dict, request: dict) -> dict:
-    action = apply_player_action_upsert(scene, request)
-    scenes.put(scene)
-    return action
+    """Apply one player-action edit and return the persisted Scene document."""
+
+    apply_player_action_upsert(scene, request)
+    return scenes.put(scene)
 
 
 def delete_player_action(scene: dict, action_id: str) -> dict:
-    action = apply_player_action_delete(scene, action_id)
-    scenes.put(scene)
-    return action
+    """Delete one player action and return the persisted Scene document."""
+
+    apply_player_action_delete(scene, action_id)
+    return scenes.put(scene)

@@ -23,22 +23,55 @@ def resolve_ball_phase(
     player_track_count: int,
     progress: ReconstructionProgress,
 ) -> BallTrajectoryPhaseResult:
-    resolver_frames = (
-        [
+    if coordinate_mode == "unavailable":
+        # The solver output would be discarded anyway: without metric
+        # calibration no world-space trajectory is ever published. Record
+        # the explicit skip instead of paying for a thrown-away solve.
+        ball = []
+        ball_tracking_diagnostics = {
+            "trajectoryMode": "automatic",
+            "solverSkipped": True,
+            "solverSkippedReason": "coordinate-mode-unavailable",
+            "worldProjectionStatus": ball_world_projection_status(
+                coordinate_mode,
+                ball,
+            ),
+            "detectorFrameCount": len(ball_frames),
+            "detectorCandidateFrameCount": sum(
+                bool(items) for items, _ in ball_frames
+            ),
+        }
+        progress.update(
+            "projection",
+            5,
+            "3D trajectories ready",
             (
-                [
-                    candidate
-                    for candidate in candidates
-                    if candidate.get("pitchX") is not None
-                    and candidate.get("pitchZ") is not None
-                ],
-                time,
-            )
-            for candidates, time in ball_frames
-        ]
-        if coordinate_mode != "unavailable"
-        else ball_frames
-    )
+                f"Accepted {player_track_count} player tracks; ball world "
+                "trajectory requires metric calibration."
+            ),
+            91,
+            97,
+            completed=2,
+            total=2,
+            eta_padding=2.0,
+        )
+        return BallTrajectoryPhaseResult(
+            keyframes=ball,
+            diagnostics=ball_tracking_diagnostics,
+        )
+
+    resolver_frames = [
+        (
+            [
+                candidate
+                for candidate in candidates
+                if candidate.get("pitchX") is not None
+                and candidate.get("pitchZ") is not None
+            ],
+            time,
+        )
+        for candidates, time in ball_frames
+    ]
     ball_resolution = resolve_ball_trajectory(
         resolver_frames,
         frame_size,
@@ -49,11 +82,7 @@ def resolve_ball_phase(
             max_ball_speed_metres_per_second=55.0,
         ),
     )
-    ball = (
-        ball_resolution.keyframes
-        if coordinate_mode != "unavailable"
-        else []
-    )
+    ball = ball_resolution.keyframes
     ball_tracking_diagnostics = {
         **ball_resolution.diagnostics,
         "worldProjectionStatus": ball_world_projection_status(

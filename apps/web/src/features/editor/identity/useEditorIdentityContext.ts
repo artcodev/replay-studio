@@ -71,6 +71,7 @@ export function useEditorIdentityContext(
     selectedCanonicalPersonId: viewport.selectedCanonicalPersonId,
     selectedTrackId: viewport.selectedTrackId,
     selectedFramePersonId: viewport.selectedFramePersonId,
+    activeTab: viewport.activeTab,
     saveState: session.saveState,
     error: session.error,
     canonicalPersonById: analysis.frameAnalysis.canonicalPersonById,
@@ -97,7 +98,7 @@ export function useEditorIdentityContext(
     error: session.error,
     invalidateIdentityReview: identityReview.invalidate,
     clearFrameAnalysis: analysis.frameAnalysis.clear,
-    loadIdentityReview: identityReview.load,
+    loadIdentityReview: identityReview.ensureLoaded,
     startReconstructionPolling: analysis.reconstruction.startPolling,
     refreshWorkspace: () => session.selectedProject.value
       ? session.loadProjectsWorkspace(session.selectedProject.value.id)
@@ -152,20 +153,43 @@ export function useEditorIdentityContext(
     session.saveState.value = 'Unsaved changes'
   }
 
-  watch(() => session.scene.value?.id, (sceneId) => {
-    if (!sceneId) {
-      identityReview.invalidate()
-      return
-    }
-    projectMatch.importError.value = null
-    void identityReview.load(sceneId)
+  const identityReviewSource = computed(() => {
+    const scene = session.scene.value
+    const video = scene?.payload.videoAsset
+    const reconstruction = video?.reconstruction
+    const diagnostics = reconstruction?.artifactManifest?.artifacts.identityDiagnostics
+    const timeline = reconstruction?.artifactManifest?.artifacts.identityTimeline
+    return scene
+      ? JSON.stringify([
+          scene.id,
+          scene.revision,
+          video?.selectedSegmentId ?? null,
+          reconstruction?.status ?? null,
+          diagnostics?.id ?? null,
+          diagnostics?.sha256 ?? null,
+          timeline?.id ?? null,
+          timeline?.sha256 ?? null,
+        ])
+      : null
   })
+
+  watch(() => session.scene.value?.id, () => {
+    projectMatch.importError.value = null
+  })
+  watch(identityReviewSource, () => {
+    identityReview.invalidate()
+    void identityReview.ensureLoaded()
+  }, { immediate: true })
+  watch(
+    [viewport.selectedCanonicalPersonId, viewport.activeTab],
+    () => { void identityReview.ensureLoaded() },
+  )
   watch(analysis.reconstruction.terminalSync, (result) => {
     if (
       result
-      && result.status !== 'cancelled'
+      && result.status === 'succeeded'
       && session.scene.value?.id === result.sceneId
-    ) void identityReview.load(result.sceneId)
+    ) void identityReview.ensureLoaded(result.sceneId)
   })
   watch(
     [analysis.reconstruction.reconstructing, analysis.reconstruction.running],

@@ -29,6 +29,15 @@ export function useReconstructionController(options: ReconstructionControllerOpt
   const reconstructing = ref(false)
   const selectedModel = ref<ReconstructionModel>('yolo26m.pt')
   const selectedBallBackend = ref<BallDetectionBackend>('dedicated-ultralytics')
+  // Pre-selected, always visible while the manual ball trajectory is
+  // authoritative: the most expensive analysis phase is skipped explicitly.
+  const skipBallDetection = ref(true)
+  const manualBallAuthoritative = computed(() => (
+    options.scene.value?.payload.ball?.mode === 'manual'
+  ))
+  // Off by default: disabling OCR trades automatic shirt-number merge
+  // evidence for a cheaper run when the roster is bound manually.
+  const skipJerseyOcr = ref(false)
   let pollingEpoch = 0
   let terminalSyncRequestId = 0
   const terminalSync = ref<{
@@ -190,13 +199,18 @@ export function useReconstructionController(options: ReconstructionControllerOpt
     if (!scene?.payload.videoAsset?.selectedSegmentId || reconstructing.value) return
     options.clearFrameAnalysis()
     reconstructing.value = true
-    options.saveState.value = `Detecting people with ${selectedModel.value.replace('.pt', '')} · ball ${selectedBallBackend.value}…`
+    const skipBall = manualBallAuthoritative.value && skipBallDetection.value
+    options.saveState.value = skipBall
+      ? `Detecting people with ${selectedModel.value.replace('.pt', '')} · manual ball (detection skipped)…`
+      : `Detecting people with ${selectedModel.value.replace('.pt', '')} · ball ${selectedBallBackend.value}…`
     try {
       options.scene.value = await reconstructionClient.reconstruct(
         options.projectId(),
         scene.id,
         selectedModel.value,
         selectedBallBackend.value,
+        skipBall ? 'skip-manual-authoritative' : 'automatic',
+        skipJerseyOcr.value ? 'off' : 'automatic',
       )
       await startPolling(scene.id)
     } catch (cause) {
@@ -222,6 +236,9 @@ export function useReconstructionController(options: ReconstructionControllerOpt
     reconstructing,
     selectedModel,
     selectedBallBackend,
+    skipBallDetection,
+    manualBallAuthoritative,
+    skipJerseyOcr,
     currentJob,
     terminalSync,
     status,

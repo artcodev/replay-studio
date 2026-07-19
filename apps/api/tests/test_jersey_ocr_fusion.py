@@ -616,3 +616,43 @@ def test_property_roster_candidate_generation_never_auto_binds() -> None:
         result = generate_roster_candidates(evidence, roster, team_id="home")
         assert result.requires_manual_confirmation is True
         assert all(item.requires_manual_confirmation for item in result.candidates)
+
+
+def test_stable_number_switch_inside_one_tracklet_is_flagged_for_review() -> None:
+    from app.jersey_ocr_fusion import detect_jersey_number_switches
+
+    def crop(tracklet_id, timestamp, number, status="recognized"):
+        return {
+            "trackletId": tracklet_id,
+            "timestamp": timestamp,
+            "status": status,
+            "rawNumber": number,
+        }
+
+    crops = [
+        # Tracklet A: stable 7 then stable 9 → an ID-switch suspect.
+        *[crop("track-a", 0.5 * index, "7") for index in range(3)],
+        *[crop("track-a", 2.0 + 0.5 * index, "9") for index in range(3)],
+        # Tracklet B: one noisy misread inside a stable 5 → never flagged.
+        crop("track-b", 0.0, "5"),
+        crop("track-b", 0.5, "5"),
+        crop("track-b", 1.0, "8"),
+        crop("track-b", 1.5, "5"),
+        crop("track-b", 2.0, "5"),
+        # Tracklet C: unreadable statuses are ignored entirely.
+        crop("track-c", 0.0, "4", status="ambiguous"),
+        crop("track-c", 0.5, "6", status="ambiguous"),
+    ]
+
+    suspects = detect_jersey_number_switches(crops, min_stable_run=3)
+
+    assert suspects == [
+        {
+            "trackletId": "track-a",
+            "fromNumber": "7",
+            "toNumber": "9",
+            "switchTime": 2.0,
+            "firstRunCount": 3,
+            "secondRunCount": 3,
+        }
+    ]

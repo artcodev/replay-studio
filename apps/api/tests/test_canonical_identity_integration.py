@@ -79,13 +79,16 @@ def test_identity_worker_results_stay_separate_from_hsv_and_keep_crop_qa():
     vector = np.zeros(256, dtype=np.float32)
     vector[5] = 1.0
     detection, _ = _detection(101, 0.0, 100.0)
+    detection.crop_frame_sha256 = "ab" * 32
+    detection.crop_sha256 = "cd" * 32
     path = Path("/tmp/frame_00101.jpg")
 
-    requests = _identity_embedding_requests(
+    requests, _local_items, _overlap = _identity_embedding_requests(
         [(path, 0.0)],
         [([detection], 0.0)],
     )
     assert requests[0][2][0]["observationId"] == detection.observation_id
+    assert requests[0][2][0]["cropSha256"] == "cd" * 32
 
     diagnostics = _attach_identity_embeddings(
         [([detection], 0.0)],

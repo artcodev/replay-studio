@@ -133,7 +133,7 @@ def test_resolver_uses_future_anchor_and_publishes_temporal_provenance(
         lambda _path: np.zeros((540, 960, 3), dtype=np.uint8),
     )
     monkeypatch.setattr(
-        "app.reconstruction_calibration_resolution.calibration_alignment_metrics",
+        "app.reconstruction_calibration_resolution.calibration_alignment_metrics_from_mask",
         lambda _image, _calibration: None,
     )
 
@@ -250,7 +250,7 @@ def test_target_line_validation_can_veto_temporal_recovery(
         lambda _path: np.zeros((540, 960, 3), dtype=np.uint8),
     )
     monkeypatch.setattr(
-        "app.reconstruction_calibration_resolution.calibration_alignment_metrics",
+        "app.reconstruction_calibration_resolution.calibration_alignment_metrics_from_mask",
         lambda _image, _calibration: bad_alignment,
     )
 

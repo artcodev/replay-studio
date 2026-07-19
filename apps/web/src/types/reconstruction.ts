@@ -15,6 +15,12 @@ export type BallDetectionBackend =
 
 export type BallTrajectoryMode = 'automatic' | 'manual'
 
+/** Queued immutable run input: skip is valid only while the manual ball trajectory is authoritative. */
+export type BallDetectionProfile = 'automatic' | 'skip-manual-authoritative'
+
+/** Queued immutable run input: 'off' trades automatic shirt-number merge evidence for a cheaper run. */
+export type JerseyOcrProfile = 'automatic' | 'off'
+
 export type ReconstructionPhase = {
   id: string
   label: string

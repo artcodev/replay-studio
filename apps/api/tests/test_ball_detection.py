@@ -327,6 +327,96 @@ def test_wasb_service_sends_temporal_context_and_parses_candidates():
     assert batch.metadata["worker"]["modelVersion"] == "wasb-soccer@sha256:test"
 
 
+def test_wasb_detect_sequence_uploads_each_frame_once_and_parses_all(monkeypatch):
+    captured = {}
+
+    def transport(url, request, timeout):
+        captured.update(url=url, request=request, timeout=timeout)
+        return _wasb_response_all_frames(request)
+
+    detector = WasbServiceBallDetector(
+        "http://wasb-worker:8092/v1/detections",
+        timeout=12.0,
+        transport=transport,
+    )
+    frames = [
+        (np.full((60, 100, 3), index, dtype=np.uint8), 10 + index, index / 25.0)
+        for index in range(5)
+    ]
+
+    batches = detector.detect_sequence(frames)
+
+    request = captured["request"]
+    assert len(request.uploads) == 5
+    assert [item["fileIndex"] for item in request.manifest["frames"]] == [
+        0,
+        1,
+        2,
+        3,
+        4,
+    ]
+    assert [item["frameIndex"] for item in request.manifest["frames"]] == [
+        10,
+        11,
+        12,
+        13,
+        14,
+    ]
+    assert "targetIndex" not in request.manifest
+    assert len(batches) == 5
+    assert all(batch.backend == "wasb-service" for batch in batches)
+    assert batches[2].candidates[0].metadata["frameIndex"] == 12
+    assert batches[0].metadata["temporalContextMode"] == "tiled-window-sequence"
+    assert batches[3].metadata["worker"]["sequenceIndex"] == 3
+
+
+def _wasb_response_all_frames(request):
+    frames = []
+    for item in request.manifest["frames"]:
+        frames.append(
+            {
+                **item,
+                "imageSize": [100, 60],
+                "temporalPadding": False,
+                "candidates": [
+                    {
+                        "position": [50, 30],
+                        "radius": 3,
+                        "confidence": 0.9,
+                    }
+                ],
+            }
+        )
+    return {
+        "contractVersion": 1,
+        "backend": "wasb-sbdt-soccer",
+        "modelVersion": "wasb-soccer@sha256:test",
+        "frames": frames,
+        "metadata": {"model": "wasb_soccer_best"},
+    }
+
+
+def test_wasb_detect_sequence_failure_raises_without_internal_fallback():
+    def broken_transport(_url, _request, _timeout):
+        raise ConnectionError("worker offline")
+
+    fallback = WasbServiceBallDetector(
+        "http://wasb-worker:8092/v1/detections",
+        transport=lambda *_: (_ for _ in ()).throw(
+            AssertionError("fallback must not be consulted by detect_sequence")
+        ),
+    )
+    detector = WasbServiceBallDetector(
+        "http://wasb-worker:8092/v1/detections",
+        transport=broken_transport,
+        failure_policy="fallback",
+        fallback=fallback,
+    )
+
+    with pytest.raises(BallDetectorUnavailable, match="worker offline"):
+        detector.detect_sequence([(np.zeros((60, 100, 3), dtype=np.uint8), 0, 0.0)])
+
+
 def test_wasb_service_centres_offline_previous_and_next_context():
     captured = {}
 

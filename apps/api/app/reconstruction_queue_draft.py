@@ -22,6 +22,8 @@ class ReconstructionQueueInputs:
     frame_count: int
     run_id: str
     match_snapshot_ref: Mapping[str, Any] | None
+    ball_detection_profile: str = "automatic"
+    jersey_ocr_profile: str = "automatic"
 
 
 def validate_reconstruction_queue_scene(scene: Mapping[str, Any]) -> None:
@@ -63,6 +65,20 @@ def prepare_reconstruction_queue_draft(
         raise ReconstructionError("Reconstruction run ID must be assigned")
     if inputs.frame_count < 0:
         raise ReconstructionError("Reconstruction frame count cannot be negative")
+    if inputs.ball_detection_profile not in {
+        "automatic",
+        "skip-manual-authoritative",
+    }:
+        raise ReconstructionError("Unknown ball detection profile")
+    if inputs.ball_detection_profile == "skip-manual-authoritative":
+        ball = scene.get("payload", {}).get("ball")
+        if not isinstance(ball, Mapping) or ball.get("mode") != "manual":
+            raise ReconstructionError(
+                "Ball detection can be skipped only while the manual ball "
+                "trajectory is the authoritative channel"
+            )
+    if inputs.jersey_ocr_profile not in {"automatic", "off"}:
+        raise ReconstructionError("Unknown jersey OCR profile")
 
     draft = deepcopy(scene)
     payload = draft.setdefault("payload", {})
@@ -89,6 +105,8 @@ def prepare_reconstruction_queue_draft(
         "model": inputs.model,
         "ballBackend": inputs.ball_backend,
         "ballDetectionInput": deepcopy(dict(inputs.ball_detection_input)),
+        "ballDetectionProfile": inputs.ball_detection_profile,
+        "jerseyOcrProfile": inputs.jersey_ocr_profile,
         "identityCorrectionDiagnostics": [],
         "diagnostics": previous_diagnostics,
     }

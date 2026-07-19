@@ -1,3 +1,4 @@
+from copy import deepcopy
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -113,10 +114,11 @@ def _patch_frame(monkeypatch, image: np.ndarray, frame_index: int = 123) -> Path
     return path
 
 
-def test_auto_calibration_runs_on_exact_frame_and_persists_evidence_without_queue(
+def test_auto_calibration_is_ephemeral_and_never_bumps_the_scene_revision(
     monkeypatch,
 ):
     scene = _scene()
+    before = deepcopy(scene)
     image = np.zeros((540, 960, 3), dtype=np.uint8)
     _patch_frame(monkeypatch, image)
     calls = []
@@ -135,10 +137,11 @@ def test_auto_calibration_runs_on_exact_frame_and_persists_evidence_without_queu
             AssertionError("line fallback must not run after an accepted keypoint fit")
         ),
     )
-    persisted = []
     monkeypatch.setattr(
-        "app.reconstruction_calibration_preview.scenes.put",
-        lambda value: persisted.append(value) or value,
+        "app.scene_repository.scenes.put",
+        lambda value: (_ for _ in ()).throw(
+            AssertionError("a calibration preview must not persist the scene")
+        ),
     )
 
     draft = propose_scene_pitch_calibration(scene, 0.04)
@@ -156,11 +159,9 @@ def test_auto_calibration_runs_on_exact_frame_and_persists_evidence_without_queu
     assert draft["rawLines"][0]["residualStatus"] == "scored"
     assert draft["evidence"]["rawLines"] == draft["rawLines"]
     assert draft["evidence"]["markings"] == draft["markings"]
-    reconstruction = scene["payload"]["videoAsset"]["reconstruction"]
-    assert reconstruction["status"] == "ready"
-    assert reconstruction["qualityVerdict"] == "review"
-    assert reconstruction["calibration"]["lastFramePreview"]["sourceFrameIndex"] == 123
-    assert persisted
+    # Preview → Cancel → Save regression: the proposal leaves the scene
+    # document untouched, so a later save cannot 409 on a hidden revision.
+    assert scene == before
 
 
 def test_auto_calibration_line_fallback_is_downscaled_bounded_and_lifted(monkeypatch):
@@ -194,10 +195,6 @@ def test_auto_calibration_line_fallback_is_downscaled_bounded_and_lifted(monkeyp
 
     monkeypatch.setattr(
         "app.reconstruction_calibration_proposal.calibrate_pitch", line_fallback
-    )
-    monkeypatch.setattr(
-        "app.reconstruction_calibration_preview.scenes.put",
-        lambda value: value,
     )
 
     draft = propose_scene_pitch_calibration(scene, 0.0)
@@ -240,10 +237,6 @@ def test_rejected_line_fallback_does_not_mask_semantic_keypoints(monkeypatch):
     monkeypatch.setattr(
         "app.reconstruction_calibration_proposal.calibrate_pitch",
         lambda *_args, **_kwargs: line,
-    )
-    monkeypatch.setattr(
-        "app.reconstruction_calibration_preview.scenes.put",
-        lambda value: value,
     )
 
     draft = propose_scene_pitch_calibration(scene, 0.0)
@@ -418,6 +411,137 @@ def test_rebuild_still_runs_automatic_calibration_when_manual_anchors_exist(monk
     assert automatic_calls == [[(frame, 0.0)]]
 
 
+def test_skip_profile_run_never_calls_the_ball_detector_and_keeps_manual_ball(
+    monkeypatch, tmp_path
+):
+    scene = _scene()
+    manual_keyframes = [{"t": 0.5, "x": 1.0, "z": 2.0}]
+    previous_automatic = [{"t": 0.1, "x": 9.0, "z": 9.0}]
+    scene["payload"]["ball"] = {
+        "mode": "manual",
+        "manualKeyframes": deepcopy(manual_keyframes),
+        "automaticKeyframes": deepcopy(previous_automatic),
+        "keyframes": deepcopy(manual_keyframes),
+    }
+    # The queue command pins every fingerprinted input before computing the
+    # fence; the in-memory pipeline must then re-write identical values only.
+    scene["payload"]["videoAsset"]["reconstruction"].update(
+        {
+            "ballDetectionProfile": "skip-manual-authoritative",
+            "jerseyOcrProfile": "automatic",
+            "model": "yolo26m.pt",
+            "ballBackend": "generic-ultralytics",
+            "ballDetectionInput": {
+                "schemaVersion": 1,
+                "backend": "generic-ultralytics",
+                "analysisFrameRate": 25.0,
+                "failurePolicy": "fallback",
+            },
+        }
+    )
+    frame = Path("/tmp/frame_00123.jpg")
+    image = np.zeros((540, 960, 3), dtype=np.uint8)
+    monkeypatch.setattr(
+        "app.reconstruction_sampled_detection_preparation.frame_paths",
+        lambda _: [(frame, 0.0)],
+    )
+    monkeypatch.setattr(
+        "app.reconstruction_scene_track_publisher.frame_paths",
+        lambda _: [(frame, 0.0)],
+    )
+    monkeypatch.setattr(
+        "app.reconstruction_sampled_calibration.automatic_frame_calibrations",
+        lambda *_args, **_kwargs: ({123: _keypoint_calibration()}, []),
+    )
+    monkeypatch.setattr(
+        "app.reconstruction_sampled_detection_preparation.load_model",
+        lambda *_: object(),
+    )
+    monkeypatch.setattr(
+        "app.ultralytics_person_inference.predict_frame",
+        lambda *_: SimpleNamespace(orig_img=image),
+    )
+    monkeypatch.setattr(
+        "app.ultralytics_person_inference.parse_person_detections",
+        lambda *_: ([], []),
+    )
+    monkeypatch.setattr(
+        "app.reconstruction_frame_calibration_quality.calibration_alignment_metrics",
+        lambda *_: _alignment(),
+    )
+    monkeypatch.setattr(
+        "app.reconstruction_calibration_resolution.calibration_alignment_metrics_from_mask",
+        lambda *_: _alignment(),
+    )
+
+    class ForbiddenBallDetector:
+        backend_name = "dedicated-ultralytics"
+
+        def detect(self, *_args, **_kwargs):
+            raise AssertionError("ball detector must not run under the skip profile")
+
+    monkeypatch.setattr(
+        "app.reconstruction_sampled_detection_preparation.configured_ball_detectors",
+        lambda *_args, **_kwargs: (ForbiddenBallDetector(), None),
+    )
+
+    artifact_store = FilesystemArtifactStore(tmp_path / "artifacts")
+    from app.reconstruction_run_log import ReconstructionRunLog
+    from app.scene_document import reconstruction_input_fingerprint
+
+    fingerprint_before = reconstruction_input_fingerprint(scene)
+    run_log = ReconstructionRunLog(
+        tmp_path / "analysis-runs", scene_id="shot-calibrate-frame", run_id="run-a"
+    )
+    rebuilt = _reconstruct_scene_in_memory(
+        scene, artifact_store=artifact_store, run_log=run_log
+    )
+    run_log.close("ready")
+    # Terminal publication accepts a result only while the fingerprint stays
+    # byte-identical: a pipeline mutation of any fingerprinted input would
+    # silently make every finished run unpublishable.
+    assert reconstruction_input_fingerprint(rebuilt) == fingerprint_before
+    import json as _json
+
+    journal = [
+        _json.loads(line)
+        for line in run_log.path.read_text(encoding="utf-8").splitlines()
+    ]
+    finished_phases = [
+        item["phase"] for item in journal if item["event"] == "phase-finished"
+    ]
+    assert finished_phases == [
+        "detection-calibration",
+        "identity",
+        "ball",
+        "publish",
+    ]
+    assert any(item["event"] == "progress" for item in journal)
+
+    reconstruction = rebuilt["payload"]["videoAsset"]["reconstruction"]
+    assert reconstruction["status"] == "ready"
+    assert reconstruction["ballDetectionProfile"] == "skip-manual-authoritative"
+    assert reconstruction["ballDetection"]["status"] == "skipped"
+    assert reconstruction["diagnostics"]["ballTracking"]["skippedByProfile"] is True
+    hydrate_scene_reconstruction(
+        rebuilt,
+        names=("ballTrajectory",),
+        store=artifact_store,
+    )
+    ball = rebuilt["payload"]["ball"]
+    assert ball["mode"] == "manual"
+    assert [
+        {key: item[key] for key in ("t", "x", "z")} for item in ball["keyframes"]
+    ] == manual_keyframes
+    # The stale automatic channel is preserved untouched, never overwritten
+    # with an empty recompute that did not happen.
+    assert ball["automaticKeyframes"] == previous_automatic
+    assert any(
+        "skipped by the analysis profile" in warning
+        for warning in reconstruction["warnings"]
+    )
+
+
 def test_rebuild_uses_accepted_auto_when_same_sample_manual_is_rejected(
     monkeypatch, tmp_path
 ):
@@ -468,7 +592,7 @@ def test_rebuild_uses_accepted_auto_when_same_sample_manual_is_rejected(
         lambda *_: _alignment(),
     )
     monkeypatch.setattr(
-        "app.reconstruction_calibration_resolution.calibration_alignment_metrics",
+        "app.reconstruction_calibration_resolution.calibration_alignment_metrics_from_mask",
         lambda *_: _alignment(),
     )
     captured_direct = {}

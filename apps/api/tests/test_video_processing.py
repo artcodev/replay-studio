@@ -257,6 +257,45 @@ def test_video_processing_refuses_an_unfenced_execution_contract(
     assert state["status"] == "queued"
 
 
+def test_failed_preparation_removes_its_own_unpublished_generation(
+    normalized_video_processing,
+    monkeypatch,
+    tmp_path,
+) -> None:
+    _runs, _state, asset_id, _run_id = normalized_video_processing
+    _redirect_asset_paths(monkeypatch, tmp_path)
+    (tmp_path / "source.mp4").write_bytes(b"video")
+    monkeypatch.setattr(video_preparation, "require_ffmpeg", lambda: None)
+    monkeypatch.setattr(
+        video_preparation,
+        "probe_video",
+        lambda _source: (_ for _ in ()).throw(OSError("ffprobe exploded")),
+    )
+    generation = tmp_path / ".pipeline-runs" / "lease-failed-attempt"
+
+    with pytest.raises(VideoProcessingError, match="ffprobe exploded"):
+        prepare_video_generation(
+            asset_id,
+            claim_check=lambda: True,
+            progress_writer=lambda _values: True,
+            staging_key="lease-failed-attempt",
+        )
+
+    # The interrupted attempt leaves no stranded proxy/frames behind; a
+    # foreign staging key (created by someone else) is never deleted.
+    assert not generation.exists()
+    foreign = tmp_path / ".pipeline-runs" / "lease-foreign"
+    foreign.mkdir(parents=True)
+    with pytest.raises(VideoProcessingError, match="already been used"):
+        prepare_video_generation(
+            asset_id,
+            claim_check=lambda: True,
+            progress_writer=lambda _values: True,
+            staging_key="lease-foreign",
+        )
+    assert foreign.exists()
+
+
 def test_video_processing_refuses_a_reused_staging_key(
     normalized_video_processing,
     monkeypatch,

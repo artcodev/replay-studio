@@ -43,7 +43,15 @@ def alignment_residuals(
     image: np.ndarray,
     calibration: PitchCalibration,
 ) -> AlignmentResiduals | None:
-    observed_mask = pitch_line_mask(image)
+    return alignment_residuals_from_mask(pitch_line_mask(image), calibration)
+
+
+def alignment_residuals_from_mask(
+    observed_mask: np.ndarray,
+    calibration: PitchCalibration,
+) -> AlignmentResiduals | None:
+    """Score alignment against a precomputed (possibly cached) line mask."""
+
     height, width = observed_mask.shape
     model_mask = np.zeros_like(observed_mask)
     for marking in projected_pitch_markings(calibration, width, height):

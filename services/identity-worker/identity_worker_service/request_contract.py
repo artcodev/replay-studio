@@ -4,48 +4,58 @@ import json
 from typing import Any
 
 
+REQUEST_CONTRACT_VERSION = 2
+
+
 class IdentityRequestError(ValueError):
     def __init__(self, detail: str) -> None:
         super().__init__(detail)
         self.detail = detail
 
 
-def parse_manifest(raw: str, frame_count: int) -> list[dict[str, Any]]:
+def parse_manifest(raw: str, crop_count: int) -> list[dict[str, Any]]:
+    """Validate the v2 flat crop manifest.
+
+    The API cut and QA-gated every crop before upload, so a manifest entry
+    references one crop file and echoes the extraction quality evidence.
+    """
+
     try:
         value = json.loads(raw)
     except json.JSONDecodeError as exc:
         raise IdentityRequestError("manifest is not valid JSON") from exc
-    frame_items = value.get("frames") if isinstance(value, dict) else None
-    if not isinstance(frame_items, list):
-        raise IdentityRequestError("manifest.frames must be an array")
+    if not isinstance(value, dict):
+        raise IdentityRequestError("manifest must be an object")
+    if value.get("contractVersion") != REQUEST_CONTRACT_VERSION:
+        raise IdentityRequestError(
+            "manifest contractVersion is unsupported; this worker speaks "
+            f"v{REQUEST_CONTRACT_VERSION} crop batches"
+        )
+    crop_items = value.get("crops")
+    if not isinstance(crop_items, list) or not crop_items:
+        raise IdentityRequestError("manifest.crops must be a non-empty array")
     seen: set[str] = set()
-    for frame in frame_items:
-        if not isinstance(frame, dict):
-            raise IdentityRequestError("Each manifest frame must be an object")
-        file_index = frame.get("fileIndex")
-        if not isinstance(file_index, int) or not 0 <= file_index < frame_count:
+    for item in crop_items:
+        if not isinstance(item, dict):
+            raise IdentityRequestError("Each manifest crop must be an object")
+        file_index = item.get("fileIndex")
+        if not isinstance(file_index, int) or not 0 <= file_index < crop_count:
             raise IdentityRequestError("manifest fileIndex is out of range")
-        observations = frame.get("observations")
-        if not isinstance(observations, list):
-            raise IdentityRequestError("frame.observations must be an array")
-        for observation in observations:
-            observation_id = (
-                observation.get("observationId")
-                if isinstance(observation, dict)
-                else None
+        observation_id = item.get("observationId")
+        if not isinstance(observation_id, str) or not observation_id.strip():
+            raise IdentityRequestError("observationId is required")
+        if observation_id in seen:
+            raise IdentityRequestError(
+                f"Duplicate observationId: {observation_id}"
             )
-            bbox = observation.get("bbox") if isinstance(observation, dict) else None
-            if not isinstance(observation_id, str) or not observation_id.strip():
-                raise IdentityRequestError("observationId is required")
-            if observation_id in seen:
-                raise IdentityRequestError(f"Duplicate observationId: {observation_id}")
-            seen.add(observation_id)
-            if not isinstance(bbox, dict) or any(
-                not isinstance(bbox.get(key), (int, float))
-                for key in ("x", "y", "width", "height")
-            ):
-                raise IdentityRequestError(f"Invalid bbox for {observation_id}")
-            if float(bbox["width"]) <= 0 or float(bbox["height"]) <= 0:
-                raise IdentityRequestError(f"Empty bbox for {observation_id}")
-    return frame_items
-
+        seen.add(observation_id)
+        frame_index = item.get("frameIndex")
+        if (
+            isinstance(frame_index, bool)
+            or not isinstance(frame_index, int)
+            or frame_index < 0
+        ):
+            raise IdentityRequestError(f"Invalid frameIndex for {observation_id}")
+        if not isinstance(item.get("quality"), dict):
+            raise IdentityRequestError(f"Invalid quality for {observation_id}")
+    return crop_items

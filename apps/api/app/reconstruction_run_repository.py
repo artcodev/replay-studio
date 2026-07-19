@@ -33,7 +33,10 @@ from .reconstruction_run_queries import (
     locked_scene_statement,
     recoverable_runs_statement,
 )
-from .reconstruction_run_scene_transition import transition_scene_to_processing
+from .reconstruction_run_scene_transition import (
+    transition_matching_scene_to_failed,
+    transition_scene_to_processing,
+)
 from .scene_document import (
     SceneRevisionConflict,
     next_scene_payload,
@@ -403,7 +406,19 @@ class ReconstructionRunRepository:
                 current_time=current_time,
             )
             if claimed_scene is None:
-                reconstruction = reconstruction_state(scene)
+                error = "Reconstruction scene state does not match its queued job"
+                failed_scene = transition_matching_scene_to_failed(
+                    scene,
+                    fence,
+                    current_time=current_time,
+                    error=error,
+                )
+                if failed_scene is not None:
+                    row.payload = failed_scene.payload
+                    sync_scene_index(row, failed_scene.payload)
+                    reconstruction = failed_scene.reconstruction
+                else:
+                    reconstruction = reconstruction_state(scene)
                 job.status = "invalid"
                 job.updated_at = current_time
                 self._upsert_telemetry(
@@ -421,7 +436,7 @@ class ReconstructionRunRepository:
                         if isinstance(reconstruction.get("progress"), dict)
                         else None
                     ),
-                    error="Reconstruction scene state does not match its queued job",
+                    error=error,
                 )
                 if existing_lease is not None:
                     session.delete(existing_lease)
@@ -448,9 +463,20 @@ class ReconstructionRunRepository:
                 lease.heartbeat_at = current_time
                 lease.expires_at = current_time + ttl
 
+            attempts = int(getattr(job, "attempts", 0) or 0) + 1
+            if attempts > max(1, int(get_settings().reconstruction_max_attempts)):
+                self._dead_letter_exhausted_job(
+                    session, fence, job=job, row=row, scene=scene,
+                    existing_lease=existing_lease,
+                    current_time=current_time, attempts=attempts,
+                )
+                session.commit()
+                return False
+
             row.payload = claimed_scene.payload
             sync_scene_index(row, claimed_scene.payload)
             job.status = "processing"
+            job.attempts = attempts
             job.updated_at = current_time
             self._upsert_telemetry(
                 session,
@@ -536,6 +562,99 @@ class ReconstructionRunRepository:
             )
             session.commit()
             return "published"
+        except Exception:
+            session.rollback()
+            raise
+        finally:
+            session.close()
+
+    def _dead_letter_exhausted_job(
+        self,
+        session,
+        fence: ReconstructionRunFence,
+        *,
+        job,
+        row,
+        scene,
+        existing_lease,
+        current_time: float,
+        attempts: int,
+    ) -> None:
+        """Terminally invalidate a job whose child keeps dying.
+
+        A deterministically crashing run must not loop forever: the job
+        dead-letters with its last recorded error and the scene fails
+        explicitly so the user sees why. Runs inside the claim transaction.
+        """
+
+        error = (
+            f"Reconstruction gave up after {attempts - 1} attempts"
+            + (f": {job.error}" if job.error else "")
+        )
+        failed_scene = transition_matching_scene_to_failed(
+            scene,
+            fence,
+            current_time=current_time,
+            error=error,
+        )
+        if failed_scene is not None:
+            row.payload = failed_scene.payload
+            sync_scene_index(row, failed_scene.payload)
+        job.status = "invalid"
+        job.error = error
+        job.updated_at = current_time
+        self._upsert_telemetry(
+            session,
+            fence,
+            status="failed",
+            now=current_time,
+            model=None,
+            progress=None,
+            error=error,
+        )
+        if existing_lease is not None:
+            session.delete(existing_lease)
+
+    def release_crashed_reconstruction_run(
+        self,
+        scene_id: str,
+        expected_run_id: str,
+        expected_input_fingerprint: str,
+        *,
+        error: str,
+        now: float | datetime | None = None,
+    ) -> bool:
+        """Free the lease of a child the supervisor saw die hard.
+
+        The monitor already knows the process exited non-zero this poll;
+        waiting out the full lease TTL only strands the job in ``processing``.
+        The job stays recoverable (the claim path owns attempt accounting and
+        the dead-letter cap); only the dead owner's lease is removed and the
+        failure text is recorded on the authoritative record.
+        """
+
+        fence = ReconstructionRunFence(
+            scene_id=str(scene_id),
+            run_id=str(expected_run_id),
+            input_fingerprint=str(expected_input_fingerprint),
+        )
+        current_time = self._current_time(now)
+        session = self._session()
+        try:
+            begin_write_transaction(session)
+            job = session.scalar(locked_job_statement(fence.scene_id))
+            if not job_matches_fence(job, fence, statuses={"processing"}):
+                session.rollback()
+                return False
+            lease = session.scalar(locked_lease_statement(fence.scene_id))
+            if lease is None or str(lease.run_id) != fence.run_id:
+                session.rollback()
+                return False
+            session.delete(lease)
+            job.error = str(error)
+            job.updated_at = current_time
+            session.commit()
+            return True
         except Exception:
             session.rollback()
             raise

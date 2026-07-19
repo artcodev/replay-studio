@@ -126,7 +126,7 @@ def test_contract_key_is_order_independent_and_covers_every_detector_field():
 def test_clean_primary_round_trip_returns_fresh_pipeline_values(tmp_path: Path):
     resolved, batches = _pipeline_data()
 
-    stored = cache.store_clean_ball_detection_cache(
+    stored = cache.store_ball_detection_cache(
         tmp_path,
         dense_cache_key="dense-a",
         detector_input=_detector_input(),
@@ -279,7 +279,7 @@ def test_complete_cache_prevents_a_late_worker_recreating_partial_state(
         batches=batches[:1],
         expected_frame_count=2,
     )
-    complete = cache.store_clean_ball_detection_cache(
+    complete = cache.store_ball_detection_cache(
         tmp_path,
         dense_cache_key="dense-a",
         detector_input=_detector_input(),
@@ -305,43 +305,76 @@ def test_complete_cache_prevents_a_late_worker_recreating_partial_state(
 
 
 @pytest.mark.parametrize(
-    ("failed", "fallback", "batch_backend", "fallback_reason"),
+    ("batch_backend", "fallback_reason", "expected_failed", "expected_fallback"),
     [
-        (1, 0, "dedicated-ultralytics", None),
-        (0, 1, "dedicated-ultralytics", None),
-        (0, 0, "generic-coco-fallback", None),
-        (0, 0, "dedicated-ultralytics", "worker timeout"),
+        ("generic-coco-fallback", "worker timeout", 1, 1),
+        ("dedicated-ultralytics", "worker timeout", 0, 1),
     ],
 )
-def test_degraded_or_non_primary_output_is_never_published(
+def test_degraded_frames_are_published_with_explicit_markers(
     tmp_path: Path,
-    failed: int,
-    fallback: int,
     batch_backend: str,
-    fallback_reason: str | None,
+    fallback_reason: str,
+    expected_failed: int,
+    expected_fallback: int,
 ):
     resolved, batches = _pipeline_data()
     batches[0]["backend"] = batch_backend
     batches[0]["fallbackReason"] = fallback_reason
+    if batch_backend == "generic-coco-fallback":
+        resolved[0][0][0]["detectorBackend"] = batch_backend
+        resolved[0][0][0]["provenance"] = {"backend": batch_backend}
 
-    stored = cache.store_clean_ball_detection_cache(
+    stored = cache.store_ball_detection_cache(
         tmp_path,
         dense_cache_key="dense-a",
         detector_input=_detector_input(),
         primary_backend="dedicated-ultralytics",
         resolved_frames=resolved,
         batches=batches,
-        failed_frame_count=failed,
-        fallback_frame_count=fallback,
     )
 
-    assert stored is None
+    assert stored.failed_frame_count == expected_failed
+    assert stored.fallback_frame_count == expected_fallback
+    assert stored.is_clean is False
+    loaded = cache.load_ball_detection_cache(
+        tmp_path,
+        dense_cache_key="dense-a",
+        detector_input=_detector_input(),
+    )
+    assert loaded is not None
+    assert loaded.failed_frame_count == expected_failed
+    assert loaded.fallback_frame_count == expected_fallback
+    cached_resolved, cached_batches = loaded.as_pipeline_data()
+    assert cached_resolved == resolved
+    assert cached_batches == batches
+
+
+def test_unmarked_foreign_backend_output_is_rejected_before_publication(
+    tmp_path: Path,
+):
+    resolved, batches = _pipeline_data()
+    # A frame from another backend without degradation markers must never be
+    # accepted as primary evidence.
+    batches[0]["backend"] = "wasb-service"
+    batches[0]["fallbackReason"] = None
+
+    with pytest.raises(cache_contract.BallDetectionCacheError, match="structural"):
+        cache.store_ball_detection_cache(
+            tmp_path,
+            dense_cache_key="dense-a",
+            detector_input=_detector_input(),
+            primary_backend="dedicated-ultralytics",
+            resolved_frames=resolved,
+            batches=batches,
+        )
+
     assert not list(tmp_path.rglob("*.json"))
 
 
 def test_corrupt_or_tampered_artifact_is_a_cache_miss(tmp_path: Path):
     resolved, batches = _pipeline_data()
-    stored = cache.store_clean_ball_detection_cache(
+    stored = cache.store_ball_detection_cache(
         tmp_path,
         dense_cache_key="dense-a",
         detector_input=_detector_input(),
@@ -376,7 +409,7 @@ def test_corrupt_or_tampered_artifact_is_a_cache_miss(tmp_path: Path):
 
 def test_non_finite_payload_is_a_corrupt_cache_miss(tmp_path: Path):
     resolved, batches = _pipeline_data()
-    stored = cache.store_clean_ball_detection_cache(
+    stored = cache.store_ball_detection_cache(
         tmp_path,
         dense_cache_key="dense-a",
         detector_input=_detector_input(),
@@ -405,7 +438,7 @@ def test_failed_atomic_replace_preserves_existing_artifact(
     tmp_path: Path,
 ):
     resolved, batches = _pipeline_data()
-    original = cache.store_clean_ball_detection_cache(
+    original = cache.store_ball_detection_cache(
         tmp_path,
         dense_cache_key="dense-a",
         detector_input=_detector_input(),
@@ -421,7 +454,7 @@ def test_failed_atomic_replace_preserves_existing_artifact(
 
     monkeypatch.setattr(cache.os, "replace", fail_replace)
     with pytest.raises(cache_contract.BallDetectionCacheError, match="simulated publish failure"):
-        cache.store_clean_ball_detection_cache(
+        cache.store_ball_detection_cache(
             tmp_path,
             dense_cache_key="dense-a",
             detector_input=_detector_input(),

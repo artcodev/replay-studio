@@ -4,7 +4,9 @@ import { sceneRequest } from './scenes'
 import type { ModelComparisonQueue } from '../../types/analysis'
 import type {
   BallDetectionBackend,
+  BallDetectionProfile,
   BallTrajectoryMode,
+  JerseyOcrProfile,
   ReconstructionModel,
 } from '../../types/reconstruction'
 import type { Keyframe } from '../../types/tracking'
@@ -15,9 +17,16 @@ export const reconstructionClient = {
     sceneId: string,
     model: ReconstructionModel,
     ballBackend: BallDetectionBackend,
+    ballDetectionProfile: BallDetectionProfile = 'automatic',
+    jerseyOcrProfile: JerseyOcrProfile = 'automatic',
   ) => sceneRequest(projectId, projectScenePath(projectId, sceneId, '/reconstruct'), {
     method: 'POST',
-    body: JSON.stringify({ model, ball_backend: ballBackend }),
+    body: JSON.stringify({
+      model,
+      ball_backend: ballBackend,
+      ball_detection_profile: ballDetectionProfile,
+      jersey_ocr_profile: jerseyOcrProfile,
+    }),
   }),
   updateBallTrajectory: (
     projectId: string,

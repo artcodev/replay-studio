@@ -146,6 +146,22 @@ def _candidate_edge(
         if pitch_distance > reachable_distance:
             hard_reasons.append("physically-impossible-transition")
 
+    if hard_reasons:
+        # The pair is rejected unconditionally, so the O(samples²) ReID
+        # matrix is never computed for it. Most pairs in a real clip end
+        # here (temporal overlap, team conflict, impossible transition).
+        return IdentityEdge(
+            predecessor_id=predecessor_endpoint.id,
+            successor_id=successor_endpoint.id,
+            status="rejected",
+            score=None,
+            source="constraints",
+            reasons=tuple(dict.fromkeys(hard_reasons)),
+            gap_seconds=round(gap, 6),
+            pitch_distance_metres=pitch_distance,
+            reachable_distance_metres=reachable_distance,
+        )
+
     (
         mean_distance,
         sample_distance,
@@ -157,23 +173,6 @@ def _candidate_edge(
         successor,
         config.strong_sample_reid_distance,
     )
-    if hard_reasons:
-        return IdentityEdge(
-            predecessor_id=predecessor_endpoint.id,
-            successor_id=successor_endpoint.id,
-            status="rejected",
-            score=None,
-            source="constraints",
-            reasons=tuple(dict.fromkeys(hard_reasons)),
-            gap_seconds=round(gap, 6),
-            reid_mean_distance=mean_distance,
-            reid_best_sample_distance=sample_distance,
-            reid_robust_sample_distance=robust_sample_distance,
-            reid_strong_support_left=strong_support_left,
-            reid_strong_support_right=strong_support_right,
-            pitch_distance_metres=pitch_distance,
-            reachable_distance_metres=reachable_distance,
-        )
 
     external_match = bool(
         predecessor.external_player_id

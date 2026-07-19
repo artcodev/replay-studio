@@ -1,136 +1,223 @@
-# Technical debt audit
+# Технический долг Replay Studio
 
-Аудит затронутого video-to-3D контура обновлён 18 июля 2026 года. Ниже
-отдельно зафиксированы состояние новой project-centric архитектуры, закрытые
-долги прежнего контура и реальные ограничения. Наличие таблицы, маршрута или
-unit-теста не выдается за завершённую продуктовую миграцию или доказанную
-точность модели.
+Актуально на 19 июля 2026 года после clean-cut рефакторинга project-centric
+архитектуры. Это канонический реестр **активного** технического долга. Закрытые
+работы приведены ниже только как baseline и набор регрессионных инвариантов.
 
-## Project-centric этап
+Git/история публикации и `.env`/секреты не входят в скоуп этого документа.
+Подробные доказательства и дискуссионные формулировки находятся в
+[`PROJECT_AUDIT.md`](PROJECT_AUDIT.md), нормативные границы — в
+[`ARCHITECTURE.md`](ARCHITECTURE.md), а обязательные pipeline-инварианты — в
+[`PIPELINE_EDGE_CASES.md`](PIPELINE_EDGE_CASES.md).
 
-| Область | Сделано | Что ещё не закрыто |
+## Правила ведения долга
+
+- **P0** — пользовательская правка теряется, возвращается неверная revision или
+  система публикует противоречивое состояние. Закрывается до следующего
+  расширения функциональности.
+- **P1** — достижимый reliability/data/accuracy риск текущего локального MVP.
+- **P2** — производительность, наблюдаемость, эксплуатация и поддерживаемость;
+  выполняется после измерения либо после закрытия зависимого P1.
+- **P3 / R&D** — следующий продуктовый или deployment-этап, для которого нужен
+  датасет, лицензия, отдельная модель или решение о способе развёртывания.
+
+Пункт считается закрытым только когда удалён второй источник истины, реализован
+canonical path, добавлен регрессионный тест и обновлена связанная документация.
+Наличие маршрута, таблицы, fake-worker теста или runtime confidence не является
+доказательством продуктовой точности.
+
+Legacy-прототипы не являются поддерживаемым продуктом. Глобальные routes,
+embedded dense series, startup backfills, dual writes и compatibility fallback
+не сохраняются «на всякий случай». Временный мост допустим только с явным
+условием удаления и не может стать вторым writable source of truth.
+
+## Состояние архитектуры после рефакторинга
+
+| Граница | Текущий canonical baseline | Остаточный долг |
 | --- | --- | --- |
-| Мультипроектность | Нормализованные `Project`, `Match`, `VideoAsset`, `Segment`, `AnalysisRun`; уникальное владение Scene/asset; все editor/media/job routes project-scoped; глобальные routes удалены; UI не выбирает проект/scene автоматически | Tenant authorization, project export/import и browser E2E для нескольких параллельных проектов |
-| Schema lifecycle | Alembic и Compose `migrate` поддерживают текущую схему; CI поднимает fresh PostgreSQL; рестарт API не создаёт domain rows | Production backup/restore drill; для development допустим только явный reset/re-import после решения пользователя |
-| Match boundary | Public DTO использует внутренние IDs; immutable project snapshot; provider IDs и provenance вынесены в integration diagnostics; Scene match-write routes удалены | Cross-provider entity resolution одного реального матча; raw-response retention policy; единая DB-транзакция для match summary, references и snapshot; dependency/stale model для compositions и будущих artifacts |
-| Jobs | `reconstruction_jobs` и `pipeline_jobs` — compact scheduler sources; video, multi-pass, model comparison и reconstruction используют lease/recovery/fencing; `AnalysisRun` — только восстанавливаемая telemetry; cancellation project-scoped | Multi-host backpressure, operator observability/SLO и PostgreSQL `SKIP LOCKED` policy |
-| Runner | API только атомарно сохраняет compact jobs; `pipeline-runner` и `reconstruction-runner` — единственные тяжёлые execution paths локально и в Compose | Измеренный multi-host capacity plan и GPU scheduling |
-| Reconstruction storage | Покадровые identity/track/ball/calibration ряды вынесены из Scene в immutable SHA-256 artifacts; API отдаёт bounded windows; live cutover завершён: Shot 2 `4,468,127 → 332,876 B` (92.55%), финальные восемь Scene занимают 81,565 B суммарно, максимум 70,472 B | Object-store backend/retention и garbage collection неподтверждённых либо superseded artifacts |
-| Несколько видео | Upload доступен только как `/projects/{id}/videos`; проект владеет несколькими asset; composition использует project segment IDs, допускает разные assets и публикуется атомарно | Benchmark точности cross-video alignment и расширенный alignment editor |
-| Project identities | Есть `ProjectPerson`/membership persistence, terminal sync с diagnostics, public list/reassign API и Identities tab с explicit membership assignment | Preview/undo/history и project-level split UX, измеренный cross-segment identity benchmark |
-| Quality gate | Версионированные JSON Schema и evaluator для detection/calibration/ball/identity | Spain–Belgium manifest пока `draft` без gold labels, поэтому реальные метрики остаются `unavailable` |
-| UI | Projects workspace, Match, Identities и Analysis tabs, lazy Vue Router, project-scoped upload/editor, identity reassignment, timeline/segment navigation без auto-selection; `App.vue` — только `RouterView`, editor использует пять typed contexts; video/calibration/detection/3D surfaces и Three.js runtime layers разделены | Расширенный settings UX и сквозной browser E2E в CI |
+| Project и навигация | Нормализованы `Project`, `Match`, `VideoAsset`, `Segment`, `AnalysisRun`; editor/media/jobs project-scoped; Vue Router владеет навигацией; автоматического выбора проекта/сегмента нет | `TD-MULTI-01`, `TD-OPS-01` |
+| Backend composition | `app.main` — composition root; прежние god-модули reconstruction/video/ball/identity/OCR/ReID/player-actions распилены по capability и защищены architecture-тестами | `TD-CODE-01` — только конкретные остатки, не новый generic manager |
+| Persistence | Project store разделён на resource/match/identity/analysis repositories; canonical Match, snapshot, references и project pointer публикуются одной транзакцией | `TD-PG-01`, `TD-SEG-01`, `TD-MATCH-01` |
+| Execution control plane | API только ставит compact jobs; pipeline/reconstruction runners владеют claim/lease/heartbeat/recovery/cancellation; `AnalysisRun` — telemetry, а не scheduler | `TD-CI-01`, `TD-OBS-01`, `TD-DIST-01` |
+| Reconstruction data plane | Dense identity/track/ball/calibration series вынесены из PostgreSQL/Scene в immutable SHA-256 artifacts; чтение выполняется bounded windows | `TD-STORAGE-01`, `TD-STORAGE-02` |
+| Match boundary | Browser и project model используют provider-neutral internal IDs и immutable snapshot reference; provider provenance хранится отдельно | `TD-PROV-01`, `TD-PROV-02`, `TD-PROV-03`, `TD-MATCH-01`, `TD-STATS-01` |
+| Calibration и identity | Семантическая PnLCalib-калибровка, temporal hypothesis graph, canonical people, correction graph, ReID и jersey-OCR worker contracts реализованы | `TD-QA-01`–`TD-QA-04`, `TD-IDENT-01`, `TD-CAL-02` |
+| Ручное редактирование | Реализованы frame-person annotations, confirm/ignore/merge/split/bind, manual ball timeline, selected-object path и player-action timeline | Manual player trajectory остаётся `TD-TRACK-01`; automatic actions — `TD-ACT-01` |
 
-Подробный исходный аудит сохранён в [`PROJECT_AUDIT.md`](PROJECT_AUDIT.md) как
-исторический снимок. Его номера находок не следует читать как текущий статус;
-актуальная дельта приведена в начале того документа и в таблице выше.
+Последняя подтверждённая clean-cut проверка: **809 API-тестов**, **284 web-теста**,
+worker suites — ball 13, calibration 13, identity 19, jersey-OCR 11,
+model-validation 25 passed / 2 skipped; `vue-tsc` чистый. Эти проверки доказывают
+контракты и safety, но не точность CV-моделей на реальном видео.
 
-Последняя подтверждённая clean-cut проверка: 794 API-теста, 274 web-теста и
-81 worker-тест; ещё 2 real-model worker-теста ожидаемо пропущены без opt-in
-assets/manifest. `vue-tsc`, production build, Python `compileall`, Compose
-configuration и `git diff --check` прошли.
+## P0 — correctness
 
-## Закрыто в video-to-3D контуре
+### TD-CAS-01 — player-action endpoint возвращает устаревшую revision
 
-| Область | Риск до исправления | Что сделано | Проверка |
-|---|---|---|---|
-| Far-side person filtering | Реальные маленькие игроки выше 33% кадра удалялись | Жёсткий horizon cutoff заменён проверкой стоп, confidence и травы под человеком | Unit test на bbox отмеченного игрока; исходный кадр даёт detection |
-| Ручные исправления | Пользователь не мог восстановить пропуск или удалить phantom | Persisted frame annotation schema/API/UI; роли player/goalkeeper/referee/other/ignore; ручной bbox | API/unit tests + Vue typecheck/browser flow |
-| Reconstruction integration | Метка была бы только UI overlay | Annotation применяется до association; может заменить semantic fields, удалить detection или добавить новый | Unit test add/ignore и scene persistence |
-| Destructive rebuild | `Rebuild tracks` очищал последний успешный результат ещё до окончания | Queue сохраняет текущие tracks/ball/calibration; новый результат публикуется после полного прохода | Regression test |
-| Partial failure | Исключение могло оставить смесь новых tracks и старого metadata | Tracks, ball, team colors и processing state копируются и восстанавливаются при ошибке | Code path + API tests |
-| Stale reconstruction publish | Завершившийся позднее старый job мог перезаписать новую ручную правку, несвязанное поле документа или результат более свежего rebuild | Каждый запуск получает уникальный `runId`, монотонный `runRevision` и SHA-256 `inputFingerprint`; Scene имеет отдельный монотонный `revision`. Progress пишет только compact telemetry под job+lease fence, а terminal result атомарно закрывает job/lease/telemetry и публикует Scene по revision+run+inputs. Устаревший owner не записывает ничего | Concurrency tests: two runs, edit during run, stale queue snapshot, missing/drift telemetry, expired owner, stale failure и две очередности user↔worker через независимые SQLite connections |
-| Duplicate detector config | Frame analysis и reconstruction могли использовать разные параметры | Общий `_predict_frame` и именованные detector constants | Compile/tests |
-| Repeated base person inference | Любая identity/manual correction повторно запускала person detector и generic COCO-ball pass на неизменённых sampled JPEG | Versioned per-JPEG atomic artifact до annotations/calibration/tracking/ReID/OCR; key включает exact frame SHA-256, checkpoint SHA/provenance, provider version, device, class/NMS/filter/feature policy и schema; corrupt/tampered/partial результаты не публикуются, cache faults остаются безопасным miss | 10 cache/pipeline tests: identical rebuild helper, one-frame change, model/policy invalidation, corrupt recovery, detached values, manual bbox isolation; full API suite |
-| Weak mutation guard | Label, roster decision или stale full-scene save могли конфликтовать с активным rebuild, потерять correction либо вернуть UI к прошлому run | Все dedicated mutation endpoints отклоняют queued/processing; correction/roster decision и compact job публикуются одной fingerprint/CAS операцией; full-scene PUT не может менять reconstruction inputs/runtime fields и требует точный client-visible document `revision`; любой existing-row `SceneRepository.put` атомарно проверяет и увеличивает revision, возвращая новый документ без мутации входного словаря | Endpoint concurrency/mutation-guard tests, sequential stale-client test + Vue queued-state tests |
-| Request validation | Некорректный bbox/label/kind мог попасть в scene JSON | Pydantic literal/schema, bounds clipping, minimum size, missing-frame errors | API/unit tests |
-| Test dependency warning | `fastapi.testclient` транзитивно использовал deprecated Starlette TestClient на Python 3.14 | HTTP contract tests переведены на `httpx.AsyncClient` + `ASGITransport`; async entrypoints запускаются через `asyncio.run` | 794 API tests, 0 warnings |
-| No-track annotation UI | Inspector исчезал, если frame analysis не сопоставил ни одного 3D track | Frame recognition/label editor теперь не зависит от выбранного трека | Vue build/browser flow |
-| Source provenance | Нельзя было отличить ручной результат от model output | Track/analysis contract хранит `source` и annotation IDs | Types/API response |
-| Frontend bundle coupling | Vue/editor и тяжёлый Three.js попадали в один монолитный chunk | Vite разделяет editor (301.98 kB/86.74 kB gzip), Vue runtime (97.67 kB/37.98 kB gzip) и Three.js vendor (547.60 kB/136.77 kB gzip) с долгосрочным cache reuse; warning threshold ограничен 560 kB | Production build без oversized app-chunk warning |
-| Pitch-side orientation | Сторона видимых ворот, знак pitch X и направление атаки смешивались; goal-area могла ошибочно считаться правой | Семантическая сторона калибровки и ручное `attackingGoal` разделены; направление атаки является metadata и никогда не зеркалит homography/tracks | Regression tests для side canonicalization и независимого attacking-goal control |
-| Mirror-ambiguous calibration | Hough-линии не имели семантики и могли принять правую штрафную за левую | Основной backend заменён на PnLCalib: 58 semantic keypoints + 24 lines + RANSAC/line refinement; Roboflow 32-keypoint fallback | 40 API tests + end-to-end прогон 3 реальных кадров, 4.03–5.55 px reprojection error |
-| Catastrophic homography fallback | Формально уверенная, но неверная матрица могла прижать всех игроков к углу поля | Покадровая проверка по foot-points отбрасывает матрицы, выводящие большинство людей за поле; глобальная проекция вне диапазона возвращается к screen-relative вместо clamp в угол | Regression test на outlier homography + diagnostics `rejectedCalibrationFrames` |
-| One-frame camera model | Один forward-only fit не мог использовать линии, появившиеся позже, и переносил ошибку на весь pan/zoom | Двухпроходный temporal hypothesis graph: direct anchors, forward/backward propagation, ranked alternatives, bidirectional consensus, uncertainty и target-frame veto | 12 solver/integration tests + реальный 1-A: 1 direct anchor, 31 recovered frames |
-| Identity vs failed motion | Статичная камера и провал optical flow оба выглядели как identity, поэтому propagation мог пересечь монтажную склейку | Projective motion имеет явные `estimated`/`unreliable`/`cut`; static identity остаётся валидной оценкой, а cut/unreliable являются hard barrier и сбрасывают stabilisation | Synthetic static/pan/cut tests; 117/119 реальных переходов estimated, 2 реальные cuts |
-| Representative-H gap fill | Пропущенный кадр мог получить чужую «лучшую» homography без доказуемой связи | Representative fill удалён; metric gap заполняется только выбранной temporal-гипотезой с anchor/path/uncertainty, иначе остаётся missing | Contract tests + QA timeline provenance |
-| Inflated orientation confidence | Десятки recovered кадров наследовали сторону одного anchor и выглядели как независимые голоса | `sideAgreement` считает только независимые direct anchors; каждый manual anchor даёт один голос | Regression test с 8 recovered копиями одного anchor |
-| Identity correction graph | Confirm/ignore были только покадровыми метками, duplicate IDs нельзя было объединить; вложенные split/merge и undo могли зависеть от порядка JSON или оставить сиротские ссылки | Persisted confirm/exclude/merge/split; observation/identity/range scope; topological order for nested splits; immutable lineage checks; self/missing/excluded/cyclic/orphan guards; merge survivor is the explicit terminal target; undo blocks live dependants and restores consolidated unbind tombstones | API, reconstruction and Vue identity tests, nested split/merge/undo regressions |
-| False merged identity | После crossing две персоны могли остаться одним canonical actor; простого merge для исправления недостаточно | `Split identity here / range` делит identity по `[start,end)`, создаёт новый canonical ID и cannot-link barrier; immutable observation snapshot + strict unique same-frame geometry remap переживает detector reorder, а missing/ambiguous/recycled ID fail closed; appearance, ReID-role votes, ручные kind/label и roster binding пересчитываются только из observations своей partition, а новая ветка не наследует resolver evidence/conflicts исходной identity; preview показывает affected/remaining; delete + rebuild остаются одной CAS-транзакцией | Reconstruction tests на reorder/recycled ID/ambiguity/cannot-link/undo, partition-local appearance/role/manual/roster semantics; API atomic queue test; Vue range/preview tests |
-| Correction/rebuild transaction | Annotation могла сохраниться, а отдельный запрос rebuild — не выполниться, оставляя UI и сцену в разных ревизиях | POST/DELETE correction и постановка reconstruction теперь являются одной server-side CAS-операцией; annotation публикуется только вместе с queued scene, frontend только опрашивает этот run | API contract tests: save/delete atomic queue, expected scene fingerprint, stale input rejection |
-| Unsafe identity remap | После rebuild удаление/merge могло молча не найти raw track или выбрать соседнего игрока только по средней дистанции | Exact annotation binding имеет приоритет; fallback требует совместимых metadata, ≥3 общих timestamps на span ≥0.4 s, median ≤4 m, p90 ≤6 m, normalized residual ≤2 и достаточный runner-up margin; missing/ambiguous match завершает run ошибкой без изменения last-good | Unit/integration tests для missing, ambiguous, metadata mismatch, observation exclude и identity exclude |
-| Opaque correction failure | Неоднозначный source/target сообщался только общей ошибкой run | `IdentityCorrectionError` публикует `correctionId`, action, status/reason, source/target и ranked candidate metrics в reconstruction, diagnostics и progress; last-good остаётся активным | Failure-path contract test |
-| Queued/processing job lost on API restart | FastAPI `BackgroundTasks` не гарантировал запуск сохранённой очереди; падение уже после перехода в `processing` могло оставить сцену навечно занятой, а два процесса могли одновременно начать один run | API атомарно пишет compact `reconstruction_jobs` и не исполняет job. Отдельный runner подбирает fingerprint-valid `queued` и expired `processing` jobs. DB lease хранит owner/heartbeat/expiry вне Scene JSON; active lease не крадётся, stale lease атомарно перехватывается, старый owner fenced на каждом progress/final/failure write, terminal state удаляет lease | Dedicated-runner tests: compact polling without Scene reads, active/stale claim, heartbeat without Scene payload, old-owner fencing, terminal cleanup/no-op duplicate and two-engine races |
-| Invalid merge target in editor | UI мог предлагать excluded identity либо объединение двух уже подтверждённых разных игроков состава | Merge-target builder скрывает identity-excluded tracks и targets с отличающимся confirmed `externalPlayerId`, но сохраняет observation-excluded как допустимые; save-time validation, raw-track merge и published-scene merge независимо fail closed при таком roster-конфликте | Frontend target-filter regression + API/reconstruction conflict tests |
-| Actor popping | Низкий confidence или выход из crop скрывал mesh, игроки появлялись из ниоткуда | Каждый принятый actor имеет `continuous-latent` track 0–100%; observed и inferred evidence разделены, uncertainty растёт, QA игнорирует inferred samples | Continuous-presence, QA and renderer tests |
-| Misleading presence evidence | Интервалы между detector samples выглядели как `OBSERVED`, а renderer мог скрыть inferred actor при confidence=0 | `OBSERVED` разрешён только в пределах 1 ms от detector-backed timestamp; между samples показывается `INFERRED · GAP`; renderer скрывает лишь пустой track, а не latent keyframe | Track presence and renderer-visibility regression tests; real scene invariant audit |
-| Repeated frame calibration | Повторная ручная правка снова запускала два HRNet на тех же JPEG | Versioned content-SHA bounded TTL LRU, request dedup, negative cache, preload and phase timings | Worker cache tests; real frame 9.32 s → 4.2 ms warm |
-| Local ID mistaken for person identity | `person-N`/render track одновременно означал bbox, tracker alias и человека; при failed calibration человек исчезал из связи video↔3D | Независимый `canonicalPeople[]`, immutable observation IDs, optional `tracks[].canonicalPersonId`, persistent ID remap по bbox evidence | Canonical identity integration tests + bidirectional Vue selection tests |
-| Detector row mistaken for immutable evidence | Перестановка одинаковых detector rows могла перенести manual/OCR/ReID evidence на соседнего человека | Observation ID является content-addressed хэшем frame+bbox+confidence+feature; reorder сохраняет ID, а неразличимые точные дубли fail closed | Reorder/duplicate tests + cache miss→hit ID stability |
-| Fragmented identities across gaps | HSV и близость могли либо не склеить одного игрока, либо ошибочно склеить разных; unlabeled fragment мог транзитивно соединить две конфликтующие персоны | Isolated SoccerNet PRTReID worker; offline Hungarian resolver; overlap / confirmed-manual team-role / roster / reliable-jersey / physics hard gates; automatic team/role disagreement остаётся review evidence; auto-link только при strong ReID/reliable number/external ID; после assignment каждый prospective component повторно проверяется на manual/external/reliable-jersey/team/role/ReID-dimension conflicts, unsafe bridge понижается до review | Resolver property/edge/component tests, worker contract tests, full API suite |
-| One-crop ReID false merge | Один удачный/дублированный crop мог ошибочно объявить два tracklet одним игроком; разные observation IDs одного и того же изображения раздували support | Quality-ranked temporally separated crop reservoir; strong auto-link требует ≥2 independent samples с bidirectional robust support; decoded pixels получают stable `pixel-evidence-v1` fingerprint, поэтому одинаковый crop считается одним support через batches/split/merge | Resolver + reconstruction sampling/split/fingerprint regressions |
-| ReID runtime incompatibility | Official baseline требует Python 3.9/torch 1.13, тогда как API работает на современном Python/torch; частично совместимый, malformed или rolling-deploy worker мог смешать несовместимые evidence | Отдельный health-checked worker, pinned commits/checksums, automatic Docker model provisioning; readiness проверяет фиксированный protocol, а первый inference batch фиксирует accepted `modelContract`; любой cross-batch drift завершает весь вызов fail-closed. API строго валидирует top-level/item/role/confidence/quality/embedding и оставляет provisional identities при outage/contract mismatch | Worker live/ready/malformed/fake-provider/cross-batch tests + API contract validation |
-| Repeated ReID inference | Каждый rebuild повторно прогонял одинаковые crop через тяжёлый PRTReID, а параллельные запросы дублировали один inference | Bounded TTL-LRU по exact crop bytes+bbox+policy+backend+model/checkpoint+schema; cached QA rejects, in-request dedup и concurrent single-flight; corrupt/expired entry fail-safe становится miss | 14 identity-worker tests: hit/miss, bbox/model/policy invalidation, LRU/TTL, corruption, duplicate batch and concurrent requests |
-| Jersey OCR runtime coupling | MMOCR/EasyOCR имеют тяжёлые и несовместимые с API зависимости; raw, malformed или mixed-version OCR легко ошибочно принять за identity proof | Provider-neutral `jersey-ocr.v1` worker, explicit live/ready, crop QA, low-confidence/ambiguity fail-closed, immutable observation/tracklet IDs; client строго проверяет contract/status/candidates/reasons/confidence/quality/fingerprint и фиксирует один `modelContract` на весь cross-batch вызов; MMOCR и EasyOCR сменяются без изменения API | Malformed/fake-provider/cross-batch HTTP tests + strict API response validation |
-| Single-frame jersey guess | Одно смазанное либо продублированное чтение номера могло склеить разных людей или выбрать игрока состава | До 5 quality-ranked/temporally diverse crops на обычный tracklet и каждую prospective split partition; одинаковые decoded pixels дедуплицируются по `pixel-evidence-v1`; reliable только при ≥2 независимых согласованных samples и confidence ≥0.80; конфликт abstain; roster candidates review-only | Fusion property/fingerprint tests + reconstruction worker integration/outage/bounded-request tests |
-| OCR evidence leaks or disappears through split | После ручного split номер исходного tracklet мог остаться у обеих identities, повлиять на pre-resolver merge либо короткая partition теряла хорошие кадры | Persisted splits применяются к local track states до global resolver; partition-local OCR identities не дают evidence перейти через split barrier; bounded reservoir сохраняет raw results, финальная агрегация переадресует их через immutable observation IDs и заново sampling/fusion после split/merge | Split-specific pre-resolver/no-leak/no-loss OCR integration tests |
-| Repeated jersey OCR inference | Correction rebuild повторял тяжёлое OCR неизменённых crops | TTL-LRU по exact crop/model/checkpoint/policy/schema, request dedup и worker cache/provider diagnostics | Worker cache and API diagnostic propagation tests |
-| Live roster split-brain | UI мог показывать свежий provider roster, а reconstruction читать другой roster; копии состава в Scene создавали второй источник истины | Authoritative canonical snapshot хранится только на Project. Immutable reconstruction input содержит `matchSnapshotRef` (id/hash/schema), а compact job фиксирует fingerprint этого input; worker разрешает exact snapshot через уникальный compact `ProjectScene` owner и fail-closed проверяет ownership/hash. `AnalysisRun` только отражает/восстанавливает telemetry и не участвует в выборе или допуске работы. Scene-document и reconstruction-run репозитории не гидрируют Match данные, Project API отдельно строит stale DTO, identity endpoints получают snapshot явно. Partial roster остаётся manual-only | Implicit-Scene-read SQL regression, snapshot-change fingerprint, missing/hash-mismatch terminal failure, canonical/public project and identity tests |
-| Greedy real-name assignment | Независимый top-1 для каждого трека мог назначить одного реального игрока нескольким людям или принять слабый team/role prior за идентичность | Closed-set global assignment с unknown alternative, one-to-one constraint, hard activity/confirmed-role/event gates, exact-tie/margin abstain и обязательным identity signal. Resolver всегда возвращает `autoBindings: []`; только durable Bind подтверждает имя | Resolver edge/global-assignment tests + 31-person live 1-A run: 31 explicit abstains without OCR/ReID |
-| Identity evidence was not reviewable | Нельзя было увидеть exact crop, причину отказа worker, roster hypothesis или навсегда отклонить ложного кандидата | Identity Review queue показывает quality-ranked persisted crops, readiness, evidence, hypotheses и conflicts; Inspect синхронизирует общий playhead. Candidate rejection хранится как reconstruction input и исключается из будущих assignments; полный roster можно выбрать вручную даже после solver abstain | API crop/path-safety/rejection/CAS tests + Vue component tests + live browser flow |
-| Identity review was queried before it existed | Открытие Project/root timeline или ещё не реконструированного Segment без участия пользователя выполняло скрытый GET и превращало нормальное отсутствие identity artifact в `409 Conflict`; failed run запускал запрос повторно | Наличие `identityDiagnostics` в immutable artifact manifest является capability gate. UI загружает review только для явно выбранной персоны в Binding inspector, дедуплицирует по revision/artifact и не делает запрос для busy/non-ready state. Read endpoint возвращает typed unavailable state через 200; повреждённая опубликованная ссылка fail-closed через 503 | API availability/artifact-failure tests + Vue root/unready/busy/explicit-demand/dedupe/retry regressions |
-| Suggested roster match mistaken for confirmation | Candidate по номеру мог стать `externalPlayerId` без решения пользователя, исчезнуть при off-screen rebuild, конфликтовать с OCR или остаться привязанным к старому match/split owner | Dedicated canonical bind/unbind/clear endpoint; server выбирает saved detector observation, валидирует roster/team/duplicate, сохраняет stable identity-scope correction и CAS-атомарно queue'ит rebuild; binding следует anchor partition и rekey'ится вместе со ссылками; OCR mismatch/missing roster player публикуются как явные conflicts, а смена матча проверяет published people и durable bound corrections до записи | Off-screen/outage/wrong-team/duplicate/missing-player/OCR-conflict/split→rekey→unbind/clear/match-change/CAS tests + Vue tests |
-| Generic frame confirm bypassed roster invariants | Обычный frame editor позволял назначить тот же roster ID нескольким людям без team/duplicate/owner checks, а конфликтующие решения могли зависеть от порядка кадров | Roster dropdown удалён из generic editor, API отклоняет `external_player_id` на frame-correction endpoint; только canonical Bind/Unbind создаёт roster decisions, а Clear удаляет только явный Unbind. Одинаковый observation сохраняет все annotation IDs, split переносит state по anchor, а два несовместимых dedicated решения/owner'а fail closed | API rejection, bind/unbind/clear, same-frame, merge/split/ambiguous-owner regressions; Vue tests/typecheck/build |
-| Unbind lifecycle and identity evidence | Persisted Unbind мог сам считаться positive manual evidence, делать identity `resolved`, завышать confidence, воскресить прежний roster ID или потеряться/перейти к другому владельцу при undo Split/Merge | Unbind хранится как durable observation-anchored tombstone, но исключается из positive/manual evidence и metrics. Split snapshot и stable decision origin восстанавливают один source-owner tombstone, post-merge dependency блокирует неоднозначный undo. Dedicated Clear через owner-checked CAS проходит только активную merge lineage и транзитивных split-предков, валидирует ownership скрытых snapshots, сохраняет sibling/unrelated metadata и fail-closed отклоняет связанные повреждения атомарно | Tombstone/evidence, split consolidation, post-merge block, Clear endpoint/UI, unrelated/malformed owner, A→B→C ordered-undo, sibling, ambiguous-owner and stale-CAS regressions |
-| Cross-angle identity either absent or unsafe | Ракурсы одного эпизода не давали взаимного подтверждения либо могли склеиться только по proximity при неверных часах | Fusion разрешён только после independently accepted alignment и same external ID/reliable jersey; conflicts/ambiguity abstain; foreign observations namespaced; manual anchors persisted and validated | Multi-angle identity/alignment/provenance tests |
-| Identity quality presented without ground truth | Smooth trajectory могла выглядеть как высокий ID score, хотя настоящий игрок уже сменился; frame index мог ошибочно выглядеть как секунды overlap, а sparse labels — как длительность между соседними labels | Unlabelled run явно возвращает unavailable; labelled observations дают IDF1/precision/recall/switches/fragments и `duplicateAssignmentFrameCount`; при explicit FPS overlap равен duplicate-frame count / FPS даже для одного или sparse кадра; без FPS секунды доступны только из timestamp cadence, иначе null; timebase публикуется явно; HOTA/GS-HOTA остаётся null до official evaluator | Identity metrics на frame-only/single/sparse/mixed timebase + quality-gate regression tests |
-| No reproducible real-model acceptance gate | Readiness/fake tests можно было ошибочно выдать за точность PRTReID/MMOCR/EasyOCR | Opt-in labelled manifest + dataset fingerprint + immutable provider/checkpoint provenance; same/different distributions, role confusion, OCR exact/abstention/substitution/conflict; versioned report and explicit unavailable state | Synthetic contract/metric tests; real-worker tests intentionally skipped without assets+manifest+opt-in |
-| Manual player-action authoring | Действия игрока существовали только как будущая идея и не имели общей временной модели с видео/3D | Persisted `payload.playerActions`, timeline выбранного `canonicalPersonId`, 21 semantic action type, интервалы и несколько фаз `wind-up/contact/release/apex/impact/recovery`; add/edit/delete сразу проходят dedicated API, а `ThreeViewport` получает renderer-neutral phase/keypoint preview | API validation/persistence tests + Vue timeline/domain/viewport tests |
+`player_action_commands.py` выбрасывает результат `scenes.put`, а
+`scene_analysis_routes.py` возвращает pre-save Scene. В БД revision уже
+увеличена, но клиент получает старую и следующий save может завершиться 409.
 
-## Осознанные ограничения, не объявляемые закрытым долгом
+**Закрыто, когда:** add/update/delete возвращают persisted Scene; API-тест
+сравнивает response revision с БД и проверяет следующий последовательный save.
 
-Это следующие продуктовые этапы, требующие отдельной модели, датасета, инфраструктуры или решения по лицензии:
+### TD-TRACK-01 — ручное перемещение игрока не является durable correction
 
-- Observation, whole-identity и `[start,end)` range scope реализованы; split-at-observation имеет preview, deterministic delete-as-undo и fail-closed target remap. Многошаговая история правок и автоматическое распространение диапазона через сложную длительную occlusion остаются отдельным UX/R&D этапом.
-- Онлайн tracker остаётся лёгким short-horizon baseline; PRTReID и глобальная offline-склейка подключены, но их пороги всё ещё требуют benchmark на наших размеченных кадрах против StrongSORT/TrackLab.
-- Семантическая автокалибровка всё ещё может пропустить экстремальный zoom/replay/blur; ручные pitch anchors остаются необходимым fallback, а coverage/error теперь наблюдаемы.
-- Temporal graph не создаёт геометрию из ничего: если ни один direct candidate не проходит line/keypoint/person QA, все propagated варианты остаются недопустимыми. Для таких планов нужен PnLCalib worker, повторная ручная калибровка или более сильная camera model.
-- Мяч на broadcast video остаётся отдельной слабой задачей; API ball coordinates редки и не заменяют CV.
-- PRTReID вынесен в отдельный worker; detector остаётся в API process, но его base sampled-frame output теперь persisted и переиспользуется correction rebuild. GPU image, batching across concurrent cold-cache jobs и multi-host GPU scheduling remain deployment work.
-- OCR/ReID plumbing, conservative evidence fusion and a reproducible harness
-  are implemented, but the actual provider thresholds still require a versioned
-  labelled product set. MMOCR/EasyOCR/PRT readiness or synthetic tests are not
-  accuracy claims; PARSeq/TrackLab/StrongSORT remain benchmark candidates.
-- **TD-ACT-01 — automatic action recognition/review:** ручной слой уже
-  реализован: dedicated timeline выбранного `canonicalPersonId`, persistent
-  интервалы и несколько semantic keypoints. Остаются automatic suggestions,
-  Accept/Reject/convert-to-manual workflow, отдельный input fingerprint,
-  selective invalidation и измеримая accuracy на размеченном product set.
-- **TD-ANIM-01 — UCS animation synchronization:** character selection,
-  retargeting, root-motion handling, ball-contact IK and blending are an
-  explicitly separate downstream debt. They must not be coupled to action
-  recognition or identity. Both boundaries and acceptance criteria are recorded
-  in [`PLAYER_ACTIONS.md`](PLAYER_ACTIONS.md).
-- Локальный DB lease/recovery уже восстанавливает `queued` и stale `processing` jobs. Для multi-host production scale нужны fair claiming/backpressure и observability/SLO поверх существующих compact job tables с сохранением input/revision CAS и owner-fencing semantics.
-- Video-processing и multi-pass выполняются durable pipeline runner'ом с
-  compact job, lease/recovery/fencing и supervised child process. Следующий
-  этап — multi-host backpressure, capacity metrics и operator tooling.
-- PostgreSQL-нужды не исчерпываются fresh-schema gate: concurrent
-  store/lease/CAS suites всё ещё нужно прогонять на реальном Postgres, добавить
-  retry/`SKIP LOCKED` policy для contention и проверку restore на копии
-  production-like данных.
-- Media сейчас использует общий filesystem volume и immutable generation
-  directories. Перед multi-host режимом нужен object-storage lifecycle,
-  staging для FFmpeg, garbage collection неподтверждённых generations,
-  retention/privacy policy и проверенное восстановление.
-- `SceneDocument` всё ещё содержит компактный editor/reconstruction read model.
-  Дальнейшее уменьшение допустимо только без возврата глобальных routes,
-  embedded dense series или второго writable источника match/job state.
-- Перед коммерциализацией нужны auth/tenant authorization, TLS, quotas,
-  backup/restore, observability/SLO и лицензионный аудит
-  моделей/датасетов/API.
+Vue изменяет `track.keyframes`, но compact Scene PUT удаляет dense keyframes, а
+следующая гидрация восстанавливает их из `identityTimeline`. UI поэтому может
+сообщить о сохранении правки, которой нет.
 
-Для локального некоммерческого single-user MVP основные safety-инварианты
-реконструкции закрыты, но перечисленные deployment и migration gaps остаются
-известным долгом. Accuracy gaps должны закрываться размеченным validation set,
-а не скрываться runtime confidence или эвристикой.
+**Canonical решение:** dedicated player-trajectory command с CAS и отдельным
+sparse immutable correction artifact. Anchor должен ссылаться на стабильную
+canonical person/observation lineage, а не на временный renderer track ID.
+Rebuild накладывает ручные anchors на derived trajectory; merge/split выполняет
+детерминированный remap либо fail-closed. Dense keyframes через общий Scene PUT
+не сохраняются. Пока команда не реализована, UI не должен подтверждать такой
+drag как сохранённый.
+
+### TD-CAL-01 — calibration preview скрыто изменяет Scene revision
+
+`persist_frame_calibration_preview()` вызывает `scenes.put(scene)`, выбрасывает
+persisted result и возвращает только draft. Даже Cancel оставляет клиент со
+старой revision.
+
+**Закрыто, когда:** preview либо полностью ephemeral до Apply, либо API явно
+возвращает новую Scene revision; последовательность Preview → Cancel → Save
+покрыта регрессией без 409.
+
+## P1 — reliability, данные и доказуемая точность
+
+### Транзакции и runtime
+
+| ID | Долг | Критерий закрытия |
+| --- | --- | --- |
+| **TD-SEG-01** | Materialization segment Scene публикует child Scene, ownership, Segment и parent Scene несколькими транзакциями; возможен частичный граф | Одна application transaction и failure-injection тест, после которого не остаётся ни одного частичного ресурса |
+| **TD-PG-01** | `SceneRepository.put()` имеет select-then-insert race; CI проверяет PostgreSQL DDL, но не реальные queue/claim/lease/CAS гонки | Narrow duplicate-key → 409 или atomic insert/on-conflict; PostgreSQL lane для Scene CAS, queue/lease/recovery/cancellation и concurrency tests |
+| **TD-VALID-01** | Scene title не ограничен API-схемой при `VARCHAR(240)`; общий Scene JSON не имеет явного бюджета | `max_length=240`, согласованная UI-валидация, bounded payload policy и тесты 422 вместо PostgreSQL 500 |
+| **TD-MEDIA-01** | `ffmpeg`/`ffprobe` запускаются без operation-specific timeout; зависший child занимает pipeline/reconstruction slot | Короткий probe budget, decode/transcode budgets по duration/realtime factor, стадийная ошибка, гарантированный terminate/reap и retry после cancel |
+| **TD-CI-01** | Poison-head fix покрыт SQLite/unit путём, но отсутствует monitor → child → invalid head → next job интеграция на PostgreSQL | Детерминированный lightweight clip/worker smoke в PR; real models остаются nightly |
+| **TD-HEALTH-01** | Container health смешивает дешёвый liveness с несколькими model-readiness запросами | Отдельный быстрый liveness и cached/parallel readiness с per-dependency status |
+| **TD-SEC-01** | CORS запрещает чтение ответа, но malicious origin всё ещё может отправить простой mutation request на localhost | Same-origin/custom-header или локальный bearer для mutation routes; TLS и multi-user auth остаются deployment gate |
+
+### Artifact и project lifecycle
+
+| ID | Долг | Критерий закрытия |
+| --- | --- | --- |
+| **TD-STORAGE-01** | `FilesystemArtifactStore` умеет только `put/get`; superseded artifacts и неподтверждённые video generations накапливаются | Reachability mark-and-sweep с dry-run и grace period; защита current/in-flight refs; per-project quota; DB/media/artifact size metrics; тест, что PostgreSQL растёт как metadata, а не как число кадров |
+| **TD-MULTI-01** | Нормализованная мультипроектность не имеет сквозного browser regression suite | E2E с двумя проектами/матчами/assets/segments: никакой auto-selection, cross-project 404, независимые jobs/annotations/artifacts и корректное переключение маршрутов |
+| **TD-MATCH-01** | Manual-import provenance строится, но выбрасывается; источник, reference, capturedAt и notes теряются | Provenance хранится рядом с external references/snapshot и возвращается в integration diagnostics; импорт и rollback покрыты тестом |
+
+### Quality gate — инфраструктура есть, реальной приёмки ещё нет
+
+| ID | Долг | Критерий закрытия |
+| --- | --- | --- |
+| **TD-QA-01** | Spain–Belgium manifest остаётся `draft` без gold labels | Reviewed/frozen набор 100–300 разнообразных кадров: обе стороны поля, partial pitch, pan/zoom/cuts, far-side people, crossing, goalkeeper/referee, blur/occlusion и hard-negative ball; второй reviewer и video SHA-256 |
+| **TD-QA-02** | Evaluator принимает predictions JSON, но accepted reconstruction run нельзя штатно экспортировать в этот контракт | Versioned run/artifact → `predictions-v1` exporter с pipeline/model/checkpoint provenance и immutable output |
+| **TD-QA-03** | Нет принятого baseline и regression thresholds | Baseline report по frozen set; пороги coverage/precision/recall/error/IDF1 и reviewable delta policy в CI; prediction/report artifacts сохраняются для диагностики |
+
+Синтетические evaluator-тесты, readiness workers и три удачных calibration кадра
+подтверждают интеграцию, но не закрывают `TD-QA-01`–`TD-QA-03`.
+
+### Provider correctness, затем статистика
+
+| ID | Долг | Критерий закрытия |
+| --- | --- | --- |
+| **TD-PROV-01** | Public DTO смешивает lifecycle sync и полноту данных; runtime EventBundle invariants не централизованы | Раздельные `syncing/succeeded/failed` и `ready/partial/unavailable`; core graph fail-closed validator; invalid optional section отбрасывается и получает явный retryable/failed status |
+| **TD-PROV-02** | Retryable section failure может выглядеть как пустой успешный roster; `addedTime` теряется; synthetic IDs могут коллидировать; один матч дублируется между providers/import | Per-section status, added time, provider+event namespace и provider-neutral match identity с миграцией project bindings |
+| **TD-STATS-01** | Canonical team/player match statistics и вызовы API-Football statistics endpoints отсутствуют | Versioned team/player stats + coverage descriptor; embedded fixture blocks читаются первыми; отдельные provider calls учитывают quota/cache |
+| **TD-PART-01** | Production resolver не строит participation intervals из lineup/substitutions/events | Participation evidence строится из canonical match clock и применяется только как eligibility/negative constraint или prior, но никогда как самостоятельное доказательство личности |
+
+`TD-STATS-01` выполняется только после `TD-PROV-01/02`: статистика поверх
+частичного snapshot не должна выглядеть достоверной.
+
+## P2 — измерение, эксплуатация и поддерживаемость
+
+| ID | Долг | Критерий закрытия |
+| --- | --- | --- |
+| **TD-OBS-01** | AnalysisRun хранит текущую фазу и общий elapsed, но не историю фаз; stale/invalid worker outcomes плохо различимы оператором | Durable phase start/end/elapsed, queue/model-load/cache counters, structured terminal outcome, bounded run history и request/run IDs в логах |
+| **TD-PERF-01** | Нет воспроизводимого latency/RAM/VRAM baseline на заданном hardware/clip | Benchmark harness фиксирует hardware, image/model versions, cold/warm cache, per-phase latency, peak RAM/VRAM и допустимый realtime factor |
+| **TD-PERF-02** | Person inference остаётся per-frame; calibration cache process-local; возможны повторные cold-cache вычисления | После `TD-PERF-01`: batch person/multi-frame ball, disk cache по frame/model SHA; overlap фаз только при доказанном выигрыше без resource contention |
+| **TD-FE-01** | `ThreeViewport` обновляет объекты и в rAF, и watcher'ом `currentTime`; interpolation/path делает линейные сканы и allocations | Один clock-driven update path; бинарный поиск/cursor после профилирования; stable artifact signatures вместо deep JSON watchers |
+| **TD-PROV-03** | Provider transports создают client на запрос, имеют unbounded process cache и неполный retry/Redis lifecycle; manual schema version отсутствует | Shared низкоуровневые HTTP/cache primitives без объединения provider mapping; bounded cache, retry/backoff, client close/timeouts, transport contract suite и versioned manual schema |
+| **TD-OPS-01** | Нет проверенного project export/import и регулярного backup/restore | Версионированный project bundle с annotations/manifests и опциональным media; backup policy, restore drill и документированный RPO/RTO — независимо от внешнего доступа |
+| **TD-STORAGE-02** | Локальный shared volume не готов к multi-host data plane | Backend-neutral object store, staging для FFmpeg, retention/privacy policy и восстановление manifest → object; только после `TD-STORAGE-01` |
+| **TD-INFRA-01** | Model weights provision неоднороден; identity-worker ещё использует MD5; lock strategy и non-root images не унифицированы | Pinned URL + SHA-256 для всех weights; vendored licensed/compatible runtime code; per-image lockfiles либо доказанно совместимый shared lock; Docker `USER` и quickstart |
+| **TD-CODE-01** | Остались прямые `BEGIN IMMEDIATE`, status-from-message, полные route prefixes, side-effect ORM registration и `kind=demo` по title | Миграция по capability с транзакционными тестами; typed error mapping; явная ORM/router registration; demo только через fixture/factory |
+| **TD-TEST-01** | Нет coverage floor, gradual mypy/ruff gate и поведенческих тестов части video/calibration/3D UI | Зафиксированный baseline coverage без снижения; ruff + постепенно расширяемый mypy; component tests на позиции/видимость/counters, а не string assertions |
+| **TD-QA-04** | Evaluator не измеряет role/team/occlusion strata, semantic-line/mirror/temporal calibration, pitch-space ball/player error, ball continuity и official HOTA/GS-HOTA | Метрики добавляются только вместе с размеченными данными и frozen contract; official SoccerNet evaluator интегрируется без самодельной аппроксимации |
+| **TD-DOC-01** | `PIPELINE_EDGE_CASES.md` смешивает реализованные и будущие меры; часть docs не связана с README | Каждая строка имеет status и стабильный `TD-*`; active items ссылаются на этот реестр, закрытые — на regression test/doc |
+
+## P3 / R&D и deployment gate
+
+| ID | Следующий этап | Условие начала/закрытия |
+| --- | --- | --- |
+| **TD-IDENT-01** | Измерить short-horizon tracker + PRTReID/OCR против StrongSORT/TrackLab; повысить useful real-player identification coverage | Только на `TD-QA-01` gold set; thresholds и abstention сохраняют one-to-one/unknown invariants |
+| **TD-CAL-02** | Extreme zoom, replay, blur, partial pitch без direct anchors, rolling shutter и нестандартные размеры поля | Отдельные strata в benchmark; manual anchors остаются наблюдаемым продуктовым fallback, а не legacy |
+| **TD-BALL-01** | Automatic ball accuracy, candidate confirm/reject evidence и реальная airborne height | Hard-negative/hidden/blur labels, image+pitch metrics и отдельная 2.5D/pose модель; manual trajectory остаётся authoritative correction |
+| **TD-QA-05** | Автоматизированный внешний бенчмарк на SoccerNet GSR (экспорт GSR predictions, клиповый оркестратор, GS-HOTA официальным evaluator'ом из `.references/sn-gamestate`) | **Решено 2026-07-19 (владелец): в обозримом будущем не выполняется.** Проверка качества через внешний сервис/датасет не ведётся; приёмка изменений качества — визуальная, на реальных сегментах проекта: по одному изменению за явным флагом/настройкой, сравнение до/после в редакторе и офлайн-артефактами (2D-радар, JSONL-журнал прогона), с сохранённой возможностью отката на прежний дефолт. Правило 7 реестра (accuracy только по frozen labelled set) на этот период заменено визуальной приёмкой; материалы `.references/sn-gamestate` сохраняются на случай пересмотра решения |
+| **TD-ACT-01** | Automatic action suggestions и review workflow | `source=automatic,status=suggested`, Accept/Reject/convert-to-manual, отдельный fingerprint/selective invalidation и labelled action set; см. [`PLAYER_ACTIONS.md`](PLAYER_ACTIONS.md) |
+| **TD-ANIM-01** | Синхронизация подтверждённых действий с лицензированными UCS rigs/clips | Retargeting, root motion, ball-contact IK, blending и deterministic scrubbing не влияют на identity/action truth; см. [`PLAYER_ACTIONS.md`](PLAYER_ACTIONS.md) |
+| **TD-DIST-01** | Multi-host backpressure, fair claiming, GPU scheduling и SLO | Capacity benchmark, `SKIP LOCKED`/retry policy, per-model resource limits и owner-fencing сохраняются |
+| **TD-EXT-01** | Внешний или multi-user deployment | Auth/tenant authorization, TLS, external CORS, quotas, privacy и лицензионный аудит обязательны до первого внешнего bind |
+
+## Порядок выполнения
+
+1. Закрыть `TD-CAS-01`, `TD-TRACK-01`, `TD-CAL-01` и временно не показывать
+   пользователю ложное «saved» для неподдерживаемого player drag.
+2. Параллельно закрыть транзакционные `TD-SEG-01`, `TD-PG-01` и жизненный цикл
+   данных `TD-STORAGE-01`.
+3. Создать измеримую точку правды: `TD-QA-01` → `TD-QA-02` → `TD-QA-03`.
+4. Выполнить provider Slice A (`TD-PROV-01/02`, `TD-MATCH-01`), затем
+   `TD-STATS-01` и `TD-PART-01`.
+5. Добавить `TD-OBS-01`/`TD-PERF-01`; только после замера оптимизировать
+   inference, cache и frontend hot paths.
+6. R&D и внешний deployment не вытесняют correctness, gold quality и storage
+   lifecycle текущего локального MVP.
+
+## Закрытый baseline и регрессионные инварианты
+
+Следующие направления закрыты как **архитектурная реализация**, но не являются
+заявлением о точности реальных моделей:
+
+- god-файлы reconstruction/video/ball/identity/OCR/ReID/player-actions удалены
+  либо распилены по независимым capabilities; import graph и composition roots
+  защищены architecture-тестами;
+- глобальные Scene/video/match mutation routes и implicit project creation
+  удалены; browser работает через project-scoped router;
+- Match snapshot, references и project pointer публикуются атомарно;
+- durable jobs, leases, recovery, fencing и last-good publication заменили
+  API background work и payload-proportional recovery polling;
+- dense reconstruction data вынесены из Scene/PostgreSQL: live cutover уменьшил
+  Shot 2 `4,468,127 → 332,876 B`, а финальные восемь Scene — до 81,565 B
+  суммарно; подробности в [`PERFORMANCE.md`](PERFORMANCE.md);
+- семантическая PnLCalib-калибровка, temporal propagation/cut barriers и
+  side/orientation separation реализованы; подробности в
+  [`CALIBRATION.md`](CALIBRATION.md);
+- canonical people, immutable observations, confirm/exclude/merge/split/bind,
+  correction lineage, ReID/OCR contracts/caches и explicit abstention
+  реализованы; подробности в [`IDENTITY_RESOLUTION.md`](IDENTITY_RESOLUTION.md);
+- manual ball timeline, selected-object path и manual player-action timeline
+  реализованы; подробности в [`BALL_TRACKING.md`](BALL_TRACKING.md),
+  [`PATH_TRACKING.md`](PATH_TRACKING.md) и [`PLAYER_ACTIONS.md`](PLAYER_ACTIONS.md);
+- versioned benchmark schemas/evaluators реализованы, но остаются scaffolding,
+  пока `TD-QA-01`–`TD-QA-03` не создадут frozen product evidence.
+
+Неотменяемые правила текущей архитектуры:
+
+1. PostgreSQL — compact control plane; frame series и model evidence — data
+   plane artifacts.
+2. Job discovery/heartbeat никогда не читает `Scene.payload`.
+3. Реконструкция запускается только явно для выбранного segment/composition;
+   открытие проекта, refresh Match и навигация не ставят jobs.
+4. Новый run не уничтожает last-good до fenced atomic publication.
+5. Missing/partial/corrupt data отображаются явно; silent fallback запрещён.
+6. Ручная правка привязывается к стабильной domain identity и переживает rebuild
+   либо отклоняется fail-closed.
+7. Accuracy принимается только по независимо размеченному frozen set, а не по
+   runtime confidence, smooth trajectory или readiness модели.
+8. Первый canonical replacement удаляет legacy path в том же cutover; dual
+   write и embedded dense fallback не возвращаются.
+9. Обратная совместимость со старыми локальными данными не поддерживается
+   (решение владельца, 2026-07-19): прогоны, кэши, артефакты и БД
+   пересобираемы; контрактные изменения делаются bump'ом версии, данные-
+   миграции и конверсии старых форматов не пишутся. Инварианты внутри
+   одного прогона (fencing, атомарность, digest-нормализация) остаются.

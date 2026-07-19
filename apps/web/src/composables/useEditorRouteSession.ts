@@ -194,10 +194,9 @@ export function useEditorRouteSession(options: EditorRouteSessionOptions) {
         options.selectedCanonicalPersonId.value = null
       }
       const view = intent.view
-      if (view?.time !== undefined) {
-        await nextTick()
-        options.seekTo(view.time)
-      }
+      if (view?.time !== undefined) await nextTick()
+      if (activeRequest !== requestId || options.scene.value?.id !== targetSceneId) return
+      if (view?.time !== undefined) options.seekTo(view.time)
       if (view?.panel === 'quality') options.activeTab.value = 'qa'
       else if (view?.panel === 'events') options.activeTab.value = 'events'
       else if (view?.panel === 'inspector') options.activeTab.value = 'binding'

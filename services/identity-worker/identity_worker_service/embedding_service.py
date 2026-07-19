@@ -8,14 +8,11 @@ import numpy as np
 from .cache import IdentityCacheEntry, IdentityEmbeddingCache
 from .evidence import (
     EVIDENCE_FINGERPRINT_VERSION,
-    QualityPolicy,
     apply_cache_entry,
     cache_key,
-    crop_observation,
     decode_image,
     evidence_fingerprint,
     provider_cache_entry,
-    rejected_cache_entry,
 )
 from .provider_contract import EmbeddingSample, IdentityEmbeddingProvider, ProviderUnavailable
 from .request_contract import parse_manifest
@@ -30,69 +27,63 @@ class _RequestGroup:
     key: str
     crop: np.ndarray
     quality: dict
-    reasons: list[str]
     representative_observation_id: str
     response_indices: list[int]
 
 
 class IdentityEmbeddingService:
-    """Coordinate crop evidence, cache single-flight, and provider inference."""
+    """Coordinate cache single-flight and provider inference over crops.
+
+    Contract v2: the API already cut and QA-gated every crop, so the service
+    is a pure embedder — it decodes crop bytes, deduplicates identical
+    pixels, and never rejects an observation itself.
+    """
 
     def __init__(
         self,
         provider: IdentityEmbeddingProvider,
-        policy: QualityPolicy,
         cache: IdentityEmbeddingCache,
     ) -> None:
         self.provider = provider
-        self.policy = policy
         self.cache = cache
 
-    def process(self, frame_bytes: list[bytes], manifest: str) -> dict[str, Any]:
-        decoded = [decode_image(data, index) for index, data in enumerate(frame_bytes)]
-        frame_items = parse_manifest(manifest, len(decoded))
+    def process(self, crop_bytes: list[bytes], manifest: str) -> dict[str, Any]:
+        crop_items = parse_manifest(manifest, len(crop_bytes))
         provider_info = self.provider.info()
         responses: list[dict] = []
         groups: dict[str, _RequestGroup] = {}
         in_request_deduplicated = 0
-        for frame in frame_items:
-            image = decoded[int(frame["fileIndex"])]
-            frame_index = int(frame.get("frameIndex") or 0)
-            for observation in frame["observations"]:
-                crop, quality, reasons = crop_observation(
-                    image, observation["bbox"], self.policy
-                )
-                response = {
-                    "observationId": observation["observationId"],
-                    "frameIndex": frame_index,
-                    "usable": not reasons,
-                    "quality": quality,
-                    "rejectionReasons": reasons,
-                    "embedding": None,
-                    "visibilityScores": None,
-                    "role": None,
-                    "roleConfidence": None,
-                    "evidenceFingerprint": evidence_fingerprint(crop),
-                    "cacheHit": False,
-                    "cacheSource": "pending",
-                }
-                responses.append(response)
-                key = cache_key(
-                    crop, observation["bbox"], self.policy, provider_info
-                )
-                group = groups.get(key)
-                if group is not None:
-                    group.response_indices.append(len(responses) - 1)
-                    in_request_deduplicated += 1
-                    continue
-                groups[key] = _RequestGroup(
-                    key=key,
-                    crop=crop,
-                    quality=quality,
-                    reasons=reasons,
-                    representative_observation_id=str(observation["observationId"]),
-                    response_indices=[len(responses) - 1],
-                )
+        for item in crop_items:
+            file_index = int(item["fileIndex"])
+            crop = decode_image(crop_bytes[file_index], file_index)
+            response = {
+                "observationId": item["observationId"],
+                "frameIndex": int(item.get("frameIndex") or 0),
+                "usable": True,
+                "quality": dict(item.get("quality") or {}),
+                "rejectionReasons": [],
+                "embedding": None,
+                "visibilityScores": None,
+                "role": None,
+                "roleConfidence": None,
+                "evidenceFingerprint": evidence_fingerprint(crop),
+                "cacheHit": False,
+                "cacheSource": "pending",
+            }
+            responses.append(response)
+            key = cache_key(crop, provider_info)
+            group = groups.get(key)
+            if group is not None:
+                group.response_indices.append(len(responses) - 1)
+                in_request_deduplicated += 1
+                continue
+            groups[key] = _RequestGroup(
+                key=key,
+                crop=crop,
+                quality=response["quality"],
+                representative_observation_id=str(item["observationId"]),
+                response_indices=[len(responses) - 1],
+            )
 
         self.cache.note_in_request_deduplicated(in_request_deduplicated)
         unresolved = list(groups)
@@ -122,16 +113,10 @@ class IdentityEmbeddingService:
                     )
 
             request_misses += len(reservation.owners)
-            rejected_entries: dict[str, IdentityCacheEntry] = {}
             provider_keys: list[str] = []
             samples: list[EmbeddingSample] = []
             for key in reservation.owners:
                 group = groups[key]
-                if group.reasons:
-                    rejected_entries[key] = rejected_cache_entry(
-                        group.quality, group.reasons
-                    )
-                    continue
                 provider_keys.append(key)
                 samples.append(
                     EmbeddingSample(
@@ -139,16 +124,6 @@ class IdentityEmbeddingService:
                         image_rgb=group.crop,
                     )
                 )
-
-            if rejected_entries:
-                self.cache.publish(rejected_entries)
-                for key, entry in rejected_entries.items():
-                    for response_index in groups[key].response_indices:
-                        apply_cache_entry(
-                            responses[response_index],
-                            entry,
-                            cache_source="qa-computed",
-                        )
 
             if samples:
                 provider_inference_count += len(samples)

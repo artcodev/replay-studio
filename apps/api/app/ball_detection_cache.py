@@ -16,7 +16,7 @@ from .ball_detection_cache_codec import (
     BallDetectionCacheEntry,
     entry_from_envelope,
     frame_payload,
-    is_clean_primary_payload,
+    validate_ball_detection_payload,
 )
 from .ball_detection_cache_contract import (
     BALL_DETECTION_CACHE_SCHEMA_VERSION,
@@ -187,8 +187,10 @@ def store_ball_detection_checkpoint(
         "frameCount": len(frames),
         "frames": frames,
     }
-    if not is_clean_primary_payload(payload):
-        raise BallDetectionCacheError("checkpoint contains degraded detector output")
+    if validate_ball_detection_payload(payload) is None:
+        raise BallDetectionCacheError(
+            "checkpoint payload failed structural validation"
+        )
     normalized_payload = json_value(payload, label="checkpoint payload")
     envelope = {
         "schemaVersion": BALL_DETECTION_CACHE_SCHEMA_VERSION,
@@ -241,7 +243,7 @@ def delete_ball_detection_checkpoint(
         path.unlink(missing_ok=True)
 
 
-def store_clean_ball_detection_cache(
+def store_ball_detection_cache(
     asset_directory: str | Path,
     *,
     dense_cache_key: str,
@@ -249,9 +251,9 @@ def store_clean_ball_detection_cache(
     primary_backend: str,
     resolved_frames: Sequence[tuple[Sequence[Mapping[str, Any]], float]],
     batches: Sequence[Mapping[str, Any]],
-    failed_frame_count: int = 0,
-    fallback_frame_count: int = 0,
-) -> BallDetectionCacheEntry | None:
+) -> BallDetectionCacheEntry:
+    """Store a complete run; degraded frames stay with their explicit markers."""
+
     contract = build_ball_detection_cache_contract(
         dense_cache_key=dense_cache_key, detector_input=detector_input
     )
@@ -262,12 +264,8 @@ def store_clean_ball_detection_cache(
         "frameCount": len(frames),
         "frames": frames,
     }
-    if not is_clean_primary_payload(
-        payload,
-        failed_frame_count=int(failed_frame_count),
-        fallback_frame_count=int(fallback_frame_count),
-    ):
-        return None
+    if validate_ball_detection_payload(payload) is None:
+        raise BallDetectionCacheError("cache payload failed structural validation")
     normalized_payload = json_value(payload, label="cache payload")
     envelope = {
         "schemaVersion": BALL_DETECTION_CACHE_SCHEMA_VERSION,

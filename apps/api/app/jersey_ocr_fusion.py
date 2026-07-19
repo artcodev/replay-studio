@@ -214,6 +214,64 @@ def _fuse(
     )
 
 
+def detect_jersey_number_switches(
+    crops: Sequence[Mapping],
+    *,
+    min_stable_run: int = 3,
+) -> list[dict]:
+    """Flag tracklets whose recognized shirt number changes mid-track.
+
+    A stable run of number A followed by a stable run of number B inside one
+    tracklet is hard evidence of a tracker ID switch. This is deliberately a
+    review flag, not an automatic split: noisy single misreads never qualify
+    because both runs must be consecutive recognized reads of length
+    ``min_stable_run``.
+    """
+
+    by_tracklet: dict[str, list[Mapping]] = {}
+    for crop in crops:
+        tracklet_id = str(crop.get("trackletId") or "")
+        raw_number = crop.get("rawNumber")
+        if not tracklet_id or crop.get("status") != "recognized" or not raw_number:
+            continue
+        by_tracklet.setdefault(tracklet_id, []).append(crop)
+    suspects: list[dict] = []
+    for tracklet_id, items in sorted(by_tracklet.items()):
+        ordered = sorted(items, key=lambda item: float(item.get("timestamp") or 0.0))
+        runs: list[dict] = []
+        for item in ordered:
+            number = str(item["rawNumber"])
+            timestamp = float(item.get("timestamp") or 0.0)
+            if runs and runs[-1]["number"] == number:
+                runs[-1]["count"] += 1
+                runs[-1]["lastTimestamp"] = timestamp
+            else:
+                runs.append(
+                    {
+                        "number": number,
+                        "count": 1,
+                        "firstTimestamp": timestamp,
+                        "lastTimestamp": timestamp,
+                    }
+                )
+        stable_runs = [run for run in runs if run["count"] >= min_stable_run]
+        for first, second in zip(stable_runs, stable_runs[1:]):
+            if first["number"] == second["number"]:
+                continue
+            suspects.append(
+                {
+                    "trackletId": tracklet_id,
+                    "fromNumber": first["number"],
+                    "toNumber": second["number"],
+                    "switchTime": round(second["firstTimestamp"], 3),
+                    "firstRunCount": first["count"],
+                    "secondRunCount": second["count"],
+                }
+            )
+            break
+    return suspects
+
+
 def aggregate_tracklet_evidence(
     tracklet_id: str,
     observations: Iterable[JerseyOcrObservation],

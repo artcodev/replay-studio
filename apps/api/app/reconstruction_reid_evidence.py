@@ -63,11 +63,69 @@ def capture_detection_observations(
         generated_ids.add(str(detection.observation_id))
 
 
+def _bbox_iou(first: dict, second: dict) -> float:
+    left = max(first["x"], second["x"])
+    top = max(first["y"], second["y"])
+    right = min(first["x"] + first["width"], second["x"] + second["width"])
+    bottom = min(first["y"] + first["height"], second["y"] + second["height"])
+    if right <= left or bottom <= top:
+        return 0.0
+    intersection = (right - left) * (bottom - top)
+    union = (
+        first["width"] * first["height"]
+        + second["width"] * second["height"]
+        - intersection
+    )
+    return float(intersection / union) if union > 0 else 0.0
+
+
+def _local_rejected_item(
+    observation: dict,
+    frame_index: int,
+    reasons: list[str],
+) -> dict:
+    """A rejected result produced without a worker round-trip."""
+
+    return {
+        "observationId": str(observation["observationId"]),
+        "frameIndex": int(frame_index),
+        "usable": False,
+        "quality": dict(observation.get("quality") or {}),
+        "rejectionReasons": list(reasons),
+        "embedding": None,
+        "visibilityScores": None,
+        "role": None,
+        "roleConfidence": None,
+        "evidenceFingerprint": None,
+        "cacheHit": False,
+        "cacheSource": "crop-store",
+    }
+
+
 def identity_embedding_requests(
     frames: list[tuple[Path, float]],
     person_frames: list[tuple[list[Detection], float]],
-) -> list[tuple[int, Path, list[dict]]]:
-    requests: list[tuple[int, Path, list[dict]]] = []
+    *,
+    overlap_iou_threshold: float = 0.0,
+) -> tuple[list[tuple[int, str, list[dict]]], dict[str, dict], dict]:
+    """Build per-frame crop requests, resolving QA rejections locally.
+
+    The detection pass already cut every crop into the person crop store, so
+    a request references the crop digest instead of frame pixels. Crops that
+    failed extraction QA (or never reached the store) become local rejected
+    items without a worker round-trip. A crop whose bbox is strongly
+    overlapped by another detection contains two players: its embedding is
+    noise that can hard-break the online tracker's ReID gate, so it is
+    skipped explicitly and reported per observation. A threshold of 0
+    disables the overlap filter.
+    """
+
+    requests: list[tuple[int, str, list[dict]]] = []
+    local_items: dict[str, dict] = {}
+    skipped: list[dict] = []
+    total_skipped = 0
+    crop_rejected_count = 0
+    store_unavailable_count = 0
     for (path, _), (people, _) in zip(frames, person_frames):
         observations = []
         for person in people:
@@ -84,11 +142,76 @@ def identity_embedding_requests(
                         "width": person.width,
                         "height": person.height,
                     },
+                    "cropSha256": person.crop_sha256,
+                    "cropFrameSha256": person.crop_frame_sha256,
+                    "quality": dict(person.crop_quality or {}),
+                    "cropRejectionReasons": list(
+                        person.crop_rejection_reasons or ()
+                    ),
                 }
             )
-        if observations:
-            requests.append((source_frame_index(path), path, observations))
-    return requests
+        if overlap_iou_threshold > 0.0 and len(observations) > 1:
+            kept: list[dict] = []
+            for observation in observations:
+                worst_overlap = max(
+                    (
+                        _bbox_iou(observation["bbox"], other["bbox"])
+                        for other in observations
+                        if other is not observation
+                    ),
+                    default=0.0,
+                )
+                if worst_overlap > overlap_iou_threshold:
+                    if len(skipped) < 40:
+                        skipped.append(
+                            {
+                                "observationId": observation["observationId"],
+                                "overlapIou": round(worst_overlap, 4),
+                            }
+                        )
+                    continue
+                kept.append(observation)
+            total_skipped += len(observations) - len(kept)
+            observations = kept
+        frame_index = source_frame_index(path)
+        sendable: list[dict] = []
+        frame_sha: str | None = None
+        for observation in observations:
+            reasons = observation["cropRejectionReasons"]
+            if reasons:
+                crop_rejected_count += 1
+                local_items[str(observation["observationId"])] = (
+                    _local_rejected_item(observation, frame_index, reasons)
+                )
+                continue
+            if not observation["cropSha256"] or not observation["cropFrameSha256"]:
+                store_unavailable_count += 1
+                local_items[str(observation["observationId"])] = (
+                    _local_rejected_item(
+                        observation,
+                        frame_index,
+                        ["crop-store-unavailable"],
+                    )
+                )
+                continue
+            frame_sha = str(observation["cropFrameSha256"])
+            sendable.append(
+                {
+                    "observationId": observation["observationId"],
+                    "cropSha256": observation["cropSha256"],
+                    "quality": observation["quality"],
+                }
+            )
+        if sendable and frame_sha:
+            requests.append((frame_index, frame_sha, sendable))
+    diagnostics = {
+        "overlapIouThreshold": float(overlap_iou_threshold),
+        "overlapSkippedObservationCount": total_skipped,
+        "overlapSkippedObservations": skipped,
+        "cropRejectedObservationCount": crop_rejected_count,
+        "cropStoreUnavailableObservationCount": store_unavailable_count,
+    }
+    return requests, local_items, diagnostics
 
 
 def attach_identity_embeddings(

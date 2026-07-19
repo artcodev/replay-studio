@@ -1,13 +1,10 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 from hashlib import sha256
 import io
 import json
-import os
 from typing import Any
 
-import cv2
 import numpy as np
 from PIL import Image
 
@@ -16,27 +13,10 @@ from .provider_contract import EMBEDDING_DIMENSION, ProviderEmbedding, ProviderU
 from .request_contract import IdentityRequestError
 
 
-EVIDENCE_FINGERPRINT_VERSION = "pixel-evidence-v1"
+# v2: fingerprints and cache keys are computed over decoded store-crop
+# pixels — the worker no longer sees frames, bboxes or crop policies.
+EVIDENCE_FINGERPRINT_VERSION = "pixel-evidence-v2"
 KNOWN_IDENTITY_ROLES = {"ball", "goalkeeper", "other", "player", "referee"}
-
-
-@dataclass(frozen=True)
-class QualityPolicy:
-    minimum_width: int = 16
-    minimum_height: int = 30
-    minimum_sharpness: float = 12.0
-    padding_ratio: float = 0.08
-
-    @classmethod
-    def from_environment(cls) -> "QualityPolicy":
-        return cls(
-            minimum_width=max(1, int(os.environ.get("REID_MIN_CROP_WIDTH", "16"))),
-            minimum_height=max(1, int(os.environ.get("REID_MIN_CROP_HEIGHT", "30"))),
-            minimum_sharpness=max(
-                0.0, float(os.environ.get("REID_MIN_SHARPNESS", "12"))
-            ),
-            padding_ratio=max(0.0, float(os.environ.get("REID_CROP_PADDING", "0.08"))),
-        )
 
 
 def decode_image(data: bytes, file_index: int) -> np.ndarray:
@@ -45,60 +25,12 @@ def decode_image(data: bytes, file_index: int) -> np.ndarray:
         return np.asarray(image)
     except Exception as exc:
         raise IdentityRequestError(
-            f"Frame fileIndex={file_index} is not a readable image"
+            f"Crop fileIndex={file_index} is not a readable image"
         ) from exc
-
-
-def crop_observation(
-    image: np.ndarray,
-    bbox: dict,
-    policy: QualityPolicy,
-) -> tuple[np.ndarray, dict, list[str]]:
-    height, width = image.shape[:2]
-    x = float(bbox["x"])
-    y = float(bbox["y"])
-    box_width = float(bbox["width"])
-    box_height = float(bbox["height"])
-    padding_x = box_width * policy.padding_ratio
-    padding_y = box_height * policy.padding_ratio
-    requested = (
-        int(np.floor(x - padding_x)),
-        int(np.floor(y - padding_y)),
-        int(np.ceil(x + box_width + padding_x)),
-        int(np.ceil(y + box_height + padding_y)),
-    )
-    x1 = min(width, max(0, requested[0]))
-    y1 = min(height, max(0, requested[1]))
-    x2 = min(width, max(0, requested[2]))
-    y2 = min(height, max(0, requested[3]))
-    crop = image[y1:y2, x1:x2]
-    border_clipped = requested != (x1, y1, x2, y2)
-    sharpness = 0.0
-    if crop.size:
-        gray = cv2.cvtColor(crop, cv2.COLOR_RGB2GRAY)
-        sharpness = float(cv2.Laplacian(gray, cv2.CV_64F).var())
-    reasons = []
-    if box_width < policy.minimum_width or box_height < policy.minimum_height:
-        reasons.append("crop-too-small")
-    if not crop.size:
-        reasons.append("crop-outside-frame")
-    elif sharpness < policy.minimum_sharpness:
-        reasons.append("crop-too-blurry")
-    quality = {
-        "cropWidth": int(max(0, x2 - x1)),
-        "cropHeight": int(max(0, y2 - y1)),
-        "sourceBoxWidth": round(box_width, 3),
-        "sourceBoxHeight": round(box_height, 3),
-        "borderClipped": border_clipped,
-        "sharpness": round(sharpness, 4),
-    }
-    return crop, quality, reasons
 
 
 def cache_key(
     crop: np.ndarray,
-    bbox: dict,
-    policy: QualityPolicy,
     provider_info: dict[str, Any],
 ) -> str:
     namespace = {
@@ -111,15 +43,6 @@ def cache_key(
         or provider_info.get("modelVersion"),
         "hrnetCheckpointSha256": provider_info.get("hrnetCheckpointSha256"),
         "soccerNetCommit": provider_info.get("soccerNetCommit"),
-        "bbox": {
-            key: float(bbox[key]).hex() for key in ("x", "y", "width", "height")
-        },
-        "cropPolicy": {
-            "minimumWidth": policy.minimum_width,
-            "minimumHeight": policy.minimum_height,
-            "minimumSharpness": float(policy.minimum_sharpness).hex(),
-            "paddingRatio": float(policy.padding_ratio).hex(),
-        },
         "cropShape": list(crop.shape),
         "cropDtype": str(crop.dtype),
     }
@@ -140,14 +63,6 @@ def evidence_fingerprint(crop: np.ndarray) -> str:
     digest.update(b"\0")
     digest.update(np.ascontiguousarray(crop).tobytes())
     return f"{EVIDENCE_FINGERPRINT_VERSION}:{digest.hexdigest()}"
-
-
-def rejected_cache_entry(quality: dict, reasons: list[str]) -> IdentityCacheEntry:
-    return IdentityCacheEntry(
-        usable=False,
-        quality=dict(quality),
-        rejection_reasons=tuple(str(reason) for reason in reasons),
-    )
 
 
 def provider_cache_entry(

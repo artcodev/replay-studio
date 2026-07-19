@@ -70,6 +70,59 @@ function createLine(segment: PathTrackingSegment, source: SelectedPathSource) {
   return pathLine
 }
 
+/**
+ * Renders the full trajectory of every player track at once — a synoptic
+ * overview of the whole moment. Lines reuse the selected-path styling at a
+ * reduced opacity so the focused selected path stays readable on top.
+ */
+export class AllPathsLayer {
+  private group: THREE.Group | null = null
+
+  constructor(private readonly target: THREE.Scene) {}
+
+  rebuild(scene: SceneDocument, visible: boolean) {
+    if (this.group) {
+      this.target.remove(this.group)
+      disposeObjectResources([this.group])
+      this.group = null
+    }
+    if (!visible) return
+    this.group = new THREE.Group()
+    this.group.userData.kind = 'all-track-paths'
+    for (const track of scene.payload.tracks) {
+      const normalized = pathTrackingPoints(track.keyframes).map((point) => point.keyframe)
+      const segments = buildPathTrackingSegments(
+        normalized,
+        pathTrackingOptionsForSubject('player'),
+      )
+      const source: SelectedPathSource = {
+        subjectId: track.id,
+        keyframes: track.keyframes,
+        color: new THREE.Color(track.color),
+        ball: false,
+      }
+      for (const segment of segments) {
+        const line = createLine(segment, source)
+        const material = line.material as THREE.Material & { opacity: number }
+        material.opacity *= 0.42
+        line.renderOrder -= 4
+        line.userData.kind = `all-paths-${line.userData.kind}`
+        this.group.add(line)
+      }
+    }
+    this.target.add(this.group)
+  }
+
+  dispose() {
+    if (this.group) {
+      this.target.remove(this.group)
+      disposeObjectResources([this.group])
+      this.group = null
+    }
+  }
+}
+
+
 export class SelectedPathLayer {
   private group: THREE.Group | null = null
   private cursor: THREE.Mesh<THREE.RingGeometry, THREE.MeshBasicMaterial> | null = null

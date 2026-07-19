@@ -12,6 +12,7 @@ import { SelectionLayer } from '../features/three-viewport/selectionLayer'
 import {
   resolveSelectedPathSource,
   SelectedPathLayer,
+  AllPathsLayer,
 } from '../features/three-viewport/selectedPathLayer'
 import {
   type CameraPreset,
@@ -33,6 +34,7 @@ const props = withDefaults(defineProps<{
   showBall?: boolean
   showAnalysisMarkers?: boolean
   showPathTracking?: boolean
+  showAllPaths?: boolean
   ballSelected?: boolean
   activePlayerAction?: PlayerActionPlaybackState | null
   frameAnalysis: FrameAnalysis | null
@@ -42,6 +44,7 @@ const props = withDefaults(defineProps<{
   showBall: true,
   showAnalysisMarkers: true,
   showPathTracking: false,
+  showAllPaths: false,
   ballSelected: false,
   activePlayerAction: null,
   ballEditMode: false,
@@ -65,6 +68,7 @@ let playerLayer: PlayerLayer | null = null
 let ballLayer: BallLayer | null = null
 let analysisMarkerLayer: AnalysisMarkerLayer | null = null
 let selectedPathLayer: SelectedPathLayer | null = null
+let allPathsLayer: AllPathsLayer | null = null
 let selectionLayer: SelectionLayer | null = null
 let pointerSelection: ViewportPointerSelection | null = null
 
@@ -89,6 +93,10 @@ function rebuildBallTrail() {
 function rebuildSelectedPath() {
   selectedPathLayer?.rebuild(selectedPathSource.value, props.showPathTracking, props.currentTime)
   updateObjects()
+}
+
+function rebuildAllPaths() {
+  allPathsLayer?.rebuild(props.scene, props.showAllPaths)
 }
 
 function updateObjects() {
@@ -130,11 +138,13 @@ onMounted(() => {
   ballLayer = new BallLayer(surface.scene, shadows)
   analysisMarkerLayer = new AnalysisMarkerLayer(surface.scene)
   selectedPathLayer = new SelectedPathLayer(surface.scene)
+  allPathsLayer = new AllPathsLayer(surface.scene)
   selectionLayer = new SelectionLayer(surface.scene)
 
   rebuildPlayers()
   rebuildBallTrail()
   rebuildSelectedPath()
+  rebuildAllPaths()
   analysisMarkerLayer.rebuild(props.frameAnalysis)
   analysisMarkerLayer.setVisible(props.showAnalysisMarkers)
   applyRenderQuality()
@@ -170,8 +180,15 @@ watch(
   () => props.scene.payload.tracks.map(
     (track) => `${track.id}:${track.number}:${track.label}:${track.color}`,
   ).join('|'),
-  rebuildPlayers,
+  () => {
+    rebuildPlayers()
+    rebuildAllPaths()
+  },
 )
+// The scene reference is replaced wholesale after a run/reload; per-track
+// keyframes are too dense to fingerprint in a watcher.
+watch(() => props.scene, rebuildAllPaths)
+watch(() => props.showAllPaths, rebuildAllPaths)
 watch(() => JSON.stringify(props.scene.payload.ball.keyframes), rebuildBallTrail)
 watch(
   () => [

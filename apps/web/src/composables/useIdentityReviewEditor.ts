@@ -4,7 +4,10 @@ import type { IdentityReviewCandidateDecision } from '../lib/identityReview'
 import type { CanonicalPerson } from '../types/identity'
 import type { SceneDocument } from '../types/scene'
 import type { Track } from '../types/tracking'
-import type { IdentityReviewResponse } from '../types/identityReview'
+import type {
+  IdentityReviewArtifactCapability,
+  IdentityReviewResponse,
+} from '../types/identityReview'
 import type { ExternalPlayer } from '../types/match'
 
 type IdentityReviewEditorOptions = {
@@ -17,6 +20,7 @@ type IdentityReviewEditorOptions = {
   selectedCanonicalPersonId: Ref<string | null>
   selectedTrackId: Ref<string | null>
   selectedFramePersonId: Ref<string | null>
+  activeTab: Ref<'binding' | 'qa' | 'events'>
   saveState: Ref<string>
   error: Ref<string | null>
   canonicalPersonById: (id: string) => CanonicalPerson | null
@@ -34,45 +38,112 @@ export function useIdentityReviewEditor(options: IdentityReviewEditorOptions) {
   const decisionSaving = ref(false)
   const rosterBindingSaving = ref(false)
   let requestId = 0
+  let loadedKey: string | null = null
+  let inFlight: { key: string; promise: Promise<void> } | null = null
+
+  type LoadTarget = IdentityReviewArtifactCapability & {
+    projectId: string
+    key: string
+  }
+
+  function loadTarget(sceneId?: string): LoadTarget | null {
+    const scene = options.scene.value
+    const selectedPersonId = options.selectedCanonicalPersonId.value
+    if (
+      !scene
+      || (sceneId !== undefined && scene.id !== sceneId)
+      || !selectedPersonId
+      || options.activeTab.value !== 'binding'
+      || options.reconstructing.value
+      || options.reconstructionRunning()
+      || !scene.payload.canonicalPeople?.some(
+        (person) => person.canonicalPersonId === selectedPersonId,
+      )
+    ) return null
+
+    const video = scene.payload.videoAsset
+    const reconstruction = video?.reconstruction
+    const diagnostics = reconstruction?.artifactManifest?.artifacts.identityDiagnostics
+    const timeline = reconstruction?.artifactManifest?.artifacts.identityTimeline
+    if (
+      !video?.selectedSegmentId
+      || reconstruction?.status !== 'ready'
+      || !diagnostics
+      || !timeline
+    ) return null
+
+    const projectId = options.projectId()
+    return {
+      projectId,
+      sceneId: scene.id,
+      revision: scene.revision,
+      identityDiagnostics: diagnostics,
+      identityTimeline: timeline,
+      key: JSON.stringify([
+        projectId,
+        scene.id,
+        scene.revision,
+        diagnostics.id,
+        diagnostics.sha256,
+        timeline.id,
+        timeline.sha256,
+      ]),
+    }
+  }
 
   function invalidate() {
     requestId += 1
+    loadedKey = null
+    inFlight = null
     snapshot.value = null
     loading.value = false
     reviewError.value = null
   }
 
-  async function load(sceneId: string) {
+  function requestReview(sceneId: string | undefined, force: boolean): Promise<void> {
+    const target = loadTarget(sceneId)
+    if (!target) return Promise.resolve()
+    if (!force && loadedKey === target.key && snapshot.value) return Promise.resolve()
+    if (!force && inFlight?.key === target.key) return inFlight.promise
+
     const currentRequest = ++requestId
-    const reconstruction = options.scene.value?.id === sceneId
-      ? options.scene.value.payload.videoAsset?.reconstruction
-      : null
-    if (reconstruction?.status === 'queued' || reconstruction?.status === 'processing') {
-      snapshot.value = null
-      loading.value = false
-      reviewError.value = null
-      return
-    }
     loading.value = true
     reviewError.value = null
-    try {
-      const review = await identityClient.review(options.projectId(), sceneId)
-      if (currentRequest !== requestId || options.scene.value?.id !== sceneId) return
-      if (review.revision !== options.scene.value.revision) {
+    let promise!: Promise<void>
+    promise = (async () => {
+      try {
+        const review = await identityClient.review(target.projectId, target.sceneId)
+        if (currentRequest !== requestId || loadTarget(target.sceneId)?.key !== target.key) return
+        if (review.sceneId !== target.sceneId || review.revision !== target.revision) {
+          loadedKey = null
+          snapshot.value = null
+          reviewError.value = 'Identity review changed with the scene; reload the review.'
+          return
+        }
+        loadedKey = target.key
+        snapshot.value = review
+      } catch (cause) {
+        if (currentRequest !== requestId || loadTarget(target.sceneId)?.key !== target.key) return
+        loadedKey = null
         snapshot.value = null
-        reviewError.value = 'Identity review changed with the scene; reload the review.'
-        return
+        reviewError.value = cause instanceof Error
+          ? cause.message
+          : 'Could not load identity review evidence'
+      } finally {
+        if (inFlight?.promise === promise) inFlight = null
+        if (currentRequest === requestId) loading.value = false
       }
-      snapshot.value = review
-    } catch (cause) {
-      if (currentRequest !== requestId || options.scene.value?.id !== sceneId) return
-      snapshot.value = null
-      reviewError.value = cause instanceof Error
-        ? cause.message
-        : 'Could not load identity review evidence'
-    } finally {
-      if (currentRequest === requestId) loading.value = false
-    }
+    })()
+    inFlight = { key: target.key, promise }
+    return promise
+  }
+
+  function ensureLoaded(sceneId?: string) {
+    return requestReview(sceneId, false)
+  }
+
+  function reload(sceneId?: string) {
+    return requestReview(sceneId, true)
   }
 
   function selectCanonicalPerson(canonicalPersonId: string) {
@@ -100,7 +171,7 @@ export function useIdentityReviewEditor(options: IdentityReviewEditorOptions) {
       void options.startReconstructionPolling(sceneId)
     } else {
       options.saveState.value = readyLabel
-      void load(sceneId)
+      void ensureLoaded(sceneId)
     }
   }
 
@@ -243,7 +314,9 @@ export function useIdentityReviewEditor(options: IdentityReviewEditorOptions) {
     error: reviewError,
     decisionSaving,
     rosterBindingSaving,
-    load,
+    ensureLoaded,
+    reload,
+    load: reload,
     invalidate,
     confirm,
     reject,

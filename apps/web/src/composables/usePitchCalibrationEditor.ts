@@ -2,6 +2,7 @@ import { ref, type Ref } from 'vue'
 import { calibrationClient } from '../lib/api/calibration'
 import { clientPointToContainedMedia } from '../lib/videoReviewTransform'
 import { usePitchCalibrationPresentation } from '../features/calibration/usePitchCalibrationPresentation'
+import { preserveSceneActorSelection } from '../features/editor/selection/preserveSceneActorSelection'
 import type { CalibrationFrameEvidence, PitchCalibrationPreset } from '../types/calibration'
 import type { SceneDocument } from '../types/scene'
 
@@ -220,28 +221,16 @@ export function usePitchCalibrationEditor(options: PitchCalibrationEditorOptions
     options.playing.value = false
     options.sourceVideo.value?.pause()
     try {
-      const canonicalSelection = options.selectedCanonicalPersonId.value
-      options.scene.value = await calibrationClient.setAttackingGoal(options.projectId(), scene.id, side)
+      const updated = await calibrationClient.setAttackingGoal(options.projectId(), scene.id, side)
+      const selection = preserveSceneActorSelection(updated, {
+        trackId: options.selectedTrackId.value,
+        canonicalPersonId: options.selectedCanonicalPersonId.value,
+      })
+      options.scene.value = updated
       options.clearFrameAnalysis()
       draft.value = null
-      const current = options.scene.value
-      const canonicalStillExists = canonicalSelection
-        ? current.payload.canonicalPeople?.some(
-          (person) => person.canonicalPersonId === canonicalSelection,
-        ) === true
-        : false
-      options.selectedTrackId.value = canonicalStillExists
-        ? current.payload.tracks.find(
-          (track) => track.canonicalPersonId === canonicalSelection,
-        )?.id ?? null
-        : current.payload.tracks.some((track) => track.id === options.selectedTrackId.value)
-          ? options.selectedTrackId.value
-          : current.payload.tracks[0]?.id ?? null
-      options.selectedCanonicalPersonId.value = canonicalStillExists
-        ? canonicalSelection
-        : current.payload.tracks.find(
-          (track) => track.id === options.selectedTrackId.value,
-        )?.canonicalPersonId ?? null
+      options.selectedTrackId.value = selection.trackId
+      options.selectedCanonicalPersonId.value = selection.canonicalPersonId
       options.saveState.value = `Attack direction set to ${side} · calibration unchanged`
     } catch (cause) {
       options.error.value = cause instanceof Error ? cause.message : 'Could not change pitch side'

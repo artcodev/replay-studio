@@ -7,6 +7,7 @@ from hashlib import sha256
 from pathlib import Path
 from typing import Any
 
+from .ball_detection_contract import GENERIC_FALLBACK_BACKEND
 from .ball_detection_cache_contract import (
     BALL_DETECTION_CACHE_SCHEMA_VERSION,
     BallDetectionCacheError,
@@ -21,6 +22,12 @@ class BallDetectionCacheEntry:
     path: Path
     primary_backend: str
     frames: tuple[dict[str, Any], ...]
+    failed_frame_count: int
+    fallback_frame_count: int
+
+    @property
+    def is_clean(self) -> bool:
+        return self.failed_frame_count == 0 and self.fallback_frame_count == 0
 
     def as_pipeline_data(
         self,
@@ -31,6 +38,28 @@ class BallDetectionCacheEntry:
         ]
         batches = [deepcopy(frame["batch"]) for frame in self.frames]
         return resolved, batches
+
+
+def frame_degradation(batch: Mapping[str, Any]) -> tuple[bool, bool]:
+    """Return the stored (failed, fallback) markers of one dense-frame batch."""
+
+    failed = str(batch.get("backend") or "") == GENERIC_FALLBACK_BACKEND
+    fallback = batch.get("fallbackReason") not in (None, "")
+    return failed, fallback
+
+
+def batch_degradation_counts(
+    batches: Sequence[Mapping[str, Any]],
+) -> tuple[int, int]:
+    """Count (failed, fallback) frames from their per-frame batch markers."""
+
+    failed_total = 0
+    fallback_total = 0
+    for batch in batches:
+        failed, fallback = frame_degradation(batch)
+        failed_total += int(failed)
+        fallback_total += int(fallback)
+    return failed_total, fallback_total
 
 
 def frame_payload(
@@ -67,45 +96,51 @@ def frame_payload(
     return frames
 
 
-def is_clean_primary_payload(
+def validate_ball_detection_payload(
     payload: Mapping[str, Any],
-    *,
-    failed_frame_count: int = 0,
-    fallback_frame_count: int = 0,
-) -> bool:
-    if failed_frame_count != 0 or fallback_frame_count != 0:
-        return False
+) -> tuple[dict[str, Any], ...] | None:
+    """Validate stored frames structurally; degraded frames must carry markers.
+
+    A frame is either explicitly degraded (fallback backend and/or a recorded
+    ``fallbackReason``) or it must be verifiably clean primary output end to
+    end. Unmarked foreign-backend data is rejected rather than silently
+    accepted as primary evidence.
+    """
+
     primary_backend = str(payload.get("primaryBackend") or "")
     frames = payload.get("frames")
     if not primary_backend or not isinstance(frames, list) or not frames:
-        return False
+        return None
     if payload.get("frameCount") != len(frames):
-        return False
+        return None
     for expected_index, frame in enumerate(frames):
         if not isinstance(frame, Mapping) or frame.get("frameIndex") != expected_index:
-            return False
+            return None
         if not isinstance(frame.get("detections"), list):
-            return False
+            return None
         batch = frame.get("batch")
         if not isinstance(batch, Mapping):
-            return False
+            return None
         if batch.get("frameIndex") != expected_index:
-            return False
+            return None
+        if not str(batch.get("backend") or ""):
+            return None
+        failed, fallback = frame_degradation(batch)
+        if failed or fallback:
+            continue
         if str(batch.get("backend") or "") != primary_backend:
-            return False
-        if batch.get("fallbackReason") not in (None, ""):
-            return False
+            return None
         metadata = batch.get("metadata")
         if isinstance(metadata, Mapping) and (
             metadata.get("fallback") is True or metadata.get("fallbackReason")
         ):
-            return False
+            return None
         for detection in frame["detections"]:
             if not isinstance(detection, Mapping):
-                return False
+                return None
             detector_backend = detection.get("detectorBackend")
             if detector_backend is not None and str(detector_backend) != primary_backend:
-                return False
+                return None
             provenance = detection.get("provenance")
             if isinstance(provenance, Mapping):
                 provenance_backend = provenance.get("backend")
@@ -113,8 +148,8 @@ def is_clean_primary_payload(
                     provenance_backend is not None
                     and str(provenance_backend) != primary_backend
                 ):
-                    return False
-    return True
+                    return None
+    return tuple(frames)
 
 
 def entry_from_envelope(
@@ -139,13 +174,17 @@ def entry_from_envelope(
         return None
     if envelope.get("payloadFingerprint") != payload_fingerprint:
         return None
-    if not is_clean_primary_payload(payload):
+    frames = validate_ball_detection_payload(payload)
+    if frames is None:
         return None
-    frames = payload.get("frames")
-    assert isinstance(frames, list)
+    failed_frame_count, fallback_frame_count = batch_degradation_counts(
+        [frame["batch"] for frame in frames]
+    )
     return BallDetectionCacheEntry(
         cache_key=expected_key,
         path=path,
         primary_backend=str(payload["primaryBackend"]),
         frames=tuple(deepcopy(frames)),
+        failed_frame_count=failed_frame_count,
+        fallback_frame_count=fallback_frame_count,
     )

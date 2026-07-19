@@ -3,7 +3,10 @@ from __future__ import annotations
 from typing import Mapping
 
 from .reconstruction_calibration_selection import select_representative_calibration
-from .reconstruction_dense_ball_phase import detect_dense_ball_phase
+from .reconstruction_dense_ball_phase import (
+    detect_dense_ball_phase,
+    skipped_dense_ball_result,
+)
 from .reconstruction_detection_contract import (
     CalibrationPhaseResult,
     FrameAnalysisResult,
@@ -32,6 +35,7 @@ def detect_and_calibrate_phase(
     reconstruction_request: Mapping,
     ball_backend: str,
     ball_detection_input: Mapping,
+    ball_detection_profile: str = "automatic",
     progress: ReconstructionProgress,
 ) -> tuple[FrameAnalysisResult, CalibrationPhaseResult]:
     frames = load_sampled_frames(scene, progress)
@@ -55,11 +59,6 @@ def detect_and_calibrate_phase(
         calibration_inputs,
         progress,
     )
-    identity_diagnostics, identity_warnings = extract_reid_evidence(
-        frames,
-        sampled.person_frames,
-        progress,
-    )
     temporal = solve_temporal_calibration_phase(
         scene,
         frames,
@@ -73,20 +72,42 @@ def detect_and_calibrate_phase(
         bool(calibration_inputs.manual_stabilized_by_sample),
         progress,
     )
-    dense_ball = detect_dense_ball_phase(
-        scene,
-        detector=runtime.ball_detector,
-        fallback_detector=runtime.ball_fallback_detector,
-        sampled_frames=frames,
-        generic_fallback_ball_frames=sampled.generic_ball_frames,
-        detector_input=ball_detection_input,
-        backend=ball_backend,
-        frame_sizes=sampled.calibration.frame_sizes,
-        temporal_calibration=temporal,
-        frame_evidence=sampled.calibration.frame_evidence,
-        camera_transforms=sampled.calibration.camera_transforms,
-        progress=progress,
+    # ReID runs after the temporal solve: worker round-trips start only once
+    # camera quality is known (a calibration-preview can stop before them).
+    identity_diagnostics, identity_warnings = extract_reid_evidence(
+        frames,
+        sampled.person_frames,
+        progress,
     )
+    if ball_detection_profile == "skip-manual-authoritative":
+        # The queued profile pinned the manual trajectory as authoritative:
+        # the most expensive phase is skipped explicitly, never silently.
+        dense_ball = skipped_dense_ball_result(ball_detection_profile)
+        progress.update(
+            "detection",
+            3,
+            "Skipping dense ball detection",
+            "The manual ball trajectory is authoritative for this run.",
+            62,
+            84,
+            completed=1,
+            total=1,
+        )
+    else:
+        dense_ball = detect_dense_ball_phase(
+            scene,
+            detector=runtime.ball_detector,
+            fallback_detector=runtime.ball_fallback_detector,
+            sampled_frames=frames,
+            generic_fallback_ball_frames=sampled.generic_ball_frames,
+            detector_input=ball_detection_input,
+            backend=ball_backend,
+            frame_sizes=sampled.calibration.frame_sizes,
+            temporal_calibration=temporal,
+            frame_evidence=sampled.calibration.frame_evidence,
+            camera_transforms=sampled.calibration.camera_transforms,
+            progress=progress,
+        )
     selection = select_representative_calibration(
         frames=frames,
         frame_size=sampled.calibration.frame_size,

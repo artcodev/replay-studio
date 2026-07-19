@@ -138,6 +138,9 @@ select, input { color-scheme: dark; }
 .reconstruction-input-warning span { color: #b8b49f; font-size: 9px; line-height: 1.45; }
 .reconstruction-model-field { display: grid; grid-template-columns: 1fr 150px; align-items: center; gap: 10px; margin-bottom: 8px; color: #89938d; font-size: 11px; }
 .reconstruction-model-field select { width: 100%; height: 36px; padding: 0 8px; border: 1px solid var(--line); border-radius: 3px; background: #090c0c; color: #d8ded9; font-size: 11px; }
+.reconstruction-skip-ball { grid-template-columns: auto 1fr; }
+.reconstruction-skip-ball-control { display: flex; align-items: flex-start; gap: 7px; color: #b8b49f; font-size: 10px; line-height: 1.45; cursor: pointer; }
+.reconstruction-skip-ball-control input { margin-top: 1px; accent-color: var(--accent); }
 .reconstruction-menu-primary { width: 100%; min-height: 38px; border: 1px solid rgba(255,211,106,.5); border-radius: 3px; background: rgba(255,211,106,.09); color: var(--accent); font-size: 12px; font-weight: 650; cursor: pointer; }
 .reconstruction-menu-primary:hover { background: rgba(255,211,106,.14); }
 .reconstruction-menu-primary:disabled,

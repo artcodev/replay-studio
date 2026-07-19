@@ -411,6 +411,12 @@ def test_invalid_claim_terminalizes_compact_telemetry_once(persistence) -> None:
         assert "does not match" in analysis.error
         assert analysis.completed_at is not None
         assert session.get(ReconstructionLeaseRow, "scene-1") is None
+        preserved = session.get(SceneRow, "scene-1").payload
+        preserved_reconstruction = preserved["payload"]["videoAsset"][
+            "reconstruction"
+        ]
+        assert preserved_reconstruction["runId"] == "other-run"
+        assert preserved_reconstruction["status"] == "queued"
 
 
 def test_fenced_progress_is_compact_and_never_selects_scene_payload(persistence) -> None:
@@ -582,6 +588,64 @@ def test_terminal_hook_only_adds_identity_sync_diagnostics(persistence) -> None:
     after = runs.get("run-1")
     assert after.status == "succeeded"
     assert after.diagnostics["identitySync"]["status"] == "succeeded"
+
+
+def test_startup_sweep_repairs_a_crashed_identity_sync_epilogue(
+    persistence, monkeypatch
+) -> None:
+    from app.analysis_runtime import recover_missed_identity_sync
+
+    project_store, scene_documents, reconstruction_runs, scene, _sessions, _engine = (
+        persistence
+    )
+    fingerprint = scene["payload"]["videoAsset"]["reconstruction"]["inputFingerprint"]
+    assert reconstruction_runs.claim_reconstruction_run(
+        "scene-1", "run-1", fingerprint, "worker-crash"
+    )
+    result = scene_documents.get("scene-1")
+    assert result is not None
+    result["payload"]["canonicalPeople"] = [
+        {
+            "canonicalPersonId": "canonical-home-9",
+            "displayName": "Home Nine",
+            "teamId": "home",
+            "role": "player",
+            "identityStatus": "provisional",
+            "observations": [{"frameIndex": 1}],
+        }
+    ]
+    result["payload"]["videoAsset"]["reconstruction"].update(
+        {
+            "status": "ready",
+            "processingStatus": "succeeded",
+            "progress": {"phase": "complete", "overallPercent": 100},
+        }
+    )
+    assert reconstruction_runs.put_if_reconstruction_run(
+        result, "run-1", fingerprint, "worker-crash"
+    )
+    # The worker died here: the fenced terminal commit exists, but the
+    # identity-sync epilogue never ran and telemetry has no identitySync.
+    runs = _analysis_runs(persistence)
+    assert "identitySync" not in dict(runs.get("run-1").diagnostics or {})
+
+    def sweep() -> int:
+        return recover_missed_identity_sync(
+            scenes=scene_documents,
+            runs=runs,
+            projects=project_store,
+            resources=_project_resources(persistence),
+            matches=_project_matches(persistence),
+            identities=_project_identities(persistence),
+        )
+
+    repaired = sweep()
+
+    assert repaired == 1
+    after = runs.get("run-1")
+    assert after.diagnostics["identitySync"]["status"] == "succeeded"
+    # A second sweep finds nothing left to repair.
+    assert sweep() == 0
 
 
 def test_terminal_identity_sync_uses_scene_owner_when_telemetry_is_missing(

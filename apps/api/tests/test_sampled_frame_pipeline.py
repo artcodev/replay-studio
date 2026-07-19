@@ -71,6 +71,11 @@ def test_streaming_detection_passes_one_decoded_image_to_calibration(
     )
     monkeypatch.setattr(sampled_detection, "SampledCalibrationAccumulator", Accumulator)
 
+    def unreadable_frame(_path):
+        raise OSError("synthetic frame path has no bytes")
+
+    monkeypatch.setattr(sampled_detection, "frame_content_sha256", unreadable_frame)
+
     calibration_inputs = SampledCalibrationInputs(
         manual_reference={},
         frame_calibrations={},
@@ -110,4 +115,6 @@ def test_streaming_detection_passes_one_decoded_image_to_calibration(
         "baseBoundary": (
             "pre-annotation/pre-calibration/pre-tracking/pre-reid/pre-ocr"
         ),
+        # An unreadable frame disables crop extraction transparently.
+        "personCropStore": {"hits": 0, "stores": 0, "storeErrors": 0},
     }

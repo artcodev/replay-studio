@@ -5,6 +5,7 @@ export type ThreeViewOptionKey =
   | 'labels'
   | 'trajectory'
   | 'pathTracking'
+  | 'allPaths'
   | 'ball'
   | 'analysisMarkers'
 
@@ -21,6 +22,7 @@ export const THREE_VIEW_LAYER_ITEMS: ReadonlyArray<ThreeViewLayerItem> = Object.
   { key: 'labels', label: 'Player labels', detail: 'Names and shirt numbers' },
   { key: 'trajectory', label: 'Ball trajectory', detail: 'Tracked path through the moment' },
   { key: 'pathTracking', label: 'Path tracking', detail: 'Selected player or ball on video + 3D' },
+  { key: 'allPaths', label: 'All paths', detail: 'Every player trajectory across the whole moment' },
   { key: 'ball', label: 'Ball', detail: 'Tracked ball model' },
   { key: 'analysisMarkers', label: 'Analysis markers', detail: 'Current-frame detections' },
 ])
@@ -30,6 +32,7 @@ export const DEFAULT_THREE_VIEW_OPTIONS: Readonly<ThreeViewOptions> = Object.fre
   labels: true,
   trajectory: true,
   pathTracking: false,
+  allPaths: false,
   ball: true,
   analysisMarkers: true,
 })

@@ -73,7 +73,34 @@ class Settings(BaseSettings):
     ball_analysis_frame_rate: float = 25.0
     ball_wasb_worker_url: str | None = "http://127.0.0.1:8092/v1/detections"
     ball_wasb_timeout: float = 120.0
+    # "per-frame-window" (default) keeps the symmetric centered window per
+    # dense frame. "batched-sequence" opts into one multipart request per run
+    # of frames — ~3x fewer uploads/inferences at the cost of the worker's
+    # fixed window tiling at run boundaries. The value enters the queued
+    # detector input and therefore the cache contract and input fingerprint.
+    ball_wasb_transport: str = "per-frame-window"
+    # Frames per batched-sequence request; must stay at or below the worker's
+    # WASB_MAX_BATCH_FRAMES (96 by default) and is a multiple of the model's
+    # 3-frame window so tiling never pads mid-run.
+    ball_wasb_batch_size: int = 9
     ball_detection_failure_policy: str = "fallback"
+    # After a primary-detector failure the circuit serves the fallback for
+    # this many dense frames, then half-opens and retries the primary once.
+    # A transient worker outage therefore cannot degrade the rest of a clip.
+    ball_detection_circuit_retry_interval: int = 25
+    # Dense phases emit one progress tick per frame; each durable write is a
+    # full lease-fenced transaction. Quiet same-phase ticks are coalesced to
+    # this interval, while phase transitions and terminal ticks write always.
+    reconstruction_progress_write_interval_seconds: float = 1.0
+    # Every run appends a JSONL journal (one event per pipeline step and
+    # phase summary) so a finished analysis can be inspected independently.
+    # Journal ticks are local file appends and are never throttled.
+    analysis_run_log_enabled: bool = True
+    analysis_run_log_directory: str = "./logs/analysis-runs"
+    # A deterministically crashing child (for example OOM under CPU
+    # inference) is bounded: after this many claims of the same run the job
+    # is terminally invalidated with its last error instead of looping.
+    reconstruction_max_attempts: int = 5
     # Accuracy-first local default. Docker Compose overrides this with the
     # service-network hostname; set an empty value explicitly to opt into the
     # smaller local keypoint fallback.
@@ -88,18 +115,47 @@ class Settings(BaseSettings):
     # ceiling keeps every sampled frame within the solver's two-second window
     # without paying the cold PnLCalib cost on every 10 FPS frame.
     calibration_anchor_max_gap_seconds: float = 1.0
+    # PnLCalib anchor results are memoized on disk by exact frame bytes and
+    # the worker's model identity, so warm rebuilds skip re-uploading and
+    # re-inferring anchors that the worker already solved (or already
+    # declared unsolvable) for this model.
+    calibration_anchor_cache_enabled: bool = True
+    # The observed pitch-line mask is a pure function of the frame bytes;
+    # caching it removes temporal validation's full second decode pass.
+    pitch_line_mask_cache_enabled: bool = True
     # PRTReID lives in its own pinned PyTorch runtime. Keep the URL optional so
     # reconstruction can report missing identity evidence without pretending a
     # generic image embedding is an equivalent fallback.
     identity_worker_url: str | None = "http://127.0.0.1:8091"
     identity_worker_timeout: float = 900.0
     identity_worker_batch_size: int = 4
+    # Per-observation embeddings are memoized on disk by the exact crop bytes
+    # and the worker's model contract, so warm rebuilds survive worker
+    # restarts without re-embedding crops.
+    identity_embedding_cache_enabled: bool = True
+    # Person crops are cut once in the detection pass (the only frame decode
+    # boundary) with the ReID padding policy; ReID and jersey OCR read crop
+    # bytes from the store instead of decoding frames again.
+    person_crop_padding_ratio: float = 0.08
+    person_crop_minimum_width: int = 16
+    person_crop_minimum_height: int = 30
+    person_crop_minimum_sharpness: float = 12.0
+    # A crop whose bbox is overlapped by another detection above this IoU
+    # contains two players: its embedding is noise for the tracker's ReID
+    # gate and is skipped explicitly (0 disables the filter).
+    identity_crop_overlap_iou_threshold: float = 0.45
+    # One transient transport error must not discard the embeddings that
+    # earlier batches already produced: retry the failed batch, then return
+    # the partial result with an explicit partialFailure diagnostic.
+    identity_worker_batch_retry_count: int = 1
     # Jersey OCR has an intentionally provider-neutral HTTP contract. MMOCR,
     # EasyOCR and a future tracklet-level PARSeq provider live outside the API
     # runtime and must fail explicitly instead of fabricating shirt numbers.
     jersey_ocr_worker_url: str | None = "http://127.0.0.1:8093"
     jersey_ocr_worker_timeout: float = 900.0
     jersey_ocr_worker_batch_size: int = 32
+    jersey_ocr_worker_batch_retry_count: int = 1
+    jersey_ocr_cache_enabled: bool = True
     pitch_keypoint_model: str = str(
         Path(__file__).resolve().parent.parent / "models" / "football-pitch-detection.pt"
     )

@@ -13,7 +13,6 @@ from PIL import Image
 import pytest
 
 from identity_worker_service.cache import IdentityEmbeddingCache
-from identity_worker_service.evidence import QualityPolicy
 from identity_worker_service.main import create_app
 from identity_worker_service.provider_contract import (
     EmbeddingSample,
@@ -161,17 +160,27 @@ def test_non_finite_role_logits_omit_role_but_keep_embedding() -> None:
     assert np.linalg.norm(result.embedding) == pytest.approx(1.0)
 
 
-def _jpeg(pattern: str = "sharp", size: tuple[int, int] = (96, 128)) -> bytes:
+def _jpeg(shift: int = 0, size: tuple[int, int] = (44, 76)) -> bytes:
+    """One deterministic crop image; different shifts give different bytes."""
+
     width, height = size
-    if pattern == "sharp":
-        yy, xx = np.indices((height, width))
-        values = ((xx // 3 + yy // 3) % 2 * 255).astype(np.uint8)
-    else:
-        values = np.full((height, width), 128, dtype=np.uint8)
+    yy, xx = np.indices((height, width))
+    values = (((xx + shift) // 3 + yy // 3) % 2 * 255).astype(np.uint8)
     image = np.stack([values, values, values], axis=-1)
     output = io.BytesIO()
     Image.fromarray(image).save(output, format="JPEG", quality=95)
     return output.getvalue()
+
+
+def _quality() -> dict:
+    return {
+        "cropWidth": 44,
+        "cropHeight": 76,
+        "sourceBoxWidth": 40.0,
+        "sourceBoxHeight": 70.0,
+        "borderClipped": False,
+        "sharpness": 55.0,
+    }
 
 
 def _call(app, method: str, path: str, **kwargs):
@@ -186,25 +195,42 @@ def _call(app, method: str, path: str, **kwargs):
     return asyncio.run(request())
 
 
-def _request(app, observations: list[dict], image: bytes | None = None):
+def _request(app, crops: list[tuple[str, bytes]], manifest: dict | None = None):
     return _call(
         app,
         "POST",
         "/v1/embeddings",
-        files=[("frames", ("frame.jpg", image or _jpeg(), "image/jpeg"))],
+        files=[
+            ("crops", (f"crop-{index}.jpg", data, "image/jpeg"))
+            for index, (_identifier, data) in enumerate(crops)
+        ],
         data={
             "manifest": json.dumps(
-                {
-                    "frames": [
+                manifest
+                if manifest is not None
+                else {
+                    "contractVersion": 2,
+                    "crops": [
                         {
+                            "observationId": identifier,
                             "frameIndex": 7,
-                            "fileIndex": 0,
-                            "observations": observations,
+                            "fileIndex": index,
+                            "quality": _quality(),
                         }
-                    ]
+                        for index, (identifier, _data) in enumerate(crops)
+                    ],
                 }
             )
         },
+    )
+
+
+def _cache() -> IdentityEmbeddingCache:
+    return IdentityEmbeddingCache(
+        dimension=256,
+        max_entries=16,
+        ttl_seconds=60,
+        wait_timeout_seconds=5,
     )
 
 
@@ -217,8 +243,27 @@ def test_health_ready_requires_a_loaded_real_provider_contract():
     assert ready.json()["backend"] == provider.backend
     assert ready.json()["dimension"] == 256
     assert ready.json()["modelVersion"] == "fake-model-v1"
-    assert ready.json()["evidenceFingerprintVersion"] == "pixel-evidence-v1"
-    assert ready.json()["cache"]["schemaVersion"] == "identity-embedding-cache.v1"
+    assert ready.json()["evidenceFingerprintVersion"] == "pixel-evidence-v2"
+    assert ready.json()["cache"] == {
+        "schemaVersion": "identity-embedding-cache.v3",
+        "enabled": True,
+        "maxEntries": 4096,
+        "ttlSeconds": 86400.0,
+        "waitTimeoutSeconds": 900.0,
+        "size": 0,
+        "inFlight": 0,
+        "configurationError": None,
+        "hits": 0,
+        "misses": 0,
+        "stores": 0,
+        "evictions": 0,
+        "expirations": 0,
+        "corruptMisses": 0,
+        "inRequestDeduplicated": 0,
+        "concurrentDeduplicated": 0,
+        "waitTimeouts": 0,
+        "providerFailures": 0,
+    }
 
 
 def test_missing_model_keeps_liveness_but_never_claims_readiness():
@@ -227,28 +272,24 @@ def test_missing_model_keeps_liveness_but_never_claims_readiness():
     ready = _call(app, "GET", "/health/ready")
     assert ready.status_code == 503
     assert "checkpoint is missing" in ready.json()["detail"]
-    response = _request(
-        app,
-        [{"observationId": "obs-1", "bbox": {"x": 10, "y": 10, "width": 40, "height": 70}}],
-    )
+    response = _request(app, [("obs-1", _jpeg())])
     assert response.status_code == 503
 
 
 def test_embeddings_are_normalized_and_keep_provider_evidence():
     provider = FakeProvider()
-    app = create_app(
-        provider,
-        preload=False,
-        quality_policy=QualityPolicy(minimum_width=12, minimum_height=20, minimum_sharpness=1),
-    )
-    response = _request(
-        app,
-        [{"observationId": "obs-1", "bbox": {"x": 10, "y": 10, "width": 40, "height": 70}}],
-    )
+    app = create_app(provider, preload=False)
+    response = _request(app, [("obs-1", _jpeg())])
     assert response.status_code == 200
     payload = response.json()
+    assert payload["evidenceFingerprintVersion"] == "pixel-evidence-v2"
     item = payload["items"][0]
     assert item["usable"] is True
+    assert item["frameIndex"] == 7
+    # Extraction quality travels with the manifest and is echoed verbatim.
+    assert item["quality"] == _quality()
+    assert item["rejectionReasons"] == []
+    assert item["evidenceFingerprint"].startswith("pixel-evidence-v2:")
     np.testing.assert_allclose(
         np.linalg.norm(np.asarray(item["embedding"])), 1.0, atol=1e-6
     )
@@ -258,66 +299,64 @@ def test_embeddings_are_normalized_and_keep_provider_evidence():
     assert provider.received == ["obs-1"]
 
 
-def test_small_and_blurry_crops_are_rejected_without_calling_provider():
-    provider = FakeProvider()
-    app = create_app(
-        provider,
-        preload=False,
-        quality_policy=QualityPolicy(minimum_width=20, minimum_height=30, minimum_sharpness=20),
-    )
-    observations = [
-        {"observationId": "small", "bbox": {"x": 5, "y": 5, "width": 10, "height": 20}},
-        {"observationId": "blurry", "bbox": {"x": 20, "y": 20, "width": 40, "height": 70}},
-    ]
-    response = _request(app, observations, _jpeg("flat"))
-    assert response.status_code == 200
-    items = {item["observationId"]: item for item in response.json()["items"]}
-    assert items["small"]["usable"] is False
-    assert "crop-too-small" in items["small"]["rejectionReasons"]
-    assert items["blurry"]["usable"] is False
-    assert "crop-too-blurry" in items["blurry"]["rejectionReasons"]
-    assert items["small"]["embedding"] is None
-    assert items["blurry"]["embedding"] is None
-    assert provider.received == []
+def test_undecodable_crop_bytes_fail_closed():
+    app = create_app(FakeProvider(), preload=False)
+    response = _request(app, [("obs-1", b"not-a-jpeg")])
+    assert response.status_code == 422
+    assert "not a readable image" in response.json()["detail"]
 
 
-def _usable_policy(**values) -> QualityPolicy:
-    defaults = {
-        "minimum_width": 12,
-        "minimum_height": 20,
-        "minimum_sharpness": 1,
-        "padding_ratio": 0.08,
-    }
-    defaults.update(values)
-    return QualityPolicy(**defaults)
-
-
-def _observation(identifier: str, *, x: float = 10) -> dict:
-    return {
-        "observationId": identifier,
-        "bbox": {"x": x, "y": 10, "width": 40, "height": 70},
-    }
-
-
-def _cache() -> IdentityEmbeddingCache:
-    return IdentityEmbeddingCache(
-        dimension=256,
-        max_entries=16,
-        ttl_seconds=60,
-        wait_timeout_seconds=5,
-    )
+@pytest.mark.parametrize(
+    ("manifest", "message"),
+    [
+        ({"frames": []}, "contractVersion"),
+        ({"contractVersion": 1, "crops": []}, "contractVersion"),
+        ({"contractVersion": 2, "crops": []}, "non-empty"),
+        (
+            {
+                "contractVersion": 2,
+                "crops": [
+                    {"observationId": "obs", "frameIndex": 0, "fileIndex": 4,
+                     "quality": {}}
+                ],
+            },
+            "out of range",
+        ),
+        (
+            {
+                "contractVersion": 2,
+                "crops": [
+                    {"observationId": "obs", "frameIndex": 0, "fileIndex": 0},
+                ],
+            },
+            "quality",
+        ),
+        (
+            {
+                "contractVersion": 2,
+                "crops": [
+                    {"observationId": "obs", "frameIndex": 0, "fileIndex": 0,
+                     "quality": {}},
+                    {"observationId": "obs", "frameIndex": 1, "fileIndex": 0,
+                     "quality": {}},
+                ],
+            },
+            "Duplicate observationId",
+        ),
+    ],
+)
+def test_manifest_contract_violations_fail_closed(manifest, message):
+    app = create_app(FakeProvider(), preload=False)
+    response = _request(app, [("obs", _jpeg())], manifest=manifest)
+    assert response.status_code == 422
+    assert message in response.json()["detail"]
 
 
 def test_identical_second_request_is_served_without_provider_call():
     provider = FakeProvider()
-    app = create_app(
-        provider,
-        quality_policy=_usable_policy(),
-        embedding_cache=_cache(),
-        preload=False,
-    )
-    first = _request(app, [_observation("first")])
-    second = _request(app, [_observation("second")])
+    app = create_app(provider, embedding_cache=_cache(), preload=False)
+    first = _request(app, [("first", _jpeg())])
+    second = _request(app, [("second", _jpeg())])
 
     assert first.status_code == second.status_code == 200
     assert provider.received == ["first"]
@@ -328,59 +367,35 @@ def test_identical_second_request_is_served_without_provider_call():
     assert second.json()["items"][0]["cacheHit"] is True
 
 
-def test_changed_bbox_is_a_cache_miss_even_for_same_frame_bytes():
+def test_different_crop_pixels_are_distinct_cache_entries():
     provider = FakeProvider()
-    app = create_app(
-        provider,
-        quality_policy=_usable_policy(),
-        embedding_cache=_cache(),
-        preload=False,
-    )
-    _request(app, [_observation("first", x=10)])
-    changed = _request(app, [_observation("changed", x=11)])
+    app = create_app(provider, embedding_cache=_cache(), preload=False)
+    _request(app, [("first", _jpeg(shift=0))])
+    changed = _request(app, [("changed", _jpeg(shift=1))])
 
     assert provider.received == ["first", "changed"]
     assert changed.json()["diagnostics"]["cacheHitCount"] == 0
     assert changed.json()["diagnostics"]["cacheMissCount"] == 1
 
 
-def test_model_and_policy_changes_invalidate_shared_cache():
+def test_model_change_invalidates_shared_cache():
     provider = FakeProvider()
     shared_cache = _cache()
-    first_app = create_app(
-        provider,
-        quality_policy=_usable_policy(minimum_sharpness=1),
-        embedding_cache=shared_cache,
-        preload=False,
-    )
-    _request(first_app, [_observation("model-v1")])
+    app = create_app(provider, embedding_cache=shared_cache, preload=False)
+    _request(app, [("model-v1", _jpeg())])
 
     provider.model_version = "fake-model-v2"
-    model_changed = _request(first_app, [_observation("model-v2")])
+    model_changed = _request(app, [("model-v2", _jpeg())])
     assert model_changed.json()["diagnostics"]["cacheMissCount"] == 1
-
-    policy_changed_app = create_app(
-        provider,
-        quality_policy=_usable_policy(minimum_sharpness=2),
-        embedding_cache=shared_cache,
-        preload=False,
-    )
-    policy_changed = _request(policy_changed_app, [_observation("policy-v2")])
-    assert policy_changed.json()["diagnostics"]["cacheMissCount"] == 1
-    assert provider.received == ["model-v1", "model-v2", "policy-v2"]
+    assert provider.received == ["model-v1", "model-v2"]
 
 
 def test_duplicate_crops_in_one_request_are_inferred_once():
     provider = FakeProvider()
-    app = create_app(
-        provider,
-        quality_policy=_usable_policy(),
-        embedding_cache=_cache(),
-        preload=False,
-    )
+    app = create_app(provider, embedding_cache=_cache(), preload=False)
     response = _request(
         app,
-        [_observation("duplicate-a"), _observation("duplicate-b")],
+        [("duplicate-a", _jpeg()), ("duplicate-b", _jpeg())],
     )
 
     assert response.status_code == 200
@@ -400,18 +415,13 @@ def test_duplicate_crops_in_one_request_are_inferred_once():
 def test_corrupt_cache_entry_is_removed_and_recomputed_as_a_safe_miss():
     provider = FakeProvider()
     cache = _cache()
-    app = create_app(
-        provider,
-        quality_policy=_usable_policy(),
-        embedding_cache=cache,
-        preload=False,
-    )
-    _request(app, [_observation("first")])
+    app = create_app(provider, embedding_cache=cache, preload=False)
+    _request(app, [("first", _jpeg())])
     with cache._lock:
         key = next(iter(cache._entries))
         cache._entries[key].value = {"corrupt": True}
 
-    response = _request(app, [_observation("after-corruption")])
+    response = _request(app, [("after-corruption", _jpeg())])
 
     assert response.status_code == 200
     assert provider.received == ["first", "after-corruption"]
@@ -420,39 +430,13 @@ def test_corrupt_cache_entry_is_removed_and_recomputed_as_a_safe_miss():
     assert response.json()["items"][0]["cacheSource"] == "provider"
 
 
-def test_unusable_qa_result_is_cached_without_provider_inference():
-    provider = FakeProvider()
-    app = create_app(
-        provider,
-        quality_policy=QualityPolicy(
-            minimum_width=100,
-            minimum_height=150,
-            minimum_sharpness=20,
-        ),
-        embedding_cache=_cache(),
-        preload=False,
-    )
-    first = _request(app, [_observation("small-1")], _jpeg("flat"))
-    second = _request(app, [_observation("small-2")], _jpeg("flat"))
-
-    assert provider.received == []
-    assert first.json()["items"][0]["cacheSource"] == "qa-computed"
-    assert second.json()["items"][0]["cacheSource"] == "cache-hit"
-    assert second.json()["diagnostics"]["cacheHitCount"] == 1
-
-
 def test_concurrent_identical_requests_share_one_inflight_provider_call():
     provider = FakeProvider(delay=0.15)
-    app = create_app(
-        provider,
-        quality_policy=_usable_policy(),
-        embedding_cache=_cache(),
-        preload=False,
-    )
+    app = create_app(provider, embedding_cache=_cache(), preload=False)
 
     with ThreadPoolExecutor(max_workers=2) as executor:
-        first = executor.submit(_request, app, [_observation("concurrent-a")])
-        second = executor.submit(_request, app, [_observation("concurrent-b")])
+        first = executor.submit(_request, app, [("concurrent-a", _jpeg())])
+        second = executor.submit(_request, app, [("concurrent-b", _jpeg())])
         responses = [first.result(timeout=5), second.result(timeout=5)]
 
     assert all(response.status_code == 200 for response in responses)
@@ -470,15 +454,10 @@ def test_cache_is_bounded_by_lru_capacity():
         ttl_seconds=60,
         wait_timeout_seconds=5,
     )
-    app = create_app(
-        provider,
-        quality_policy=_usable_policy(),
-        embedding_cache=cache,
-        preload=False,
-    )
-    _request(app, [_observation("first", x=10)])
-    _request(app, [_observation("second", x=30)])
-    evicted = _request(app, [_observation("first-again", x=10)])
+    app = create_app(provider, embedding_cache=cache, preload=False)
+    _request(app, [("first", _jpeg(shift=0))])
+    _request(app, [("second", _jpeg(shift=1))])
+    evicted = _request(app, [("first-again", _jpeg(shift=0))])
 
     assert provider.received == ["first", "second", "first-again"]
     assert evicted.json()["diagnostics"]["cacheMissCount"] == 1
@@ -494,15 +473,10 @@ def test_expired_entry_is_a_safe_miss():
         ttl_seconds=0.01,
         wait_timeout_seconds=5,
     )
-    app = create_app(
-        provider,
-        quality_policy=_usable_policy(),
-        embedding_cache=cache,
-        preload=False,
-    )
-    _request(app, [_observation("before-expiry")])
+    app = create_app(provider, embedding_cache=cache, preload=False)
+    _request(app, [("before-expiry", _jpeg())])
     time.sleep(0.03)
-    expired = _request(app, [_observation("after-expiry")])
+    expired = _request(app, [("after-expiry", _jpeg())])
 
     assert provider.received == ["before-expiry", "after-expiry"]
     assert expired.json()["diagnostics"]["expiredCacheMissCount"] == 1

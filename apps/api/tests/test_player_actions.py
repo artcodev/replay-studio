@@ -6,13 +6,19 @@ import httpx
 import pytest
 from fastapi import HTTPException
 from pydantic import ValidationError
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
 
+from app.database import Base
 from app.main import app
+import app.player_action_commands as player_action_commands
 import app.project_resource_access as resource_access
 from app.player_action_commands import (
     delete_player_action,
     upsert_player_action,
 )
+from app.scene_document import scene_revision
+from app.scene_repository import SceneRepository
 from app.player_action_planning import (
     PlayerActionError,
     apply_player_action_delete,
@@ -108,8 +114,9 @@ def test_manual_action_is_normalized_and_preserves_automatic_suggestions(monkeyp
         lambda value: persisted.append(deepcopy(value)) or value,
     )
 
-    action = upsert_player_action(scene, _manual_request())
+    saved = upsert_player_action(scene, _manual_request())
 
+    action = saved["payload"]["playerActions"][1]
     assert action == scene["payload"]["playerActions"][1]
     assert action["id"] == "manual-action-1"
     assert action["canonicalPersonId"] == "canonical-home-7"
@@ -124,6 +131,30 @@ def test_manual_action_is_normalized_and_preserves_automatic_suggestions(monkeyp
     ]
     assert scene["payload"]["playerActions"][0] == _automatic_action()
     assert len(persisted) == 1
+
+
+def test_player_action_commands_return_persisted_scene_revision(tmp_path):
+    url = f"sqlite+pysqlite:///{tmp_path / 'actions.sqlite3'}"
+    engine = create_engine(
+        url, connect_args={"check_same_thread": False, "timeout": 5}
+    )
+    Base.metadata.create_all(engine)
+    repo = SceneRepository(sessionmaker(bind=engine, expire_on_commit=False))
+    stored = repo.put(_scene())
+
+    with patch.object(player_action_commands, "scenes", repo):
+        saved = upsert_player_action(stored, _manual_request())
+        database_revision = scene_revision(repo.get("action-scene"))
+        assert scene_revision(saved) == database_revision
+
+        # The next sequential save from the returned document must not 409.
+        saved_again = delete_player_action(saved, "manual-action-1")
+
+    assert scene_revision(saved_again) == database_revision + 1
+    assert scene_revision(repo.get("action-scene")) == database_revision + 1
+    assert repo.get("action-scene")["payload"]["playerActions"] == [
+        _automatic_action()
+    ]
 
 
 def test_generated_action_id_is_nonempty_and_stable_across_update():
@@ -219,9 +250,9 @@ def test_delete_removes_only_requested_manual_action(monkeypatch):
         lambda value: persisted.append(deepcopy(value)) or value,
     )
 
-    deleted = delete_player_action(scene, "manual-action-1")
+    saved = delete_player_action(scene, "manual-action-1")
 
-    assert deleted["source"] == "manual"
+    assert saved["payload"]["playerActions"] == [_automatic_action()]
     assert scene["payload"]["playerActions"] == [_automatic_action()]
     assert persisted[0]["payload"]["playerActions"] == [_automatic_action()]
 

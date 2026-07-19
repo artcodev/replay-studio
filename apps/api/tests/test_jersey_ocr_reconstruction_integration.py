@@ -30,12 +30,28 @@ from app.reconstruction_jersey_resolution import (
     aggregate_jersey_evidence_for_final_tracks as _aggregate_jersey_evidence_for_final_tracks,
     partition_local_jersey_evidence_for_resolver as _partition_local_jersey_evidence_for_resolver,
 )
+from app.person_crop_store import (
+    PersonCropPolicy,
+    extract_and_store_person_crops,
+)
+from app.person_detection_cache import frame_content_sha256
 from app.reconstruction_reid_evidence import (
     capture_detection_observations as _capture_detection_observations,
 )
 from app.reconstruction_canonical_identity_resolution import (
     resolve_canonical_track_states as _resolve_canonical_track_states,
 )
+
+
+@pytest.fixture(autouse=True)
+def _crop_store_runtime(tmp_path, monkeypatch):
+    """OCR reads crops from the per-test store the fixture seeds below."""
+
+    runtime = (tmp_path / "person-crops", PersonCropPolicy())
+    monkeypatch.setattr(
+        "app.reconstruction_jersey_inference.person_crop_store_runtime",
+        lambda: runtime,
+    )
 
 
 def _scene(
@@ -101,6 +117,7 @@ def _tracks_and_frames(
         frames.append((path, float(sample_index)))
 
     tracks: list[TrackState] = []
+    detections_by_source_frame: dict[int, list[Detection]] = {}
     for track_index in range(track_count):
         track = TrackState(id=track_index + 1, role="player")
         for sample_index, source_frame in enumerate(source_frames):
@@ -116,8 +133,22 @@ def _tracks_and_frames(
                 position_uncertainty_metres=0.5,
             )
             _capture_detection_observations([detection], source_frame)
+            detections_by_source_frame.setdefault(source_frame, []).append(
+                detection
+            )
             append_track_observation(track, detection, sample_index, float(sample_index))
         tracks.append(track)
+
+    # Publish crops exactly like the detection pass would, so OCR can read
+    # bytes from the store instead of decoding frames.
+    for (path, _), source_frame in zip(frames, source_frames):
+        extract_and_store_person_crops(
+            tmp_path / "person-crops",
+            image=cv2.imread(str(path)),
+            frame_sha256=frame_content_sha256(path),
+            detections=detections_by_source_frame.get(source_frame, []),
+            policy=PersonCropPolicy(),
+        )
     return tracks, frames
 
 

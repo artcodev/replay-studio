@@ -36,7 +36,8 @@ export function useCompositionEditor(options: CompositionEditorOptions) {
         ? await sceneClient.get(options.projectId(), segment.sceneId)
         : await mediaClient.createSegmentScene(options.projectId(), video.id, segment.id)
       options.scene.value = created
-      options.selectedTrackId.value = created.payload.tracks[0]?.id ?? null
+      options.selectedTrackId.value = null
+      options.selectedCanonicalPersonId.value = null
       options.currentTime.value = 0
       options.saveState.value = 'Shot scene created'
       await options.navigateToScene(created.id)

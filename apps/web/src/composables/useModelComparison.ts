@@ -3,6 +3,7 @@ import { sceneClient } from '../lib/api/scenes'
 import { reconstructionClient } from '../lib/api/reconstruction'
 import type { SceneDocument, SceneVideoAsset } from '../types/scene'
 import type { AnalysisJob } from '../types/project'
+import { preserveSceneActorSelection } from '../features/editor/selection/preserveSceneActorSelection'
 
 type ModelComparisonOptions = {
   projectId: () => string
@@ -10,7 +11,7 @@ type ModelComparisonOptions = {
   sceneVideo: Readonly<Ref<SceneVideoAsset | null>>
   jobs: Readonly<Ref<AnalysisJob[]>>
   selectedTrackId: Ref<string | null>
-  activeTab: Ref<'binding' | 'qa' | 'events'>
+  selectedCanonicalPersonId: Ref<string | null>
   playing: Ref<boolean>
   sourceVideo: Ref<HTMLVideoElement | null>
   saveState: Ref<string>
@@ -67,9 +68,13 @@ export function useModelComparison(options: ModelComparisonOptions) {
         || options.scene.value?.id !== sceneId
         || runId.value !== terminalJob.id
       ) return
+      const selection = preserveSceneActorSelection(updated, {
+        trackId: options.selectedTrackId.value,
+        canonicalPersonId: options.selectedCanonicalPersonId.value,
+      })
       options.scene.value = updated
-      options.selectedTrackId.value ??= updated.payload.tracks[0]?.id ?? null
-      options.activeTab.value = 'binding'
+      options.selectedTrackId.value = selection.trackId
+      options.selectedCanonicalPersonId.value = selection.canonicalPersonId
       const comparison = updated.payload.videoAsset?.reconstruction?.modelComparison
       const gain = comparison?.comparison.inPitchObservationGain
       options.saveState.value = gain === undefined

@@ -64,17 +64,29 @@ failure, disables automatic cross-gap stitching and publishes local identities
 as `provisional`. HSV features remain confined to short online association and
 are never compared with the PRT vector space.
 
-Small, out-of-frame or blurry crops return `usable:false`. They are retained in
-coverage diagnostics and are not treated as negative identity evidence.
+Person crops are cut exactly once, in the sampled-frame detection pass — the
+pipeline's only frame decode boundary — with the ReID padding policy, and are
+published to the content-addressed person crop store
+(`MEDIA_ROOT/person-crops`, one atomic envelope per frame keyed by the frame
+content digest). Extraction QA (minimum box size, out-of-frame, Laplacian
+sharpness) runs at the same place; small, out-of-frame or blurry crops become
+`usable:false` results locally and never travel to the worker. They are
+retained in coverage diagnostics and are not treated as negative identity
+evidence. Batches upload crop bytes with a flat v2 manifest
+(`contractVersion: 2`), so the worker is a pure embedder: it decodes crops,
+deduplicates identical pixels and never sees frames, bboxes or crop policy.
+The API-side disk cache (`identity-embedding-cache` schema v2) is keyed by the
+exact crop digest plus the accepted model contract, so a warm rebuild resolves
+embeddings without hashing or uploading frames at all.
 
 ReID sampling is tracklet-level. The reconstruction keeps quality-ranked,
 temporally separated crops instead of the first frames it happens to see. A
 strong automatic edge requires independent support in both directions; one
 nearly identical crop is review evidence, not permission to merge two people.
-Every result also carries a `pixel-evidence-v1` fingerprint computed from the
+Every result also carries a `pixel-evidence-v2` fingerprint computed from the
 decoded crop pixels. The same image is therefore one support even if it returns
 through another observation ID, HTTP batch, merge or split. The worker uses a
-bounded content/model/policy-keyed cache with in-request deduplication and
+bounded content/model-keyed cache with in-request deduplication and
 concurrent single-flight, while the API reports usable versus selected
 independent samples and unique versus duplicate pixel evidence. Readiness
 requires the fixed backend, dimension, normalization and fingerprint protocol
@@ -132,7 +144,10 @@ Reconstruction chooses up to five quality-ranked, temporally separated views
 per tracklet in the normal case. If persisted split ranges exist, it keeps the
 same bounded reservoir independently for each prospective partition, avoiding
 both unbounded all-frame OCR and loss of the only readable crop in a short
-range. The pre-resolver still consumes at most five views; after split/merge,
+range. Selected crops are read from the person crop store by observation ID —
+the same padded crops the detection pass published for ReID — so OCR never
+decodes frames a second time; a missing store record is an explicit
+`cropReadFailureCount` diagnostic, not a silent fallback. The pre-resolver still consumes at most five views; after split/merge,
 the retained raw worker results are reassigned through immutable observation
 IDs and sampled/fused again per final canonical owner. A number becomes reliable only
 with at least two independent agreeing samples and sufficient confidence;

@@ -36,8 +36,12 @@ DENSE_ARTIFACT_CONTRACTS = {
 
 def artifact_references(reconstruction: Mapping[str, Any]) -> dict[str, Any]:
     manifest = reconstruction.get("artifactManifest")
-    if not isinstance(manifest, Mapping):
+    if manifest is None:
         return {}
+    if not isinstance(manifest, Mapping):
+        raise ReconstructionArtifactError(
+            "Reconstruction artifact manifest is malformed"
+        )
     if manifest.get("schemaVersion") != ARTIFACT_MANIFEST_SCHEMA_VERSION:
         raise ReconstructionArtifactError(
             "Unsupported reconstruction artifact manifest schema"

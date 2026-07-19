@@ -174,6 +174,42 @@ class AnalysisRunRepository:
             row = session.get(AnalysisRunRow, run_id)
             return analysis_run_document(row) if row else None
 
+    def list_missed_identity_sync(
+        self,
+        *,
+        limit: int = 20,
+    ) -> list[AnalysisRunDocument]:
+        """Recent succeeded reconstruction runs whose epilogue never finished.
+
+        The identity-sync epilogue runs after the fenced terminal commit; a
+        crash inside that window leaves a succeeded run without an
+        ``identitySync: succeeded`` diagnostic. This bounded telemetry read
+        exists solely to repeat that idempotent epilogue — it never selects,
+        gates or claims reconstruction work.
+        """
+
+        with self._session() as session:
+            rows = session.scalars(
+                select(AnalysisRunRow)
+                .where(
+                    AnalysisRunRow.kind == "reconstruction",
+                    AnalysisRunRow.status == "succeeded",
+                )
+                .order_by(AnalysisRunRow.created_at.desc(), AnalysisRunRow.id)
+                .limit(max(1, int(limit)))
+            ).all()
+        missed: list[AnalysisRunDocument] = []
+        for row in rows:
+            diagnostics = row.diagnostics or {}
+            identity_sync = diagnostics.get("identitySync")
+            if (
+                isinstance(identity_sync, dict)
+                and identity_sync.get("status") == "succeeded"
+            ):
+                continue
+            missed.append(analysis_run_document(row))
+        return missed
+
     @staticmethod
     def _validate_transition(current: str, requested: str) -> None:
         allowed = {

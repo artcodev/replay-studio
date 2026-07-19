@@ -22,11 +22,15 @@ from .reconstruction_jersey_resolution import (
     aggregate_jersey_evidence_for_final_tracks,
     partition_local_jersey_evidence_for_resolver,
 )
+from .jersey_ocr_fusion import detect_jersey_number_switches
 from .reconstruction_identity_semantics import annotation_team
 from .reconstruction_person_tracking import track_people
 from .reconstruction_progress import ReconstructionProgress
 from .reconstruction_scene_track_publisher import publish_scene_tracks
-from .reconstruction_team_classification import team_clusters
+from .reconstruction_team_classification import (
+    include_reid_official_candidates,
+    team_clusters,
+)
 
 
 @dataclass(frozen=True)
@@ -54,6 +58,8 @@ def track_and_resolve_identity_phase(
     match_snapshot: Mapping[str, object] | None,
     identity_worker_diagnostics: dict,
     initial_warnings: list[str],
+    *,
+    jersey_ocr_profile: str = "automatic",
 ) -> IdentityPhaseResult:
     identity_warnings = list(initial_warnings)
     progress.update(
@@ -111,16 +117,48 @@ def track_and_resolve_identity_phase(
             eta_padding=2.0,
         )
 
-    (
-        jersey_tracklet_evidence,
-        jersey_ocr_diagnostics,
-        jersey_ocr_warnings,
-    ) = run_jersey_ocr_for_tracklets(
-        local_tracks,
-        frames,
-        jersey_ocr_progress,
-        scene=scene,
-    )
+    if jersey_ocr_profile == "off":
+        # The queued profile disabled OCR explicitly (manually bound roster):
+        # cheaper runs at the cost of automatic shirt-number merge evidence.
+        jersey_tracklet_evidence = {}
+        jersey_ocr_diagnostics = {
+            "status": "skipped-by-profile",
+            "skippedByProfile": True,
+            "profile": jersey_ocr_profile,
+            "submittedCropCount": 0,
+            "crops": [],
+        }
+        jersey_ocr_warnings = [
+            "Jersey OCR was skipped by the analysis profile; automatic "
+            "shirt-number merge evidence is absent for this run."
+        ]
+    else:
+        (
+            jersey_tracklet_evidence,
+            jersey_ocr_diagnostics,
+            jersey_ocr_warnings,
+        ) = run_jersey_ocr_for_tracklets(
+            local_tracks,
+            frames,
+            jersey_ocr_progress,
+            scene=scene,
+        )
+        switch_suspects = detect_jersey_number_switches(
+            jersey_ocr_diagnostics.get("crops") or []
+        )
+        jersey_ocr_diagnostics["numberSwitchSuspects"] = switch_suspects
+        if switch_suspects:
+            flagged = ", ".join(
+                f"{item['trackletId']} ({item['fromNumber']}→{item['toNumber']} "
+                f"at {item['switchTime']}s)"
+                for item in switch_suspects[:5]
+            )
+            jersey_ocr_warnings = [
+                *jersey_ocr_warnings,
+                f"{len(switch_suspects)} tracklet(s) show a stable shirt-number "
+                f"change mid-track (possible tracker ID switch): {flagged}. "
+                "Review a manual Split at the flagged times.",
+            ]
     identity_warnings.extend(jersey_ocr_warnings)
     partitioned_tracks, split_identity_diagnostics = apply_canonical_split_corrections(
         local_tracks,
@@ -181,6 +219,15 @@ def track_and_resolve_identity_phase(
         manual_team = annotation_team(track.manual_kind)
         if manual_team:
             mapping[track.id] = manual_team
+    auto_official_tracklets = include_reid_official_candidates(
+        stable_tracks,
+        mapping,
+    )
+    identity_resolution_diagnostics["autoOfficials"] = {
+        "count": len(auto_official_tracklets),
+        "trackletIds": auto_official_tracklets,
+        "source": "reid-role-votes",
+    }
     assign_persistent_canonical_person_ids(canonical_tracks, scene, mapping)
     try:
         (

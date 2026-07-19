@@ -22,7 +22,6 @@ from .reconstruction_calibration_evidence import (
     frame_calibration_evidence,
 )
 from .reconstruction_calibration_frame_context import calibration_frame_context
-from .reconstruction_calibration_preview import persist_frame_calibration_preview
 from .reconstruction_errors import ReconstructionError
 from .reconstruction_inputs import (
     frame_paths,
@@ -233,5 +232,6 @@ def propose_scene_pitch_calibration(
             "evidence": selected_evidence,
         }
     )
-    persist_frame_calibration_preview(scene, selected_evidence)
+    # The proposal is a read-only diagnostic draft: nothing is persisted and
+    # the Scene revision must not change until the user explicitly applies it.
     return draft

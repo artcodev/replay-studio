@@ -3,11 +3,14 @@ from __future__ import annotations
 """Temporal calibration hypothesis resolution and target-frame validation."""
 
 from pathlib import Path
+from typing import Callable
 
 import cv2
+import numpy as np
 
 from .pitch_calibration_contract import PitchCalibration, pitch_side
-from .pitch_calibration_quality import calibration_alignment_metrics
+from .pitch_calibration_quality import calibration_alignment_metrics_from_mask
+from .pitch_image_evidence import pitch_line_mask
 from .pitch_geometry import calibration_horizon
 from .reconstruction_calibration_evidence import matrix_payload
 from .reconstruction_calibration_policy import TEMPORAL_REVIEW_UNCERTAINTY_METRES
@@ -18,6 +21,18 @@ from .reconstruction_metric_projection import calibration_person_support
 from .camera_motion_contract import CameraMotionEstimate
 from .temporal_calibration_contract import TemporalCalibrationFrame
 from .temporal_calibration_solver import solve_calibration_sequence
+
+
+ObservedLineMaskLoader = Callable[[Path], "np.ndarray | None"]
+
+
+def default_observed_line_mask(path: Path | str) -> np.ndarray | None:
+    """Decode the frame and compute its line mask without any caching."""
+
+    image = cv2.imread(str(path))
+    if image is None:
+        return None
+    return pitch_line_mask(image)
 
 
 def merge_direct_calibration_anchors(
@@ -46,6 +61,7 @@ def resolve_temporal_frame_calibrations(
     pitch: dict,
     *,
     max_gap_seconds: float = 2.0,
+    observed_mask_loader: ObservedLineMaskLoader | None = None,
 ) -> tuple[
     dict[int, PitchCalibration],
     dict[int, int],
@@ -173,11 +189,15 @@ def resolve_temporal_frame_calibrations(
         validation_reasons: list[str] = []
         alignment = None
         target_uncertainty_penalty = 0.0
-        image = cv2.imread(str(frames[sample_index][0]))
-        if image is None:
+        observed_mask = (observed_mask_loader or default_observed_line_mask)(
+            frames[sample_index][0]
+        )
+        if observed_mask is None:
             validation_reasons.append("temporal-target-frame-unreadable")
         else:
-            alignment_metrics = calibration_alignment_metrics(image, calibration)
+            alignment_metrics = calibration_alignment_metrics_from_mask(
+                observed_mask, calibration
+            )
             alignment = alignment_metrics.as_dict() if alignment_metrics is not None else None
             if alignment_metrics is None:
                 target_uncertainty_penalty += 1.25

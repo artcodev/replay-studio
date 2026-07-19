@@ -34,6 +34,12 @@ class Detection:
     # Soccer ReID and the short-horizon HSV feature are distinct vector spaces.
     reid_feature: np.ndarray | None = None
     reid_quality: dict | None = None
+    # Crop identity published by the detection pass (person crop store). The
+    # crop digest is the cache key for downstream ReID/OCR model results.
+    crop_frame_sha256: str | None = None
+    crop_sha256: str | None = None
+    crop_quality: dict | None = None
+    crop_rejection_reasons: tuple[str, ...] = ()
     reid_evidence_fingerprint: str | None = None
     reid_role: str | None = None
     reid_role_confidence: float | None = None

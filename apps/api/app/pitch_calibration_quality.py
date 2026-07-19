@@ -13,7 +13,11 @@ from .pitch_geometry import (
     PNLCALIB_LINE_TO_PITCH_LINE,
     project_points,
 )
-from .pitch_image_evidence import alignment_residuals
+from .pitch_image_evidence import (
+    alignment_residuals,
+    alignment_residuals_from_mask,
+    pitch_line_mask,
+)
 
 
 def calibration_alignment_metrics(
@@ -21,7 +25,17 @@ def calibration_alignment_metrics(
     calibration: PitchCalibration,
     tolerance_pixels: float = 3.0,
 ) -> CalibrationAlignmentMetrics | None:
-    residuals = alignment_residuals(image, calibration)
+    return calibration_alignment_metrics_from_mask(
+        pitch_line_mask(image), calibration, tolerance_pixels
+    )
+
+
+def calibration_alignment_metrics_from_mask(
+    observed_mask: np.ndarray,
+    calibration: PitchCalibration,
+    tolerance_pixels: float = 3.0,
+) -> CalibrationAlignmentMetrics | None:
+    residuals = alignment_residuals_from_mask(observed_mask, calibration)
     if residuals is None:
         return None
     precision = float(np.mean(residuals.model_to_observed <= tolerance_pixels))

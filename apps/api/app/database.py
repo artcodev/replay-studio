@@ -77,6 +77,12 @@ class ReconstructionJobRow(Base):
     input_fingerprint: Mapped[str] = mapped_column(String(96), nullable=False)
     input_revision: Mapped[int] = mapped_column(Integer, nullable=False)
     status: Mapped[str] = mapped_column(String(40), nullable=False, index=True)
+    # Attempt accounting bounds a deterministically crashing child and keeps
+    # the last failure text on the authoritative record (see PipelineJobRow).
+    attempts: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
     requested_at: Mapped[float] = mapped_column(Float, nullable=False)
     updated_at: Mapped[float] = mapped_column(Float, nullable=False)
 

@@ -74,6 +74,27 @@ def include_goalkeeper_candidates(
     return result
 
 
+def include_reid_official_candidates(
+    tracks: list[TrackState],
+    mapping: dict[int, str],
+) -> list[str]:
+    """Map referee-voted tracks outside both kit clusters to ``officials``.
+
+    The third kit cluster used to be dropped silently even when the PRTReID
+    role votes had already elected "referee" for a long-lived track. Manual
+    assignments and existing team memberships are never overridden.
+    """
+
+    official_tracklets: list[str] = []
+    for track in tracks:
+        if track.id in mapping or track.manual_kind:
+            continue
+        if track.role == "referee":
+            mapping[track.id] = "officials"
+            official_tracklets.append(track.local_tracklet_id)
+    return official_tracklets
+
+
 def team_clusters(
     tracks: list[TrackState],
     frame_width: int | None = None,

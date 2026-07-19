@@ -8,7 +8,7 @@ from starlette.concurrency import run_in_threadpool
 
 from .cache import IdentityEmbeddingCache
 from .embedding_service import IdentityEmbeddingService, IdentityInferenceError
-from .evidence import EVIDENCE_FINGERPRINT_VERSION, QualityPolicy
+from .evidence import EVIDENCE_FINGERPRINT_VERSION
 from .provider_contract import (
     EMBEDDING_DIMENSION,
     IdentityEmbeddingProvider,
@@ -20,17 +20,15 @@ from .request_contract import IdentityRequestError
 def create_app(
     provider: IdentityEmbeddingProvider | None = None,
     *,
-    quality_policy: QualityPolicy | None = None,
     embedding_cache: IdentityEmbeddingCache | None = None,
     preload: bool | None = None,
 ) -> FastAPI:
     configured_provider = provider or PRTReIDProvider()
-    policy = quality_policy or QualityPolicy.from_environment()
     cache = embedding_cache or IdentityEmbeddingCache.from_environment(
         dimension=EMBEDDING_DIMENSION,
         environment=os.environ,
     )
-    service = IdentityEmbeddingService(configured_provider, policy, cache)
+    service = IdentityEmbeddingService(configured_provider, cache)
     should_preload = (
         os.environ.get("REID_PRELOAD", "1") not in {"0", "false", "False"}
         if preload is None
@@ -90,15 +88,15 @@ def create_app(
 
     @application.post("/v1/embeddings")
     async def embeddings(
-        frames: list[UploadFile] = File(...),
+        crops: list[UploadFile] = File(...),
         manifest: str = Form(...),
     ) -> dict:
         await ensure_loaded()
-        if not frames:
-            raise HTTPException(status_code=422, detail="At least one frame is required")
-        frame_bytes = [await frame.read() for frame in frames]
+        if not crops:
+            raise HTTPException(status_code=422, detail="At least one crop is required")
+        crop_bytes = [await crop.read() for crop in crops]
         try:
-            return await run_in_threadpool(service.process, frame_bytes, manifest)
+            return await run_in_threadpool(service.process, crop_bytes, manifest)
         except IdentityRequestError as exc:
             raise HTTPException(status_code=422, detail=exc.detail) from exc
         except IdentityInferenceError as exc:

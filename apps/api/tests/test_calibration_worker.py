@@ -59,6 +59,7 @@ def test_worker_client_reports_progress_after_each_small_frame_batch(monkeypatch
             calibration_worker_url="http://worker:8090",
             calibration_worker_timeout=900,
             calibration_worker_batch_size=2,
+            calibration_anchor_cache_enabled=False,
         ),
     )
     monkeypatch.setattr("app.calibration_worker.httpx.post", fake_post)
@@ -77,6 +78,144 @@ def test_worker_client_reports_progress_after_each_small_frame_batch(monkeypatch
         "cacheHitCount": 1,
         "totalSeconds": 0.012,
     }
+
+
+def _cached_settings(tmp_path, batch_size=2):
+    return SimpleNamespace(
+        calibration_worker_url="http://worker:8090",
+        calibration_worker_timeout=900,
+        calibration_worker_batch_size=batch_size,
+        calibration_anchor_cache_enabled=True,
+        media_root=str(tmp_path / "media"),
+    )
+
+
+def _ready_get(url, timeout):
+    return FakeResponse(
+        {
+            "status": "ready",
+            "backend": "pnlcalib-points-lines",
+            "modelVersion": "test-model-v1",
+        }
+    )
+
+
+def test_anchor_results_are_memoized_on_disk_including_no_solution(
+    monkeypatch, tmp_path
+):
+    frames = []
+    for index in (1, 2):
+        path = tmp_path / f"frame_{index:05d}.jpg"
+        path.write_bytes(f"jpeg-{index}".encode())
+        frames.append((index, path))
+    post_calls = []
+
+    def fake_post(url, data, files, timeout):
+        indices = json.loads(data["frame_indices"])
+        post_calls.append(indices)
+        return FakeResponse(
+            {
+                "backend": "pnlcalib-points-lines",
+                "diagnostics": {"modelVersion": "test-model-v1"},
+                # Frame 2 stays unsolved: the worker returns no row for it.
+                "frames": [
+                    {
+                        "frameIndex": index,
+                        "method": "pnlcalib-points-lines",
+                        "confidence": 0.9,
+                        "keypointCount": 8,
+                        "inlierCount": 8,
+                        "imageToPitch": [
+                            [0.1, 0.0, -48.0],
+                            [0.0, 0.1, -27.0],
+                            [0.0, 0.0, 1.0],
+                        ],
+                    }
+                    for index in indices
+                    if index != 2
+                ],
+            }
+        )
+
+    monkeypatch.setattr(
+        "app.calibration_worker.get_settings",
+        lambda: _cached_settings(tmp_path),
+    )
+    monkeypatch.setattr("app.calibration_worker.httpx.get", _ready_get)
+    monkeypatch.setattr("app.calibration_worker.httpx.post", fake_post)
+
+    first = calibrate_frames_with_worker(frames)
+    assert sorted(first) == [1]
+    assert post_calls == [[1, 2]]
+
+    def forbidden_post(*_args, **_kwargs):
+        raise AssertionError("a warm rebuild must not re-upload cached anchors")
+
+    monkeypatch.setattr("app.calibration_worker.httpx.post", forbidden_post)
+    second = calibrate_frames_with_worker(frames)
+
+    # Frame 1 resolves from disk; the cached no-solution for frame 2 is
+    # authoritative and is not re-asked.
+    assert sorted(second) == [1]
+    assert second[1].confidence == first[1].confidence
+
+
+def test_changed_worker_model_version_invalidates_the_anchor_cache(
+    monkeypatch, tmp_path
+):
+    path = tmp_path / "frame_00001.jpg"
+    path.write_bytes(b"jpeg")
+    frames = [(1, path)]
+    post_calls = []
+
+    def fake_post(url, data, files, timeout):
+        post_calls.append(json.loads(data["frame_indices"]))
+        return FakeResponse(
+            {
+                "backend": "pnlcalib-points-lines",
+                "diagnostics": {},
+                "frames": [
+                    {
+                        "frameIndex": 1,
+                        "method": "pnlcalib-points-lines",
+                        "confidence": 0.9,
+                        "keypointCount": 8,
+                        "inlierCount": 8,
+                        "imageToPitch": [
+                            [0.1, 0.0, -48.0],
+                            [0.0, 0.1, -27.0],
+                            [0.0, 0.0, 1.0],
+                        ],
+                    }
+                ],
+            }
+        )
+
+    model_version = {"value": "model-v1"}
+
+    def versioned_get(url, timeout):
+        return FakeResponse(
+            {
+                "status": "ready",
+                "backend": "pnlcalib-points-lines",
+                "modelVersion": model_version["value"],
+            }
+        )
+
+    monkeypatch.setattr(
+        "app.calibration_worker.get_settings",
+        lambda: _cached_settings(tmp_path),
+    )
+    monkeypatch.setattr("app.calibration_worker.httpx.get", versioned_get)
+    monkeypatch.setattr("app.calibration_worker.httpx.post", fake_post)
+
+    calibrate_frames_with_worker(frames)
+    model_version["value"] = "model-v2"
+    calibrate_frames_with_worker(frames)
+
+    # A new model identity is a different cache contract: the frame is
+    # re-inferred instead of silently reusing the old model's evidence.
+    assert post_calls == [[1], [1]]
 
 
 def test_worker_readiness_reports_disabled_without_a_configured_url(monkeypatch):

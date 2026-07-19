@@ -153,6 +153,12 @@ def reconstruct_scene_by_id(
     expected_run_id: str,
     expected_input_fingerprint: str,
 ) -> bool:
+    # The compact scheduler fence is a cheap guard against delayed children
+    # from already-terminal or superseded runs.  Do not duplicate the dense
+    # Scene fence here: claim_reconstruction_run owns that decision under one
+    # database transaction and terminally invalidates a current job whose
+    # Scene has drifted.  Returning early on Scene drift leaves a poison job
+    # recoverable forever and can starve every newer job when max_workers=1.
     if not reconstruction_runs.reconstruction_run_is_current(
         scene_id,
         expected_run_id,
@@ -160,20 +166,8 @@ def reconstruct_scene_by_id(
         statuses={"queued", "processing"},
     ):
         return False
-    scene = scenes.get(scene_id)
-    if scene is None:
-        return False
-    reconstruction = (
-        scene.get("payload", {})
-        .get("videoAsset", {})
-        .get("reconstruction", {})
-    )
     run_id = expected_run_id
     input_fingerprint = expected_input_fingerprint
-    if str(reconstruction.get("runId") or "") != expected_run_id:
-        return False
-    if reconstruction_input_fingerprint(scene) != expected_input_fingerprint:
-        return False
     owner_id = f"worker-{uuid4().hex}"
     if not reconstruction_runs.claim_reconstruction_run(
         scene_id,

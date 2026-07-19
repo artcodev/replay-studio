@@ -8,10 +8,10 @@ import {
 describe('three view preferences', () => {
   it('restores a complete valid preference', () => {
     expect(parseThreeViewPreferences(JSON.stringify({
-      options: { models: true, labels: false, trajectory: true, pathTracking: true, ball: true, analysisMarkers: false },
+      options: { models: true, labels: false, trajectory: true, pathTracking: true, allPaths: false, ball: true, analysisMarkers: false },
       renderQuality: 'enhanced',
     }))).toEqual({
-      options: { models: true, labels: false, trajectory: true, pathTracking: true, ball: true, analysisMarkers: false },
+      options: { models: true, labels: false, trajectory: true, pathTracking: true, allPaths: false, ball: true, analysisMarkers: false },
       renderQuality: 'enhanced',
     })
   })
@@ -26,6 +26,7 @@ describe('three view preferences', () => {
         labels: false,
         trajectory: true,
         pathTracking: false,
+        allPaths: false,
         ball: true,
         analysisMarkers: false,
       },
@@ -60,7 +61,7 @@ describe('three view preferences', () => {
     expect(saveThreeViewPreferences({
       setItem: () => { throw new Error('quota exceeded') },
     }, {
-      options: { models: true, labels: true, trajectory: true, pathTracking: false, ball: true, analysisMarkers: true },
+      options: { models: true, labels: true, trajectory: true, pathTracking: false, allPaths: false, ball: true, analysisMarkers: true },
       renderQuality: 'basic',
     })).toBe(false)
   })

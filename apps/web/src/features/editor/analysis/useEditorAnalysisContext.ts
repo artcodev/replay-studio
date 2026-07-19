@@ -82,7 +82,7 @@ export function useEditorAnalysisContext(
     sceneVideo: viewport.sceneVideo,
     jobs: session.projectAnalysisJobs,
     selectedTrackId: viewport.selectedTrackId,
-    activeTab: viewport.activeTab,
+    selectedCanonicalPersonId: viewport.selectedCanonicalPersonId,
     playing: viewport.playing,
     sourceVideo: viewport.sourceVideo,
     saveState: session.saveState,

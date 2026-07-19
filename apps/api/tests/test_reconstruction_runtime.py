@@ -72,6 +72,33 @@ def _track(track_id: int, x: float, samples: int = 10) -> TrackState:
     )
 
 
+def test_referee_voted_track_is_mapped_to_officials_instead_of_dropped():
+    from app.reconstruction_team_classification import (
+        include_reid_official_candidates,
+    )
+
+    referee = _track(5, 480)
+    referee.role = "referee"
+    already_teamed = _track(1, 650)
+    already_teamed.role = "referee"
+    manual = _track(6, 500)
+    manual.role = "referee"
+    manual.manual_kind = "confirm-referee"
+    unvoted = _track(7, 520)
+    mapping = {1: "home"}
+
+    officials = include_reid_official_candidates(
+        [referee, already_teamed, manual, unvoted],
+        mapping,
+    )
+
+    # Only the unteamed, unmanaged referee-voted track joins officials.
+    assert mapping[5] == "officials"
+    assert mapping[1] == "home"
+    assert 6 not in mapping and 7 not in mapping
+    assert officials == [referee.local_tracklet_id]
+
+
 def test_goalkeeper_candidate_survives_third_kit_cluster():
     tracks = [
         _track(1, 650),
@@ -112,6 +139,7 @@ def _queue_draft(
     ball_input: dict | None = None,
     frame_count: int = 0,
     run_id: str = "test-run",
+    ball_detection_profile: str = "automatic",
 ) -> dict:
     return prepare_reconstruction_queue_draft(
         scene,
@@ -123,7 +151,179 @@ def _queue_draft(
             frame_count=frame_count,
             run_id=run_id,
             match_snapshot_ref=None,
+            ball_detection_profile=ball_detection_profile,
         ),
+    )
+
+
+def _profile_scene(ball_mode: str = "manual") -> dict:
+    return {
+        "id": "shot-profile",
+        "duration": 4.0,
+        "payload": {
+            "videoAsset": {"id": "asset-1", "analysisFps": 10},
+            "ball": {
+                "mode": ball_mode,
+                "manualKeyframes": [{"t": 0.0, "x": 1.0, "z": 2.0}],
+                "automaticKeyframes": [],
+                "keyframes": [],
+            },
+        },
+    }
+
+
+def test_skip_ball_profile_is_pinned_and_changes_the_input_fingerprint():
+    automatic = _queue_draft(_profile_scene(), run_id="run-a")
+    skipped = _queue_draft(
+        _profile_scene(),
+        run_id="run-a",
+        ball_detection_profile="skip-manual-authoritative",
+    )
+
+    reconstruction = skipped["payload"]["videoAsset"]["reconstruction"]
+    assert reconstruction["ballDetectionProfile"] == "skip-manual-authoritative"
+    assert (
+        automatic["payload"]["videoAsset"]["reconstruction"]["ballDetectionProfile"]
+        == "automatic"
+    )
+    assert (
+        reconstruction["inputFingerprint"]
+        != automatic["payload"]["videoAsset"]["reconstruction"]["inputFingerprint"]
+    )
+
+
+def test_default_profile_keeps_pre_profile_fingerprints_stable():
+    # Scenes queued before profiles existed must not become stale: the
+    # automatic default is omitted from the digest entirely.
+    scene = _profile_scene()
+    baseline = _queue_draft(scene, run_id="run-a")
+    reconstruction = baseline["payload"]["videoAsset"]["reconstruction"]
+    with_field = reconstruction_input_fingerprint(baseline)
+    reconstruction.pop("ballDetectionProfile")
+    without_field = reconstruction_input_fingerprint(baseline)
+
+    assert with_field == without_field
+
+
+def test_skip_ball_profile_requires_the_manual_trajectory_to_be_authoritative():
+    with pytest.raises(ReconstructionError, match="manual ball"):
+        _queue_draft(
+            _profile_scene(ball_mode="automatic"),
+            ball_detection_profile="skip-manual-authoritative",
+        )
+    with pytest.raises(ReconstructionError, match="Unknown ball detection profile"):
+        _queue_draft(_profile_scene(), ball_detection_profile="turbo")
+
+
+def test_jersey_ocr_profile_is_pinned_validated_and_fenced(monkeypatch):
+    draft = prepare_reconstruction_queue_draft(
+        _profile_scene(),
+        ReconstructionQueueInputs(
+            model="yolo26m.pt",
+            ball_backend="generic-ultralytics",
+            ball_detection_input={"schemaVersion": 1},
+            frame_count=0,
+            run_id="run-a",
+            match_snapshot_ref=None,
+            jersey_ocr_profile="off",
+        ),
+    )
+    reconstruction = draft["payload"]["videoAsset"]["reconstruction"]
+    assert reconstruction["jerseyOcrProfile"] == "off"
+
+    baseline = _queue_draft(_profile_scene(), run_id="run-a")
+    assert (
+        reconstruction["inputFingerprint"]
+        != baseline["payload"]["videoAsset"]["reconstruction"]["inputFingerprint"]
+    )
+    # The automatic default stays out of the digest: pre-profile scenes keep
+    # their fingerprints.
+    baseline_reconstruction = baseline["payload"]["videoAsset"]["reconstruction"]
+    with_field = reconstruction_input_fingerprint(baseline)
+    baseline_reconstruction.pop("jerseyOcrProfile")
+    assert reconstruction_input_fingerprint(baseline) == with_field
+
+    with pytest.raises(ReconstructionError, match="Unknown jersey OCR profile"):
+        prepare_reconstruction_queue_draft(
+            _profile_scene(),
+            ReconstructionQueueInputs(
+                model="yolo26m.pt",
+                ball_backend="generic-ultralytics",
+                ball_detection_input={"schemaVersion": 1},
+                frame_count=0,
+                run_id="run-a",
+                match_snapshot_ref=None,
+                jersey_ocr_profile="disabled",
+            ),
+        )
+
+
+def test_progress_write_throttle_coalesces_quiet_same_phase_ticks():
+    from app.reconstruction_progress import ProgressWriteThrottle
+
+    clock = {"now": 0.0}
+    throttle = ProgressWriteThrottle(1.0, clock=lambda: clock["now"])
+
+    assert throttle.should_write({"phase": "detection"}) is True
+    clock["now"] = 0.2
+    assert throttle.should_write({"phase": "detection"}) is False
+    clock["now"] = 0.4
+    # A phase transition always writes, even inside the interval.
+    assert throttle.should_write({"phase": "tracking"}) is True
+    clock["now"] = 0.5
+    assert throttle.should_write({"phase": "tracking"}) is False
+    clock["now"] = 1.5
+    assert throttle.should_write({"phase": "tracking"}) is True
+    clock["now"] = 1.6
+    # Terminal ticks always write.
+    assert throttle.should_write({"phase": "complete"}) is True
+    clock["now"] = 1.7
+    assert throttle.should_write({"phase": "failed"}) is True
+
+
+def test_identity_phase_skips_jersey_ocr_when_profile_is_off(monkeypatch):
+    from types import SimpleNamespace
+
+    from app.reconstruction_identity_phase import track_and_resolve_identity_phase
+
+    monkeypatch.setattr(
+        "app.reconstruction_identity_phase.run_jersey_ocr_for_tracklets",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("jersey OCR must not run under the off profile")
+        ),
+    )
+    scene = {
+        "id": "identity-skip",
+        "duration": 1.0,
+        "payload": {
+            "videoAsset": {"id": "asset-1", "reconstruction": {}},
+            "teams": [],
+            "tracks": [],
+            "canonicalPeople": [],
+            "ball": {"keyframes": []},
+        },
+    }
+    progress = SimpleNamespace(update=lambda *args, **kwargs: None)
+
+    result = track_and_resolve_identity_phase(
+        scene,
+        [],
+        [],
+        (1920, 1080),
+        "unavailable",
+        {},
+        None,
+        progress,
+        None,
+        {},
+        [],
+        jersey_ocr_profile="off",
+    )
+
+    assert result.jersey_ocr_diagnostics["status"] == "skipped-by-profile"
+    assert result.jersey_ocr_diagnostics["skippedByProfile"] is True
+    assert any(
+        "skipped by the analysis profile" in warning for warning in result.warnings
     )
 
 

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import ConfigDict, Field
+from pydantic import ConfigDict, Field, model_validator
 
 from .transport_contract import TransportContract
 
@@ -203,10 +203,30 @@ class IdentityReviewWorkers(IdentityReviewContract):
 
 class IdentityReviewAvailability(IdentityReviewContract):
     state: Literal[
-        "not-started", "queued", "processing", "failed", "cancelled", "unavailable", "ready"
+        "not-started",
+        "queued",
+        "processing",
+        "failed",
+        "cancelled",
+        "unavailable",
+        "ready",
     ]
     available: bool
-    reason_code: str | None = None
+    reason_code: Literal[
+        "identity-review-artifacts-not-published",
+        "reconstruction-state-unrecognized",
+    ] | None = None
+
+    @model_validator(mode="after")
+    def validate_state(self) -> "IdentityReviewAvailability":
+        if self.available != (self.state == "ready"):
+            raise ValueError("Availability must be true only for the ready state")
+        if self.state == "unavailable":
+            if self.reason_code is None:
+                raise ValueError("Unavailable identity review requires a reason code")
+        elif self.reason_code is not None:
+            raise ValueError("Only unavailable identity review may have a reason code")
+        return self
 
 
 class IdentityReviewSummary(IdentityReviewContract):

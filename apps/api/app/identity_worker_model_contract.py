@@ -57,6 +57,7 @@ CACHE_FIELDS = frozenset(
         "inRequestDeduplicated",
         "concurrentDeduplicated",
         "waitTimeouts",
+        "providerFailures",
     }
 )
 
@@ -67,7 +68,7 @@ def validate_cache_diagnostics(value: object) -> dict[str, Any]:
             "Identity worker returned malformed cache diagnostics"
         )
     reject_unknown_fields(value, CACHE_FIELDS, "Identity worker cache diagnostics")
-    if value.get("schemaVersion") != "identity-embedding-cache.v1":
+    if value.get("schemaVersion") != "identity-embedding-cache.v3":
         raise IdentityWorkerError(
             "Identity worker returned an unsupported cache contract"
         )

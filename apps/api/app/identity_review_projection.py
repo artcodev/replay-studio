@@ -17,27 +17,34 @@ from .reconstruction_artifact_manifest import artifact_references
 
 def _reconstruction(scene: Mapping[str, Any]) -> Mapping[str, Any]:
     video = scene.get("payload", {}).get("videoAsset", {})
-    reconstruction = video.get("reconstruction", {}) if isinstance(video, Mapping) else {}
+    reconstruction = (
+        video.get("reconstruction", {}) if isinstance(video, Mapping) else {}
+    )
     return reconstruction if isinstance(reconstruction, Mapping) else {}
 
 
 def _availability(scene: Mapping[str, Any]) -> tuple[dict[str, Any], bool]:
     reconstruction = _reconstruction(scene)
     references = artifact_references(reconstruction)
-    if "identityDiagnostics" in references:
-        return {"state": "ready", "available": True}, True
-
     status = str(reconstruction.get("status") or "not-started")
-    if status == "ready":
-        return {
-            "state": "unavailable",
-            "available": False,
-            "reasonCode": "identity-diagnostics-not-published",
-        }, False
     if status in {"queued", "processing", "failed", "cancelled"}:
         return {"state": status, "available": False}, False
     if status == "not-started":
         return {"state": "not-started", "available": False}, False
+    if status == "ready":
+        has_diagnostics = "identityDiagnostics" in references
+        has_timeline = "identityTimeline" in references
+        if has_diagnostics != has_timeline:
+            raise ReconstructionArtifactError(
+                "Identity review artifact publication is incomplete"
+            )
+        if has_diagnostics:
+            return {"state": "ready", "available": True}, True
+        return {
+            "state": "unavailable",
+            "available": False,
+            "reasonCode": "identity-review-artifacts-not-published",
+        }, False
     return {
         "state": "unavailable",
         "available": False,

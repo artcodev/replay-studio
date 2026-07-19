@@ -7,6 +7,8 @@ from typing import Mapping
 import numpy as np
 
 from .camera_motion_contract import CameraMotionEstimate
+from .config import get_settings
+from .pitch_line_mask_cache import cached_pitch_line_mask_loader
 from .pitch_calibration_contract import PitchCalibration
 from .reconstruction_calibration_resolution import (
     merge_direct_calibration_anchors,
@@ -75,6 +77,10 @@ def solve_temporal_calibration_phase(
             max(2.0, float(scene["duration"]))
             if has_manual_stabilized_calibration
             else 2.0
+        ),
+        observed_mask_loader=cached_pitch_line_mask_loader(
+            Path(get_settings().media_root) / "pitch-line-masks",
+            enabled=bool(get_settings().pitch_line_mask_cache_enabled),
         ),
     )
 

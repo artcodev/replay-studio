@@ -1,5 +1,38 @@
-import type { CanonicalIdentityConflict, CanonicalIdentityEvidence, CanonicalPersonStatus, CanonicalRosterCandidate } from './identity'
+import type {
+  CanonicalIdentityConflict,
+  CanonicalIdentityEvidence,
+  CanonicalPersonStatus,
+  CanonicalRosterCandidate,
+} from './identity'
+import type { ReconstructionArtifactReference } from './reconstruction'
 import type { CanonicalPersonRole, TrackObservation } from './tracking'
+
+/** Local immutable reconstruction inputs required before requesting the read model. */
+export type IdentityReviewArtifactCapability = {
+  sceneId: string
+  revision: number
+  identityDiagnostics: ReconstructionArtifactReference
+  identityTimeline: ReconstructionArtifactReference
+}
+
+export type IdentityReviewAvailability =
+  | {
+      state: 'ready'
+      available: true
+      reasonCode?: never
+    }
+  | {
+      state: 'not-started' | 'queued' | 'processing' | 'failed' | 'cancelled'
+      available: false
+      reasonCode?: never
+    }
+  | {
+      state: 'unavailable'
+      available: false
+      reasonCode:
+        | 'identity-review-artifacts-not-published'
+        | 'reconstruction-state-unrecognized'
+    }
 
 export type IdentityReviewCropDiagnostic = {
   status?: string | null
@@ -67,6 +100,7 @@ export type IdentityReviewWorkerHealth = {
 export type IdentityReviewResponse = {
   sceneId: string
   revision: number
+  availability: IdentityReviewAvailability
   matchSnapshot: {
     id?: string | null
     contentHash?: string | null

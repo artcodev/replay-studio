@@ -11,7 +11,7 @@ describe('ThreeViewMenu', () => {
       renderQuality: 'basic',
     }))
 
-    expect(html).toContain('aria-label="View settings, 3 items hidden"')
+    expect(html).toContain('aria-label="View settings, 4 items hidden"')
     expect(html).toContain('aria-expanded="false"')
     expect(html).toContain('aria-haspopup="dialog"')
     expect(html).toContain('>View<')
@@ -27,7 +27,7 @@ describe('ThreeViewMenu', () => {
 
     // The panel is intentionally collapsed in SSR; its accessible summary
     // still reports the default-off path layer as hidden.
-    expect(html).toContain('aria-label="View settings, 1 item hidden"')
+    expect(html).toContain('aria-label="View settings, 2 items hidden"')
   })
 
   it('disables the settings trigger while its parent is busy', async () => {
@@ -38,6 +38,6 @@ describe('ThreeViewMenu', () => {
     }))
 
     expect(html).toContain('disabled')
-    expect(html).toContain('aria-label="View settings, 1 item hidden"')
+    expect(html).toContain('aria-label="View settings, 2 items hidden"')
   })
 })

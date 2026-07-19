@@ -72,7 +72,59 @@ publication and left all eight compact Scene rows at 81,565 bytes total. Exact
 sizes and post-cutover idle network deltas are recorded in
 [`docs/PERFORMANCE.md`](docs/PERFORMANCE.md).
 
-## Local development
+## Docker development with auto-update
+
+The recommended development workflow keeps the complete stack in Docker while
+preserving the fast Vite/uvicorn inner loop:
+
+```bash
+npm run dev:docker
+```
+
+This starts the base Compose stack with `docker-compose.dev.yml` and Compose
+Watch. Open [http://localhost:5188](http://localhost:5188); the API remains at
+[http://localhost:8000](http://localhost:8000).
+
+The first switch from the nginx stack builds one separate Node development
+image and recreates the application containers while preserving PostgreSQL,
+Redis and media volumes. Start it when no expensive analysis needs to remain
+uninterrupted. Later source edits reuse the same images.
+
+Normal source edits do not rebuild images:
+
+- Vue/TypeScript/CSS changes are synced into the Vite container and applied by
+  HMR;
+- API Python changes are synced and applied by `uvicorn --reload`;
+- pipeline/reconstruction and model-worker changes use `sync+restart`, keeping
+  their installed dependencies and model layers intact;
+- changing a `pyproject.toml`, `requirements*.txt`, `package.json`, lockfile or
+  Dockerfile automatically rebuilds only the affected service.
+
+The dev profile shortens scheduler leases to 30 seconds. Saving backend code
+while an analysis is active intentionally restarts both runners; the fenced job
+then becomes recoverable without waiting for the production 120–180 second
+lease. Source edits never require a manual `docker compose build`.
+
+Run a new Alembic migration explicitly after adding or changing a migration:
+
+```bash
+npm run dev:docker:migrate
+```
+
+Check the merged profile or stop it without deleting named data volumes:
+
+```bash
+npm run dev:docker:config
+npm run dev:docker:down
+```
+
+Docker Desktop normally propagates Vite file events. If HMR does not fire on a
+particular filesystem, start with `DEV_USE_POLLING=1 npm run dev:docker`.
+
+Production-like Compose remains unchanged and serves the built frontend through
+nginx on port 8080.
+
+## Host development (optional)
 
 Requirements: Node.js 22+, Python 3.11+, and FFmpeg/FFprobe.
 

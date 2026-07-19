@@ -173,6 +173,25 @@ class DedicatedReconstructionRecoveryMonitor:
                         key[1],
                         return_code,
                     )
+                    # The supervisor just observed the hard death: free the
+                    # dead owner's lease now instead of stranding the job in
+                    # processing for the remaining lease TTL.
+                    try:
+                        reconstruction_runs.release_crashed_reconstruction_run(
+                            key[0],
+                            key[1],
+                            input_fingerprint,
+                            error=(
+                                "Reconstruction child exited with code "
+                                f"{return_code}"
+                            ),
+                        )
+                    except Exception:
+                        logger.exception(
+                            "Could not release the crashed lease scene=%s run=%s",
+                            key[0],
+                            key[1],
+                        )
                 continue
             try:
                 current = self._run_is_current(
@@ -253,4 +272,16 @@ def start_dedicated_reconstruction_recovery(
 ) -> DedicatedReconstructionRecoveryMonitor:
     """Start the process-isolated monitor used by reconstruction-runner."""
 
+    try:
+        from .analysis_runtime import recover_missed_identity_sync
+
+        repaired = recover_missed_identity_sync()
+        if repaired:
+            logger.info(
+                "Repaired %d missed identity-sync epilogue(s) on startup",
+                repaired,
+            )
+    except Exception:
+        # The sweep is a best-effort repair; recovery itself must start.
+        logger.exception("Missed identity-sync sweep failed on startup")
     return DedicatedReconstructionRecoveryMonitor().start()

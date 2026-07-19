@@ -61,13 +61,32 @@ def reconstruction_input_fingerprint(
         "ballDetection": {
             "backend": reconstruction.get("ballBackend"),
             "input": reconstruction.get("ballDetectionInput"),
+            # The default profile is omitted so fingerprints of every scene
+            # queued before profiles existed remain byte-identical.
+            **(
+                {"profile": reconstruction.get("ballDetectionProfile")}
+                if (reconstruction.get("ballDetectionProfile") or "automatic")
+                != "automatic"
+                else {}
+            ),
         },
+        **(
+            {"jerseyOcr": {"profile": reconstruction.get("jerseyOcrProfile")}}
+            if (reconstruction.get("jerseyOcrProfile") or "automatic")
+            != "automatic"
+            else {}
+        ),
         "frameAnnotations": reconstruction.get("frameAnnotations") or [],
         "pitchCalibrationOverrides": reconstruction.get("pitchCalibrationOverrides")
         or [],
         "manualOrientation": {
-            "attackingGoal": orientation.get("attackingGoal"),
-            "attackingGoalSource": orientation.get("attackingGoalSource"),
+            # Publication materializes "unknown" for a missing orientation;
+            # digesting the absent field identically keeps the very first run
+            # of a fresh scene publishable through the terminal fence.
+            "attackingGoal": orientation.get("attackingGoal") or "unknown",
+            "attackingGoalSource": (
+                orientation.get("attackingGoalSource") or "unknown"
+            ),
             "visiblePitchSide": manual_visible_side,
             "visiblePitchSideSource": (
                 visible_side_source if manual_visible_side else None

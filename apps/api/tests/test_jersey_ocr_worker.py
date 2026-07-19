@@ -25,11 +25,19 @@ class FakeResponse:
         return self.payload
 
 
-def _settings(url="http://jersey-ocr-worker:8093", batch_size=2):
+def _settings(
+    url="http://jersey-ocr-worker:8093",
+    batch_size=2,
+    retry_count=0,
+    cache_root=None,
+):
     return SimpleNamespace(
         jersey_ocr_worker_url=url,
         jersey_ocr_worker_timeout=900,
         jersey_ocr_worker_batch_size=batch_size,
+        jersey_ocr_worker_batch_retry_count=retry_count,
+        jersey_ocr_cache_enabled=cache_root is not None,
+        media_root=str(cache_root) if cache_root is not None else ".",
     )
 
 
@@ -253,6 +261,185 @@ def test_client_batches_crops_and_preserves_unaccepted_evidence(monkeypatch, tmp
         "evidenceFingerprintVersion": "pixel-evidence-v1",
     }
     assert progress == [(2, 3, 1), (3, 3, 2)]
+
+
+def test_disk_cache_survives_worker_restart_and_model_change_reinfers(
+    monkeypatch, tmp_path
+):
+    crops = []
+    for index in range(2):
+        path = tmp_path / f"crop-{index}.jpg"
+        path.write_bytes(f"jpeg-{index}".encode())
+        crops.append(JerseyCropRequest(crop_id=f"crop-{index}", path=path))
+    posted = []
+    model_version = {"value": "fake-v1"}
+
+    def fake_post(_url, data, **_kwargs):
+        items = json.loads(data["manifest"])["items"]
+        posted.append([item["cropId"] for item in items])
+        return FakeResponse(
+            _base_payload(
+                modelVersion=model_version["value"],
+                items=[
+                    {
+                        **_response_identity(item),
+                        "usable": True,
+                        "status": "recognized",
+                        "number": "12",
+                        "confidence": 0.9,
+                        "candidates": [
+                            {
+                                "number": "12",
+                                "confidence": 0.9,
+                                "rawText": "12",
+                                "polygon": None,
+                            }
+                        ],
+                        "quality": _quality(),
+                        "rejectionReasons": [],
+                        "decisionReasons": [],
+                        "evidenceFingerprint": _fingerprint(item["cropId"]),
+                    }
+                    for item in items
+                ],
+                diagnostics={
+                    "requestedCropCount": len(items),
+                    "usableCropCount": len(items),
+                    "recognizedCropCount": len(items),
+                    "ambiguousCropCount": 0,
+                    "rejectedCropCount": 0,
+                    "providerInferenceCropCount": len(items),
+                    "cacheHitCount": 0,
+                    "requestDeduplicatedCount": 0,
+                    "cacheEnabled": True,
+                },
+            )
+        )
+
+    def readiness_get(_url, timeout):
+        return FakeResponse(
+            _base_payload(
+                modelVersion=model_version["value"],
+                status="ready",
+                device="cpu",
+                batchSize=32,
+            )
+        )
+
+    monkeypatch.setattr(
+        "app.jersey_ocr_worker_client.get_settings",
+        lambda: _settings(batch_size=4, cache_root=tmp_path / "media"),
+    )
+    monkeypatch.setattr(
+        "app.jersey_ocr_worker_transport.httpx.get", readiness_get
+    )
+    monkeypatch.setattr(
+        "app.jersey_ocr_worker_transport.httpx.post", fake_post
+    )
+
+    first = analyze_jersey_crops(crops)
+    assert posted == [["crop-0", "crop-1"]]
+    assert first.diagnostics["diskCacheHitCount"] == 0
+    assert first.diagnostics["diskCacheMissCount"] == 2
+
+    def forbidden_post(*_args, **_kwargs):
+        raise AssertionError("a warm rebuild must not re-upload cached crops")
+
+    monkeypatch.setattr(
+        "app.jersey_ocr_worker_transport.httpx.post", forbidden_post
+    )
+    second = analyze_jersey_crops(crops)
+
+    assert set(second.items_by_crop_id) == {"crop-0", "crop-1"}
+    assert second.diagnostics["diskCacheHitCount"] == 2
+    assert second.items_by_crop_id["crop-0"]["number"] == "12"
+
+    # A new model identity is a different cache contract: crops re-infer.
+    model_version["value"] = "fake-v2"
+    monkeypatch.setattr("app.jersey_ocr_worker_transport.httpx.post", fake_post)
+    third = analyze_jersey_crops(crops)
+
+    assert posted == [["crop-0", "crop-1"], ["crop-0", "crop-1"]]
+    assert third.diagnostics["diskCacheHitCount"] == 0
+
+
+def test_exhausted_batch_retries_keep_earlier_ocr_evidence_as_partial_result(
+    monkeypatch, tmp_path
+):
+    crops = []
+    for index in range(2):
+        path = tmp_path / f"crop-{index}.jpg"
+        path.write_bytes(b"jpeg")
+        crops.append(JerseyCropRequest(crop_id=f"crop-{index}", path=path))
+
+    attempts = []
+
+    def failing_second_batch(_url, data, **_kwargs):
+        item = json.loads(data["manifest"])["items"][0]
+        attempts.append(item["cropId"])
+        if item["cropId"] == "crop-1":
+            raise httpx.ConnectError("worker went away")
+        return FakeResponse(
+            _base_payload(
+                items=[
+                    {
+                        **_response_identity(item),
+                        "usable": True,
+                        "status": "recognized",
+                        "number": "12",
+                        "confidence": 0.9,
+                        "candidates": [
+                            {
+                                "number": "12",
+                                "confidence": 0.9,
+                                "rawText": "12",
+                                "polygon": None,
+                            }
+                        ],
+                        "quality": _quality(),
+                        "rejectionReasons": [],
+                        "decisionReasons": [],
+                        "evidenceFingerprint": _fingerprint(item["cropId"]),
+                    }
+                ],
+                diagnostics={
+                    "requestedCropCount": 1,
+                    "usableCropCount": 1,
+                    "recognizedCropCount": 1,
+                    "ambiguousCropCount": 0,
+                    "rejectedCropCount": 0,
+                    "providerInferenceCropCount": 1,
+                    "cacheHitCount": 0,
+                    "requestDeduplicatedCount": 0,
+                    "cacheEnabled": True,
+                },
+            )
+        )
+
+    monkeypatch.setattr(
+        "app.jersey_ocr_worker_client.get_settings",
+        lambda: _settings(batch_size=1, retry_count=1),
+    )
+    monkeypatch.setattr(
+        "app.jersey_ocr_worker_transport.httpx.post", failing_second_batch
+    )
+    monkeypatch.setattr(
+        "app.jersey_ocr_worker_client.sleep", lambda _value: None
+    )
+
+    result = analyze_jersey_crops(crops)
+
+    # The failed batch was retried once, then the partial result is explicit.
+    assert attempts == ["crop-0", "crop-1", "crop-1"]
+    assert set(result.items_by_crop_id) == {"crop-0"}
+    assert result.diagnostics["partialFailure"] == {
+        "failedCropIndex": 1,
+        "processedCropCount": 1,
+        "requestedCropCount": 2,
+        "attempts": 2,
+        "detail": result.diagnostics["partialFailure"]["detail"],
+    }
+    assert "worker went away" in result.diagnostics["partialFailure"]["detail"]
 
 
 def test_client_rejects_model_version_change_between_http_batches(

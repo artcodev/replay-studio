@@ -8,9 +8,6 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Callable
 
-import cv2
-import numpy as np
-
 from .jersey_ocr_contract import JerseyEvidenceSummary, JerseyOcrObservation
 from .jersey_ocr_fusion import aggregate_tracklets
 from .jersey_ocr_worker_client import (
@@ -18,6 +15,12 @@ from .jersey_ocr_worker_client import (
     jersey_ocr_worker_readiness,
 )
 from .jersey_ocr_worker_contract import JerseyCropRequest, JerseyOcrWorkerError
+from .person_crop_store import (
+    PersonCropRecord,
+    lookup_person_crop_envelope,
+    person_crop_store_runtime,
+)
+from .person_detection_cache import frame_content_sha256
 from .reconstruction_track_state import TrackState
 from .reconstruction_inputs import source_frame_index
 from .reconstruction_jersey_policy import (
@@ -76,6 +79,7 @@ def run_jersey_ocr_for_tracklets(
         "ambiguousCropCount": 0,
         "rejectedCropCount": 0,
         "backVisibilityAvailable": False,
+        "cropSource": "person-crop-store-v1",
         "cropCandidatePolicy": "bounded-per-prospective-partition-v2",
         "maxCropsPerProspectivePartition": (
             JERSEY_OCR_MAX_CROPS_PER_PROSPECTIVE_PARTITION
@@ -120,30 +124,37 @@ def run_jersey_ocr_for_tracklets(
 
     requests: list[JerseyCropRequest] = []
     request_metadata: dict[str, dict] = {}
-    image_cache: dict[int, np.ndarray | None] = {}
+    store_directory, crop_policy = person_crop_store_runtime()
+    envelope_cache: dict[int, dict[str, PersonCropRecord] | None] = {}
     with TemporaryDirectory(prefix="replay-jersey-ocr-") as directory:
         crop_root = Path(directory)
         for request_index, (tracklet_id, point, selection_quality) in enumerate(selected):
             frame_index = int(point["frameIndex"])
-            if frame_index not in image_cache:
-                image_cache[frame_index] = cv2.imread(str(frame_by_index[frame_index]))
-            image = image_cache[frame_index]
-            bbox = point["bbox"]
-            if image is None:
-                diagnostics["cropReadFailureCount"] += 1
-                continue
-            image_height, image_width = image.shape[:2]
-            x1 = max(0, min(image_width, int(np.floor(float(bbox["x"])))))
-            y1 = max(0, min(image_height, int(np.floor(float(bbox["y"])))))
-            x2 = max(0, min(image_width, int(np.ceil(float(bbox["x"]) + float(bbox["width"])))))
-            y2 = max(0, min(image_height, int(np.ceil(float(bbox["y"]) + float(bbox["height"])))))
-            crop = image[y1:y2, x1:x2]
-            if crop.size == 0:
-                diagnostics["cropReadFailureCount"] += 1
-                continue
+            if frame_index not in envelope_cache:
+                # The detection pass published every observation's crop; OCR
+                # reads those bytes instead of decoding the frame again.
+                try:
+                    frame_digest = frame_content_sha256(
+                        frame_by_index[frame_index]
+                    )
+                except OSError:
+                    frame_digest = None
+                envelope_cache[frame_index] = (
+                    lookup_person_crop_envelope(
+                        store_directory,
+                        frame_sha256=frame_digest,
+                        policy=crop_policy,
+                    )
+                    if frame_digest is not None
+                    else None
+                )
             observation_id = str(
                 point.get("observationId") or f"{tracklet_id}:{frame_index}"
             )
+            record = (envelope_cache[frame_index] or {}).get(observation_id)
+            if record is None or not record.crop_jpeg:
+                diagnostics["cropReadFailureCount"] += 1
+                continue
             crop_id = (
                 "jersey-"
                 + sha256(
@@ -151,7 +162,9 @@ def run_jersey_ocr_for_tracklets(
                 ).hexdigest()[:16]
             )
             crop_path = crop_root / f"crop-{request_index:04d}.jpg"
-            if not cv2.imwrite(str(crop_path), crop):
+            try:
+                crop_path.write_bytes(record.crop_jpeg)
+            except OSError:
                 diagnostics["cropReadFailureCount"] += 1
                 continue
             request = JerseyCropRequest(
@@ -163,11 +176,15 @@ def run_jersey_ocr_for_tracklets(
                 timestamp=float(point.get("t") or 0.0),
             )
             requests.append(request)
+            x1, y1, x2, y2 = record.padded_rect
+            padding = float(crop_policy.padding_ratio)
+            padded_area = (
+                float(record.bbox["width"]) * (1.0 + 2.0 * padding)
+            ) * (float(record.bbox["height"]) * (1.0 + 2.0 * padding))
             request_metadata[crop_id] = {
                 "selectionQuality": round(float(selection_quality), 6),
                 "clippedCropRatio": round(
-                    (max(0, x2 - x1) * max(0, y2 - y1))
-                    / max(1.0, float(bbox["width"]) * float(bbox["height"])),
+                    (max(0, x2 - x1) * max(0, y2 - y1)) / max(1.0, padded_area),
                     6,
                 ),
             }
@@ -330,4 +347,18 @@ def run_jersey_ocr_for_tracklets(
             "cacheEnabled": worker_cache_diagnostics.get("cacheEnabled"),
         }
     )
+    partial_failure = worker_cache_diagnostics.get("partialFailure")
+    if isinstance(partial_failure, dict):
+        diagnostics["status"] = "partial"
+        diagnostics["partialFailure"] = deepcopy(partial_failure)
+        processed = int(partial_failure.get("processedCropCount") or 0)
+        requested = int(partial_failure.get("requestedCropCount") or 0)
+        return (
+            summaries,
+            diagnostics,
+            [
+                f"Jersey OCR analyzed only {processed}/{requested} crops before "
+                "the worker became unavailable; shirt-number evidence is partial."
+            ],
+        )
     return summaries, diagnostics, []

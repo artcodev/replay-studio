@@ -3,9 +3,16 @@ from __future__ import annotations
 """Batch orchestration for the optional provider-neutral jersey OCR worker."""
 
 import json
+from pathlib import Path
+from time import sleep
 from typing import Callable, Sequence
 
 from .config import get_settings
+from .jersey_ocr_cache import (
+    JerseyOcrCacheError,
+    lookup_jersey_ocr_cache,
+    store_jersey_ocr_cache,
+)
 from .jersey_ocr_worker_contract import (
     CONTRACT_VERSION,
     JerseyCropRequest,
@@ -13,12 +20,16 @@ from .jersey_ocr_worker_contract import (
     JerseyOcrWorkerError,
 )
 from .jersey_ocr_worker_batch_validation import validate_analysis_payload
-from .jersey_ocr_worker_model_contract import validate_readiness_payload
+from .jersey_ocr_worker_model_contract import (
+    project_model_contract,
+    validate_readiness_payload,
+)
 from .jersey_ocr_worker_transport import (
     JerseyOcrTransportError,
     fetch_readiness,
     post_analysis_batch,
 )
+from .person_detection_cache import frame_content_sha256
 
 
 def jersey_ocr_worker_readiness(*, timeout: float = 2.0) -> dict:
@@ -113,6 +124,34 @@ def _merge_diagnostics(target: dict, values: dict) -> None:
             target[field] = int(target.get(field, 0)) + int(value)
 
 
+def _post_batch_with_retry(
+    worker_url: str,
+    *,
+    files: list[tuple[str, tuple[str, bytes, str]]],
+    manifest: str,
+    timeout: float,
+    retry_count: int,
+) -> tuple[object, int]:
+    """Retry only transient transport failures; contract errors stay fatal."""
+
+    attempts = 0
+    while True:
+        attempts += 1
+        try:
+            payload = post_analysis_batch(
+                worker_url,
+                files=files,
+                manifest=manifest,
+                timeout=timeout,
+            )
+        except JerseyOcrTransportError:
+            if attempts > retry_count:
+                raise
+            sleep(min(2.0, 0.5 * attempts))
+        else:
+            return payload, attempts
+
+
 def analyze_jersey_crops(
     crops: Sequence[JerseyCropRequest],
     on_progress: Callable[[int, int, int], None] | None = None,
@@ -134,21 +173,88 @@ def analyze_jersey_crops(
     )
     result = JerseyOcrBatchResult()
     recognized_count = 0
+    retried_batch_count = 0
+    retry_count = max(0, int(settings.jersey_ocr_worker_batch_retry_count))
     accepted_model_contract: dict[str, object] | None = None
-    for start in range(0, len(crops), batch_size):
-        batch = list(crops[start : start + batch_size])
+
+    cache_directory = (
+        Path(settings.media_root) / "jersey-ocr"
+        if settings.jersey_ocr_cache_enabled
+        else None
+    )
+    cache_contract: dict[str, object] | None = None
+    if cache_directory is not None:
+        try:
+            readiness_payload = fetch_readiness(
+                settings.jersey_ocr_worker_url,
+                timeout=2.0,
+            )
+            cache_contract = project_model_contract(
+                validate_readiness_payload(readiness_payload)
+            )
+        except (JerseyOcrWorkerError, KeyError, TypeError, ValueError):
+            cache_contract = None
+    disk_hits = 0
+    disk_misses = 0
+    disk_write_errors = 0
+    crop_digests: dict[str, str] = {}
+    pending: list[JerseyCropRequest] = []
+    if cache_contract is None:
+        pending = list(crops)
+    else:
+        accepted_model_contract = dict(cache_contract)
+        result.diagnostics["modelContract"] = dict(cache_contract)
+        for crop in crops:
+            try:
+                digest = frame_content_sha256(crop.path)
+                lookup = lookup_jersey_ocr_cache(
+                    cache_directory,
+                    crop_sha256=digest,
+                    model_contract=cache_contract,
+                )
+            except (JerseyOcrCacheError, OSError):
+                pending.append(crop)
+                continue
+            crop_digests[crop.crop_id] = digest
+            if lookup.status != "hit":
+                disk_misses += 1
+                pending.append(crop)
+                continue
+            disk_hits += 1
+            item = lookup.entry.detached_item()
+            result.items_by_crop_id[crop.crop_id] = {
+                **item,
+                "provider": cache_contract["backend"],
+                "modelVersion": cache_contract["modelVersion"],
+            }
+            recognized_count += int(item.get("status") == "recognized")
+    fully_cached = len(crops) - len(pending)
+    if on_progress is not None and fully_cached:
+        on_progress(fully_cached, len(crops), recognized_count)
+
+    for start in range(0, len(pending), batch_size):
+        batch = list(pending[start : start + batch_size])
         files, manifest = _batch_payload(batch)
         try:
-            payload = post_analysis_batch(
+            payload, attempts = _post_batch_with_retry(
                 settings.jersey_ocr_worker_url,
                 files=files,
                 manifest=manifest,
                 timeout=effective_timeout,
+                retry_count=retry_count,
             )
         except JerseyOcrTransportError as exc:
-            raise JerseyOcrWorkerError(
-                f"Jersey OCR worker failed: {exc}"
-            ) from exc
+            # Keep the evidence that earlier batches already produced; the
+            # caller decides how to present the explicit partial failure.
+            result.diagnostics["partialFailure"] = {
+                "failedCropIndex": fully_cached + start,
+                "processedCropCount": fully_cached + start,
+                "requestedCropCount": len(crops),
+                "attempts": retry_count + 1,
+                "detail": str(exc),
+            }
+            break
+        retried_batch_count += attempts - 1
         batch_contract, items, diagnostics = validate_analysis_payload(
             payload,
             {crop.crop_id for crop in batch},
@@ -174,12 +280,31 @@ def analyze_jersey_crops(
                 "modelVersion": batch_contract["modelVersion"],
             }
             recognized_count += int(item["status"] == "recognized")
+            digest = crop_digests.get(crop_id)
+            if digest is not None and cache_contract is not None:
+                try:
+                    store_jersey_ocr_cache(
+                        cache_directory,
+                        crop_sha256=digest,
+                        model_contract=cache_contract,
+                        item=item,
+                    )
+                except (JerseyOcrCacheError, OSError):
+                    # Cache IO must never invalidate a healthy worker result.
+                    disk_write_errors += 1
         if on_progress is not None:
             on_progress(
-                min(len(crops), start + len(batch)),
+                min(len(crops), fully_cached + start + len(batch)),
                 len(crops),
                 recognized_count,
             )
+    if retried_batch_count:
+        result.diagnostics["retriedBatchCount"] = retried_batch_count
+    if cache_contract is not None:
+        result.diagnostics["diskCacheHitCount"] = disk_hits
+        result.diagnostics["diskCacheMissCount"] = disk_misses
+        if disk_write_errors:
+            result.diagnostics["diskCacheWriteErrorCount"] = disk_write_errors
     usable_fingerprints = [
         str(item["evidenceFingerprint"])
         for item in result.items_by_crop_id.values()

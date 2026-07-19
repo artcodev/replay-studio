@@ -36,7 +36,9 @@ def build_ball_detection_metadata(
     return {
         "schemaVersion": 1,
         "status": (
-            "degraded"
+            "skipped"
+            if source.get("skippedByProfile")
+            else "degraded"
             if source.get("failedFrameCount")
             or source.get("fallbackFrameCount")
             or source.get("source") == "sampled-frame-fallback"
@@ -106,23 +108,8 @@ def build_calibration_metadata(result: CalibrationPhaseResult) -> dict[str, Any]
     return metadata
 
 
-def build_calibration_contract(
-    scene: Mapping[str, Any],
-    result: CalibrationPhaseResult,
-) -> dict[str, Any]:
-    existing = (
-        scene.get("payload", {})
-        .get("videoAsset", {})
-        .get("reconstruction", {})
-        .get("calibration")
-        or {}
-    )
+def build_calibration_contract(result: CalibrationPhaseResult) -> dict[str, Any]:
     return {
-        **{
-            key: deepcopy(value)
-            for key, value in existing.items()
-            if key in {"framePreviews", "lastFramePreview"}
-        },
         "schemaVersion": 2,
         "summary": result.quality["summary"],
         "frameEvidence": result.frame_evidence,
@@ -239,7 +226,12 @@ def publication_warnings(
             f"of {len(frame.frames)} sampled frames; no representative homography "
             "was used to hide those gaps."
         )
-    if not ball.keyframes:
+    if ball.diagnostics.get("skippedByProfile"):
+        warnings.append(
+            "Dense ball detection was skipped by the analysis profile; the "
+            "manual ball trajectory remains authoritative."
+        )
+    elif not ball.keyframes:
         warnings.append(
             "No stable automatic ball trajectory was found; active manual keypoints "
             "were preserved."

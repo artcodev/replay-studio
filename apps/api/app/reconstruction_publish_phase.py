@@ -12,7 +12,10 @@ from .reconstruction_artifact_publication import (
 from .reconstruction_identity_artifacts import (
     publish_identity_diagnostics,
 )
-from .reconstruction_ball_trajectory import publish_automatic_ball_trajectory
+from .reconstruction_ball_trajectory import (
+    normalize_ball_payload,
+    publish_automatic_ball_trajectory,
+)
 from .reconstruction_ball_phase import BallTrajectoryPhaseResult
 from .reconstruction_detection_contract import (
     CalibrationPhaseResult,
@@ -41,6 +44,7 @@ def publish_reconstruction_phase(
     ball_result: BallTrajectoryPhaseResult,
     ball_backend: str,
     ball_detection_input: Mapping,
+    ball_detection_profile: str = "automatic",
     progress: ReconstructionProgress,
     artifact_store: ArtifactStore,
 ) -> dict:
@@ -61,11 +65,17 @@ def publish_reconstruction_phase(
 
     scene["payload"]["tracks"] = tracks
     scene["payload"]["canonicalPeople"] = canonical_people
-    ball_payload = publish_automatic_ball_trajectory(
-        scene,
-        ball,
-        ball_tracking_diagnostics,
-    )
+    if ball_detection_profile == "skip-manual-authoritative":
+        # The automatic channel was intentionally not recomputed: keep both
+        # stored channels untouched and publish the authoritative manual path.
+        ball_payload = normalize_ball_payload(scene["payload"].get("ball"))
+        scene["payload"]["ball"] = ball_payload
+    else:
+        ball_payload = publish_automatic_ball_trajectory(
+            scene,
+            ball,
+            ball_tracking_diagnostics,
+        )
     active_ball_keyframes = ball_payload["keyframes"]
     ball_detection_metadata = build_ball_detection_metadata(
         frame_result,
@@ -84,7 +94,7 @@ def publish_reconstruction_phase(
         else "frames-ready"
     )
     calibration_metadata = build_calibration_metadata(calibration_result)
-    calibration_contract = build_calibration_contract(scene, calibration_result)
+    calibration_contract = build_calibration_contract(calibration_result)
     pitch_orientation = build_pitch_orientation(video, calibration_result)
     artifact_manifest, compact_identity_diagnostics = publish_identity_diagnostics(
         canonical_identity_diagnostics,

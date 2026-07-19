@@ -16,6 +16,10 @@ BackendName: TypeAlias = Literal[
     "wasb-service",
 ]
 
+# Evidence backend recorded when every detector failed and only sampled
+# generic COCO candidates remain for a dense frame.
+GENERIC_FALLBACK_BACKEND = "generic-coco-fallback"
+
 
 class BallDetectionError(RuntimeError):
     """Base error for the ball detector boundary."""

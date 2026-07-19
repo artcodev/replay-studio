@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -160,6 +161,32 @@ class AdaptiveRecordingDetector(RecordingDetector):
         )
 
 
+class FlakyPrimaryDetector(RecordingDetector):
+    """Primary detector that fails only on the requested frame indexes."""
+
+    def __init__(self, fail_frames: set[int]) -> None:
+        super().__init__("dedicated-ultralytics", candidate=True)
+        self.fail_frames = fail_frames
+
+    def detect(self, frame, *, frame_index=None, timestamp=None, context_frames=()):
+        if int(frame_index) in self.fail_frames:
+            self.calls.append(
+                {
+                    "frame": Path(frame),
+                    "frameIndex": frame_index,
+                    "timestamp": timestamp,
+                    "contextFrames": tuple(Path(item) for item in context_frames),
+                }
+            )
+            raise RuntimeError("primary detector outage")
+        return super().detect(
+            frame,
+            frame_index=frame_index,
+            timestamp=timestamp,
+            context_frames=context_frames,
+        )
+
+
 def _scene() -> dict:
     return {
         "id": "ball-detection-test",
@@ -191,6 +218,7 @@ def _patch_runtime(monkeypatch, dense, *, failure_policy="fallback") -> None:
             ball_detection_failure_policy=failure_policy,
             reconstruction_frame_rate=10.0,
             ball_detection_checkpoint_interval=1,
+            ball_detection_circuit_retry_interval=2,
             media_root=str(dense.frames[0][0].parent) if dense.frames else ".",
         )
 
@@ -394,6 +422,7 @@ def test_clean_dense_detection_is_reused_from_raw_candidate_cache(
         return SimpleNamespace(
             ball_detection_failure_policy="fallback",
             ball_detection_checkpoint_interval=4,
+            ball_detection_circuit_retry_interval=2,
             reconstruction_frame_rate=10.0,
             media_root=str(tmp_path),
         )
@@ -442,6 +471,210 @@ def test_clean_dense_detection_is_reused_from_raw_candidate_cache(
     assert second_resolved == first_resolved
     assert second_batches == first_batches
     assert second_warnings == []
+
+
+class SequenceRecordingDetector(RecordingDetector):
+    """WASB-style detector with a batched sequence transport."""
+
+    def __init__(self, *, fail_sequence: bool = False) -> None:
+        super().__init__("wasb-service", candidate=True)
+        self.fail_sequence = fail_sequence
+        self.sequence_calls: list[list[int]] = []
+
+    def detect_sequence(self, frames):
+        self.sequence_calls.append([frame_index for _, frame_index, _ in frames])
+        if self.fail_sequence:
+            raise RuntimeError("batched transport offline")
+        return [
+            BallDetectionBatch(
+                candidates=(
+                    BallCandidate(
+                        bbox=(10.0, 20.0, 14.0, 24.0),
+                        confidence=0.8,
+                        backend=self.backend_name,
+                    ),
+                ),
+                image_size=(1920, 1080),
+                backend=self.backend_name,
+            )
+            for _ in frames
+        ]
+
+
+def _wasb_batched_input(chunk_size: int = 3) -> dict:
+    return {
+        "schemaVersion": 1,
+        "backend": "wasb-service",
+        "wasbTransport": "batched-sequence",
+        "wasbBatchSize": chunk_size,
+    }
+
+
+def test_batched_transport_sends_one_request_per_chunk(monkeypatch, tmp_path):
+    dense = _dense_frames(tmp_path, count=7)
+    _patch_runtime(monkeypatch, dense)
+    detector = SequenceRecordingDetector()
+
+    resolved, metadata, batches, warnings = _detect_ball_frames(
+        _scene(),
+        detector,
+        None,
+        [],
+        [],
+        detector_input=_wasb_batched_input(chunk_size=3),
+    )
+
+    # 7 frames at 3 per request → 3 requests, zero per-frame calls.
+    assert detector.sequence_calls == [[0, 1, 2], [3, 4, 5], [6]]
+    assert detector.calls == []
+    assert len(resolved) == len(batches) == 7
+    assert metadata["fallbackFrameCount"] == 0
+    assert metadata["batchedTransport"] == {
+        "requested": True,
+        "requestCount": 3,
+        "framesPerRequest": 3,
+    }
+    assert warnings == []
+
+
+def test_batched_transport_failure_degrades_to_the_per_frame_path(
+    monkeypatch, tmp_path
+):
+    dense = _dense_frames(tmp_path)
+    _patch_runtime(monkeypatch, dense)
+    detector = SequenceRecordingDetector(fail_sequence=True)
+
+    resolved, metadata, batches, warnings = _detect_ball_frames(
+        _scene(),
+        detector,
+        None,
+        [],
+        [],
+        detector_input=_wasb_batched_input(),
+    )
+
+    # The batched request failed once; every frame still resolves through the
+    # ordinary per-frame path, so only the batching is lost — not quality.
+    assert detector.sequence_calls == [[0, 1, 2]]
+    assert [call["frameIndex"] for call in detector.calls] == [0, 1, 2]
+    assert len(resolved) == len(batches) == 3
+    assert metadata["batchedTransport"]["requestCount"] == 0
+    assert "batched transport offline" in metadata["batchedTransport"]["fallbackReason"]
+    assert metadata["fallbackFrameCount"] == 0
+    assert metadata["backendCounts"] == {"wasb-service": 3}
+    assert warnings == []
+
+
+def test_degraded_dense_detection_is_cached_and_reused_with_markers(
+    monkeypatch, tmp_path
+):
+    dense = _dense_frames(tmp_path)
+    _patch_runtime(monkeypatch, dense)
+    detector_input = {
+        "schemaVersion": 1,
+        "backend": "dedicated-ultralytics",
+        "checkpoint": {"name": "ball.pt", "size": 123, "mtimeNs": 456},
+        "confidence": 0.05,
+        "tileSize": 640,
+    }
+    flaky = FlakyPrimaryDetector(fail_frames={2})
+    fallback = RecordingDetector("generic-ultralytics", candidate=True)
+
+    first_resolved, first_metadata, first_batches, first_warnings = _detect_ball_frames(
+        _scene(),
+        flaky,
+        fallback,
+        [],
+        [],
+        detector_input=detector_input,
+    )
+
+    assert first_metadata["fallbackFrameCount"] == 1
+    assert first_metadata["failedFrameCount"] == 0
+    # One degraded frame must not void the cache for the whole run.
+    assert first_metadata["detectionCacheStored"] is True
+    assert any("explicit fallback on 1/3 frames" in item for item in first_warnings)
+
+    second_primary = RecordingDetector(
+        "dedicated-ultralytics",
+        fail=AssertionError("primary must not run on a cache hit"),
+    )
+    second_fallback = RecordingDetector(
+        "generic-ultralytics",
+        fail=AssertionError("fallback must not run on a cache hit"),
+    )
+    second_resolved, second_metadata, second_batches, second_warnings = (
+        _detect_ball_frames(
+            _scene(),
+            second_primary,
+            second_fallback,
+            [],
+            [],
+            detector_input=detector_input,
+        )
+    )
+
+    assert second_primary.calls == []
+    assert second_fallback.calls == []
+    assert second_metadata["detectionCacheHit"] is True
+    assert second_metadata["fallbackFrameCount"] == 1
+    assert second_metadata["failedFrameCount"] == 0
+    assert second_resolved == first_resolved
+    assert second_batches == first_batches
+    assert any("explicit fallback on 1/3 frames" in item for item in second_warnings)
+
+
+def test_checkpoints_continue_after_a_degraded_frame_and_resume_restores_state(
+    monkeypatch, tmp_path
+):
+    dense = _dense_frames(tmp_path)
+    _patch_runtime(monkeypatch, dense)
+    detector_input = {
+        "schemaVersion": 1,
+        "backend": "dedicated-ultralytics",
+        "checkpoint": {"name": "ball.pt", "size": 123, "mtimeNs": 456},
+        "confidence": 0.05,
+        "tileSize": 640,
+    }
+    flaky = FlakyPrimaryDetector(fail_frames={0})
+    fallback = RecordingDetector("generic-ultralytics", candidate=True)
+
+    def stop_after_two(completed, _total, _detail):
+        if completed == 2:
+            raise RuntimeError("cancel checkpoint")
+
+    with pytest.raises(RuntimeError, match="cancel checkpoint"):
+        _detect_ball_frames(
+            _scene(),
+            flaky,
+            fallback,
+            [],
+            [],
+            on_progress=stop_after_two,
+            detector_input=detector_input,
+        )
+
+    resumed_primary = RecordingDetector("dedicated-ultralytics", candidate=True)
+    resumed_fallback = RecordingDetector(
+        "generic-ultralytics",
+        fail=AssertionError("fallback must not run after the primary recovered"),
+    )
+    resolved, metadata, batches, _warnings = _detect_ball_frames(
+        _scene(),
+        resumed_primary,
+        resumed_fallback,
+        [],
+        [],
+        detector_input=detector_input,
+    )
+
+    # The degraded prefix was checkpointed, so only the last frame is computed.
+    assert metadata["detectionCheckpointHit"] is True
+    assert metadata["resumedFrameCount"] == 2
+    assert [call["frameIndex"] for call in resumed_primary.calls] == [2]
+    assert len(resolved) == len(batches) == 3
+    assert metadata["fallbackFrameCount"] == 2
+    assert metadata["detectionCacheStored"] is True
 
 
 def test_interrupted_clean_detection_resumes_from_periodic_checkpoint(
@@ -601,7 +834,7 @@ def test_adaptive_roi_is_never_applied_to_other_backends(
     assert metadata["adaptiveRoi"] == {"enabled": False}
 
 
-def test_first_primary_failure_opens_circuit_and_all_frames_use_fallback(
+def test_first_primary_failure_opens_circuit_until_the_half_open_probe(
     monkeypatch, tmp_path
 ):
     dense = _dense_frames(tmp_path)
@@ -621,6 +854,15 @@ def test_first_primary_failure_opens_circuit_and_all_frames_use_fallback(
     assert metadata["circuitBreaker"] == {
         "opened": True,
         "reason": "RuntimeError: worker offline",
+        "retryIntervalFrames": 2,
+        "openedCount": 1,
+        "transitions": [
+            {
+                "frameIndex": 0,
+                "event": "opened",
+                "reason": "RuntimeError: worker offline",
+            }
+        ],
     }
     assert metadata["backendCounts"] == {"dedicated-ultralytics": 3}
     assert batches[0]["fallbackReason"] == "RuntimeError: worker offline"
@@ -629,6 +871,45 @@ def test_first_primary_failure_opens_circuit_and_all_frames_use_fallback(
     )
     assert batches[2]["fallbackReason"] == batches[1]["fallbackReason"]
     assert any("explicit fallback on 3/3 frames" in warning for warning in warnings)
+
+
+def test_half_open_probe_restores_the_primary_detector_after_recovery(
+    monkeypatch, tmp_path
+):
+    dense = _dense_frames(tmp_path, count=5)
+    _patch_runtime(monkeypatch, dense)
+    # The primary fails only on frame 0; the circuit serves the fallback for
+    # retryIntervalFrames=2 frames, then the half-open probe succeeds.
+    primary = FlakyPrimaryDetector(fail_frames={0})
+    fallback = RecordingDetector("generic-ultralytics", candidate=True)
+
+    resolved, metadata, batches, warnings = _detect_ball_frames(
+        _scene(), primary, fallback, [], []
+    )
+
+    assert [call["frameIndex"] for call in primary.calls] == [0, 3, 4]
+    assert [call["frameIndex"] for call in fallback.calls] == [0, 1, 2]
+    assert len(resolved) == 5
+    assert metadata["fallbackFrameCount"] == 3
+    assert metadata["failedFrameCount"] == 0
+    assert metadata["backendCounts"] == {
+        "dedicated-ultralytics": 2,
+        "generic-ultralytics": 3,
+    }
+    assert metadata["circuitBreaker"]["opened"] is False
+    assert metadata["circuitBreaker"]["reason"] is None
+    assert metadata["circuitBreaker"]["openedCount"] == 1
+    assert metadata["circuitBreaker"]["transitions"] == [
+        {
+            "frameIndex": 0,
+            "event": "opened",
+            "reason": "RuntimeError: primary detector outage",
+        },
+        {"frameIndex": 3, "event": "closed", "reason": None},
+    ]
+    assert batches[3]["fallbackReason"] is None
+    assert batches[4]["fallbackReason"] is None
+    assert any("explicit fallback on 3/5 frames" in warning for warning in warnings)
 
 
 def test_failed_detector_maps_one_generic_fallback_observation_to_one_dense_frame(
@@ -735,15 +1016,60 @@ def test_strict_wasb_does_not_load_unrelated_dedicated_checkpoint(monkeypatch):
     assert built == ["generic-ultralytics", "wasb-service"]
 
 
+def test_queued_checkpoint_identity_ignores_mtime_only_changes(tmp_path):
+    checkpoint = tmp_path / "ball.pt"
+    checkpoint.write_bytes(b"same-weights")
+    expected = {
+        "name": "ball.pt",
+        "size": checkpoint.stat().st_size,
+        "sha256": "5a73f55361f1162bd6cd93ba97de41c42e77c6a9539a29174fec90ef5265fd20",
+    }
+
+    stat = checkpoint.stat()
+    os.utime(
+        checkpoint,
+        ns=(stat.st_atime_ns, stat.st_mtime_ns + 1_000_000_000),
+    )
+
+    _verify_queued_ball_checkpoint(checkpoint, expected)
+
+
 def test_queued_checkpoint_identity_fails_closed_when_local_weights_changed(tmp_path):
     checkpoint = tmp_path / "ball.pt"
+    checkpoint.write_bytes(b"old-weights")
+    expected = {
+        "name": "ball.pt",
+        "size": checkpoint.stat().st_size,
+        "sha256": "48aab6e93d3a7db5733fc8aaf39bbab1b6354f7a775010f4d36fc79dabc65264",
+    }
     checkpoint.write_bytes(b"new-weights")
 
     with pytest.raises(ReconstructionError, match="no longer matches"):
+        _verify_queued_ball_checkpoint(checkpoint, expected)
+
+
+def test_queued_checkpoint_without_content_hash_requires_a_new_run(tmp_path):
+    checkpoint = tmp_path / "ball.pt"
+    checkpoint.write_bytes(b"weights")
+
+    with pytest.raises(ReconstructionError, match="has no content hash"):
         _verify_queued_ball_checkpoint(
             checkpoint,
-            {"name": "ball.pt", "size": 2, "mtimeNs": checkpoint.stat().st_mtime_ns},
+            {
+                "name": "ball.pt",
+                "size": checkpoint.stat().st_size,
+                "mtimeNs": checkpoint.stat().st_mtime_ns,
+            },
         )
+
+
+@pytest.mark.parametrize("expected", [None, "ball.pt", []])
+def test_missing_queued_checkpoint_identity_requires_a_new_run(tmp_path, expected):
+    checkpoint = tmp_path / "ball.pt"
+    checkpoint.write_bytes(b"weights")
+
+    with pytest.raises(ReconstructionError, match="identity is missing"):
+        _verify_queued_ball_checkpoint(checkpoint, expected)
 
 
 def test_world_projection_is_published_only_for_real_keyframes():

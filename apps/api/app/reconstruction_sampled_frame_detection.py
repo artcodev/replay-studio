@@ -6,6 +6,12 @@ from pathlib import Path
 
 import app.person_base_detection_cache as person_base_detection_cache
 
+from .person_crop_store import (
+    attach_crop_records,
+    extract_and_store_person_crops,
+    person_crop_store_runtime,
+)
+from .person_detection_cache import frame_content_sha256
 from .reconstruction_inputs import source_frame_index
 from .reconstruction_person_annotations import (
     apply_person_annotations,
@@ -35,6 +41,8 @@ def analyze_sampled_frames(
     person_counts: list[int] = []
     ball_counts: list[int] = []
     calibration = SampledCalibrationAccumulator(scene, calibration_inputs)
+    crop_store_directory, crop_policy = person_crop_store_runtime()
+    crop_store_diagnostics: dict = {"hits": 0, "stores": 0, "storeErrors": 0}
 
     for sample_index, (path, time) in enumerate(frames):
         # This is the only sampled-frame decode boundary. Camera/calibration
@@ -53,6 +61,20 @@ def analyze_sampled_frames(
             frame_annotations(scene, source_index),
         )
         capture_detection_observations(people, source_index)
+        try:
+            frame_digest = frame_content_sha256(path)
+        except OSError:
+            frame_digest = None
+        if frame_digest is not None:
+            crop_records = extract_and_store_person_crops(
+                crop_store_directory,
+                image=image,
+                frame_sha256=frame_digest,
+                detections=people,
+                policy=crop_policy,
+                diagnostics=crop_store_diagnostics,
+            )
+            attach_crop_records(people, crop_records, frame_sha256=frame_digest)
         calibration.add_frame(
             sample_index=sample_index,
             source_index=source_index,
@@ -91,6 +113,7 @@ def analyze_sampled_frames(
             "baseBoundary": (
                 "pre-annotation/pre-calibration/pre-tracking/pre-reid/pre-ocr"
             ),
+            "personCropStore": crop_store_diagnostics,
         }
     )
     return SampledFrameAnalysis(

@@ -63,6 +63,7 @@ function bindViewport(viewport: Element | ComponentPublicInstance | null) {
       :show-models="options.models"
       :show-trails="options.trajectory"
       :show-path-tracking="options.pathTracking"
+      :show-all-paths="options.allPaths"
       :ball-selected="ballSelected"
       :show-labels="options.labels"
       :show-ball="options.ball"

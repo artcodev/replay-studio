@@ -51,17 +51,71 @@ def queued_progress(frame_count: int) -> dict:
     }
 
 
+class ProgressWriteThrottle:
+    """Decide which progress ticks deserve a durable control-plane write.
+
+    Dense phases emit one tick per frame — thousands per run. Every durable
+    write is a full lease-fenced transaction, so quiet ticks inside the same
+    phase are coalesced. Phase transitions and terminal ticks always write;
+    cancellation is still observed on every durable write and, independently,
+    by the recovery monitor's process kill.
+    """
+
+    _ALWAYS_WRITE_PHASES = frozenset({"complete", "failed"})
+
+    def __init__(
+        self,
+        interval_seconds: float,
+        clock: Callable[[], float] = monotonic,
+    ) -> None:
+        self.interval = max(0.0, float(interval_seconds))
+        self._clock = clock
+        self._last_write: float | None = None
+        self._last_phase: str | None = None
+
+    def should_write(self, payload: dict) -> bool:
+        phase = str(payload.get("phase") or "")
+        now = self._clock()
+        write = (
+            self._last_write is None
+            or phase != self._last_phase
+            or phase in self._ALWAYS_WRITE_PHASES
+            or now - self._last_write >= self.interval
+        )
+        if write:
+            self._last_write = now
+            self._last_phase = phase
+        return write
+
+
 class ReconstructionProgress:
     def __init__(
         self,
         scene: dict,
         listener: Callable[[dict], None] | None = None,
+        run_log=None,
     ) -> None:
         self.scene = scene
         self.listener = listener
+        self.run_log = run_log
         self.started = monotonic()
         self.phase_started = self.started
         self.phase = ""
+
+    def _journal(self, payload: dict) -> None:
+        if self.run_log is None:
+            return
+        self.run_log.event(
+            "progress",
+            phase=payload.get("phase"),
+            phaseIndex=payload.get("phaseIndex"),
+            label=payload.get("label"),
+            detail=payload.get("detail"),
+            completed=payload.get("completed"),
+            total=payload.get("total"),
+            phasePercent=payload.get("phasePercent"),
+            overallPercent=payload.get("overallPercent"),
+        )
 
     def update(
         self,
@@ -110,6 +164,7 @@ class ReconstructionProgress:
         reconstruction["processingStatus"] = "processing"
         reconstruction["progress"] = payload
         video["reconstruction"] = reconstruction
+        self._journal(payload)
         if self.listener is not None:
             self.listener(deepcopy(payload))
         return payload
@@ -131,6 +186,7 @@ class ReconstructionProgress:
             "updatedAt": datetime.now(UTC).isoformat(),
             "phases": phase_rows(len(RECONSTRUCTION_PHASES), complete=True),
         }
+        self._journal(payload)
         if self.listener is not None:
             self.listener(deepcopy(payload))
         return payload

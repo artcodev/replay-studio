@@ -16,6 +16,8 @@ from .ball_detection_contract import (
 from .wasb_ball_protocol import (
     WasbMultipartRequest,
     build_wasb_multipart_request,
+    build_wasb_sequence_request,
+    parse_wasb_sequence_response,
     parse_wasb_target_response,
 )
 from .wasb_ball_transport import wasb_http_transport
@@ -141,3 +143,46 @@ class WasbServiceBallDetector:
             raise BallDetectorUnavailable(
                 f"{self.backend_name} failed: {exc}"
             ) from exc
+
+    def detect_sequence(
+        self,
+        frames: Sequence[tuple[FrameInput, int, float | None]],
+    ) -> list[BallDetectionBatch]:
+        """Detect one contiguous run of frames in a single multipart request.
+
+        No per-frame fallback happens here: a failed request raises, and the
+        coordinator degrades the affected frames through its ordinary
+        per-frame fallback/circuit path.
+        """
+
+        try:
+            request = build_wasb_sequence_request(
+                frames,
+                max_candidates=self._max_candidates,
+            )
+            response = self._transport(self._url, request, self._timeout)
+            targets = parse_wasb_sequence_response(
+                response,
+                request=request,
+                backend_name=self.backend_name,
+                max_candidates=self._max_candidates,
+                nms_iou=self._nms_iou,
+            )
+        except Exception as exc:
+            if isinstance(exc, BallDetectionError):
+                raise
+            raise BallDetectorUnavailable(
+                f"{self.backend_name} failed: {exc}"
+            ) from exc
+        return [
+            BallDetectionBatch(
+                candidates=target.candidates,
+                image_size=target.image_size,
+                backend=self.backend_name,
+                metadata={
+                    "temporalContextMode": "tiled-window-sequence",
+                    "worker": dict(target.worker_metadata),
+                },
+            )
+            for target in targets
+        ]

@@ -1,0 +1,178 @@
+# Development-only override. Keep docker-compose.yml immutable and
+# production-like; start this profile through `npm run dev:docker` so Compose
+# Watch synchronizes source edits without rebuilding application images.
+services:
+  calibration-worker:
+    develop:
+      watch:
+        - action: sync+restart
+          path: ./services/calibration-worker/calibration_worker_service
+          target: /service/calibration_worker_service
+          initial_sync: true
+        - action: rebuild
+          path: ./services/calibration-worker/requirements.txt
+        - action: rebuild
+          path: ./services/calibration-worker/Dockerfile
+
+  identity-worker:
+    develop:
+      watch:
+        - action: sync+restart
+          path: ./services/identity-worker/identity_worker_service
+          target: /service/identity_worker_service
+          initial_sync: true
+        - action: rebuild
+          path: ./services/identity-worker/requirements.txt
+        - action: rebuild
+          path: ./services/identity-worker/Dockerfile
+
+  jersey-ocr-worker:
+    develop:
+      watch:
+        - action: sync+restart
+          path: ./services/jersey-ocr-worker/jersey_ocr_worker_service
+          target: /service/jersey_ocr_worker_service
+          initial_sync: true
+        - action: rebuild
+          path: ./services/jersey-ocr-worker/requirements.txt
+        - action: rebuild
+          path: ./services/jersey-ocr-worker/requirements-mmocr.txt
+        - action: rebuild
+          path: ./services/jersey-ocr-worker/requirements-easyocr.txt
+        - action: rebuild
+          path: ./services/jersey-ocr-worker/Dockerfile
+
+  ball-worker:
+    develop:
+      watch:
+        - action: sync+restart
+          path: ./services/ball-worker/ball_worker_service
+          target: /service/ball_worker_service
+          initial_sync: true
+        - action: rebuild
+          path: ./services/ball-worker/requirements.txt
+        - action: rebuild
+          path: ./services/ball-worker/Dockerfile
+
+  migrate:
+    # A manually invoked migration always sees the current source tree without
+    # rebuilding. Schema changes are intentionally not applied on every save.
+    volumes:
+      - ./apps/api/app:/app/app:ro
+      - ./apps/api/alembic:/app/alembic:ro
+      - ./apps/api/alembic.ini:/app/alembic.ini:ro
+    develop:
+      watch:
+        - action: rebuild
+          path: ./apps/api/pyproject.toml
+        - action: rebuild
+          path: ./apps/api/Dockerfile
+
+  api:
+    command:
+      - uvicorn
+      - app.main:app
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+      - --reload
+      - --reload-dir
+      - /app/app
+    volumes:
+      - ./apps/api/models:/app/models:ro
+    develop:
+      watch:
+        - action: sync
+          path: ./apps/api/app
+          target: /app/app
+          initial_sync: true
+        - action: rebuild
+          path: ./apps/api/pyproject.toml
+        - action: rebuild
+          path: ./apps/api/Dockerfile
+
+  reconstruction-runner:
+    environment:
+      # A source sync restarts the runner. Short dev leases let its interrupted
+      # job become recoverable quickly without weakening production settings.
+      RECONSTRUCTION_LEASE_TTL_SECONDS: 30
+      RECONSTRUCTION_LEASE_HEARTBEAT_SECONDS: 5
+      RECONSTRUCTION_RECOVERY_POLL_SECONDS: 1
+    volumes:
+      - ./apps/api/models:/app/models:ro
+    stop_grace_period: 8s
+    develop:
+      watch:
+        - action: sync+restart
+          path: ./apps/api/app
+          target: /app/app
+          initial_sync: true
+        - action: rebuild
+          path: ./apps/api/pyproject.toml
+        - action: rebuild
+          path: ./apps/api/Dockerfile
+
+  pipeline-runner:
+    environment:
+      PIPELINE_LEASE_TTL_SECONDS: 30
+      PIPELINE_LEASE_HEARTBEAT_SECONDS: 5
+      PIPELINE_RECOVERY_POLL_SECONDS: 1
+    volumes:
+      - ./apps/api/models:/app/models:ro
+    stop_grace_period: 8s
+    develop:
+      watch:
+        - action: sync+restart
+          path: ./apps/api/app
+          target: /app/app
+          initial_sync: true
+        - action: rebuild
+          path: ./apps/api/pyproject.toml
+        - action: rebuild
+          path: ./apps/api/Dockerfile
+
+  web:
+    # Keep the dev Node image separate from the production nginx image. The
+    # first dev start builds it once; normal source edits only synchronize.
+    image: replay-studio-web-dev:local
+    build:
+      context: .
+      dockerfile: apps/web/Dockerfile.dev
+    command: ["npm", "run", "dev", "--workspace", "apps/web"]
+    environment:
+      API_PROXY_TARGET: http://api:8000
+      DEV_USE_POLLING: ${DEV_USE_POLLING:-0}
+    ports: !override
+      - "127.0.0.1:5188:5188"
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - >-
+          fetch('http://127.0.0.1:5188/').then(r => {
+            if (!r.ok) process.exit(1)
+          }).catch(() => process.exit(1))
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    develop:
+      watch:
+        - action: sync
+          path: ./apps/web
+          target: /app/apps/web
+          initial_sync: true
+          ignore:
+            - node_modules/
+            - dist/
+            - package.json
+        - action: rebuild
+          path: ./apps/web/package.json
+        - action: rebuild
+          path: ./package.json
+        - action: rebuild
+          path: ./package-lock.json
+        - action: rebuild
+          path: ./apps/web/Dockerfile.dev

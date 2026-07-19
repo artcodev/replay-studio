@@ -43,33 +43,37 @@ def fetch_identity_predictions(
     diagnostics: list[dict[str, Any]] = []
     for batch in batches(manifest.crops, batch_size):
         files = []
-        frames = []
+        crops = []
         for index, crop in enumerate(batch):
             data = crop.path.read_bytes()
             width, height = image_size(data, crop.crop_id)
-            files.append(("frames", (crop.path.name, data, mime_type(crop.path))))
-            frames.append(
+            files.append(("crops", (crop.path.name, data, mime_type(crop.path))))
+            # Labelled validation images are already crops, so extraction
+            # quality is synthesized from the full image dimensions.
+            crops.append(
                 {
                     "fileIndex": index,
                     "frameIndex": index,
-                    "observations": [
-                        {
-                            "observationId": crop.crop_id,
-                            "bbox": {
-                                "x": 0,
-                                "y": 0,
-                                "width": width,
-                                "height": height,
-                            },
-                        }
-                    ],
+                    "observationId": crop.crop_id,
+                    "quality": {
+                        "cropWidth": width,
+                        "cropHeight": height,
+                        "sourceBoxWidth": width,
+                        "sourceBoxHeight": height,
+                        "borderClipped": False,
+                        "sharpness": 0.0,
+                    },
                 }
             )
         try:
             response = client.post(
                 f"{base_url.rstrip('/')}/v1/embeddings",
                 files=files,
-                data={"manifest": json.dumps({"frames": frames})},
+                data={
+                    "manifest": json.dumps(
+                        {"contractVersion": 2, "crops": crops}
+                    )
+                },
             )
         except Exception as exc:
             raise WorkerUnavailable(f"identity-worker inference request failed: {exc}") from exc

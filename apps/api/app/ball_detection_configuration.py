@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from .checkpoint_identity import checkpoint_content_identity
 from .config import get_settings
 from .person_detection_policy import (
     GENERIC_ULTRALYTICS_CONFIDENCE,
@@ -22,21 +23,24 @@ BALL_DETECTION_BACKENDS = frozenset(
 
 
 def ball_checkpoint_identity(path: str | Path) -> dict:
-    checkpoint = Path(path).expanduser().resolve()
-    identity: dict = {"name": checkpoint.name}
-    if checkpoint.is_file():
-        stat = checkpoint.stat()
-        identity.update({"size": int(stat.st_size), "mtimeNs": int(stat.st_mtime_ns)})
-    return identity
+    return checkpoint_content_identity(path)
 
 
 def verify_queued_ball_checkpoint(path: str | Path, expected: object) -> None:
     if not isinstance(expected, dict):
-        return
+        raise ReconstructionError(
+            "Queued ball checkpoint identity is missing; "
+            "queue a new reconstruction run."
+        )
+    if not expected.get("sha256"):
+        raise ReconstructionError(
+            "Queued ball checkpoint identity has no content hash; "
+            "queue a new reconstruction run."
+        )
     actual = ball_checkpoint_identity(path)
     mismatches = [
         key
-        for key in ("name", "size", "mtimeNs")
+        for key in ("name", "size", "sha256")
         if expected.get(key) is not None and expected.get(key) != actual.get(key)
     ]
     if mismatches:
@@ -60,9 +64,23 @@ def ball_detection_input(backend: str | None = None) -> dict:
         "imageSize": int(GENERIC_ULTRALYTICS_IMAGE_SIZE),
         "nmsIou": float(settings.ball_detection_nms_iou),
     }
+    failure_policy = str(settings.ball_detection_failure_policy)
+    requires_dedicated_checkpoint = selected == "dedicated-ultralytics" or (
+        selected == "wasb-service" and failure_policy == "fallback"
+    )
+    checkpoint = (
+        ball_checkpoint_identity(settings.ball_detection_model)
+        if requires_dedicated_checkpoint
+        else {}
+    )
+    if requires_dedicated_checkpoint and not checkpoint.get("sha256"):
+        raise ReconstructionError(
+            "Required ball detection checkpoint does not exist: "
+            f"{Path(settings.ball_detection_model).expanduser().resolve()}"
+        )
     dedicated_input = {
         "backend": "dedicated-ultralytics",
-        "checkpoint": ball_checkpoint_identity(settings.ball_detection_model),
+        "checkpoint": checkpoint,
         "classId": 0,
         "confidence": float(settings.ball_detection_confidence),
         "imageSize": int(settings.ball_detection_image_size),
@@ -89,7 +107,7 @@ def ball_detection_input(backend: str | None = None) -> dict:
         "backend": selected,
         "maxCandidates": int(settings.ball_detection_max_candidates),
         "analysisFrameRate": float(settings.ball_analysis_frame_rate),
-        "failurePolicy": str(settings.ball_detection_failure_policy),
+        "failurePolicy": failure_policy,
     }
     if selected == "generic-ultralytics":
         value.update(
@@ -99,15 +117,37 @@ def ball_detection_input(backend: str | None = None) -> dict:
         value.update(
             {key: item for key, item in dedicated_input.items() if key != "backend"}
         )
-        if str(settings.ball_detection_failure_policy) == "fallback":
+        if failure_policy == "fallback":
             value["fallback"] = generic_input
     else:
+        wasb_transport = str(settings.ball_wasb_transport)
+        if wasb_transport not in {"per-frame-window", "batched-sequence"}:
+            raise ReconstructionError(
+                f"Unsupported WASB transport: {wasb_transport}"
+            )
         value.update(
             {
                 "workerEndpoint": settings.ball_wasb_worker_url,
                 "timeoutSeconds": float(settings.ball_wasb_timeout),
                 "temporalWindowFrames": 3,
-                "temporalContext": "previous-current-next",
+                # "per-frame-window" centers a fresh (prev, current, next)
+                # window on every dense frame; "batched-sequence" sends runs
+                # of frames in one request and accepts the worker's fixed
+                # window tiling at run boundaries in exchange for ~3x fewer
+                # uploads and inferences. The choice is part of the cache
+                # contract, so switching transports never reuses evidence
+                # produced by the other windowing.
+                "temporalContext": (
+                    "previous-current-next"
+                    if wasb_transport == "per-frame-window"
+                    else "tiled-window-sequence"
+                ),
+                "wasbTransport": wasb_transport,
+                **(
+                    {"wasbBatchSize": int(settings.ball_wasb_batch_size)}
+                    if wasb_transport == "batched-sequence"
+                    else {}
+                ),
                 "fallback": (
                     dedicated_input
                     if str(settings.ball_detection_failure_policy) == "fallback"

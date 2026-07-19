@@ -73,6 +73,12 @@ def reconstruct_video_scene(
             scene,
             request.model if request else None,
             ball_backend=request.ball_backend if request else None,
+            ball_detection_profile=(
+                request.ball_detection_profile if request else None
+            ),
+            jersey_ocr_profile=(
+                request.jersey_ocr_profile if request else None
+            ),
             match_snapshot=project_matches.current_snapshot(project_id),
         )
     except StaleReconstructionRun as exc:
@@ -83,6 +89,8 @@ def reconstruct_video_scene(
                 "retry with the latest scene."
             ),
         ) from exc
+    except ReconstructionError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 @router.put("/{scene_id}/ball-trajectory", response_model=SceneDocument)
@@ -113,13 +121,12 @@ def save_scene_player_action(
     scene = project_resource_access.project_scene_or_404(project_id, scene_id)
     _ensure_idle(scene, "editing player actions")
     try:
-        upsert_player_action(scene, request.model_dump())
+        return upsert_player_action(scene, request.model_dump())
     except PlayerActionError as exc:
         status_code = (
             404 if str(exc) == "The canonical person no longer exists" else 422
         )
         raise HTTPException(status_code=status_code, detail=str(exc)) from exc
-    return scene
 
 
 @router.delete(
@@ -134,11 +141,10 @@ def remove_scene_player_action(
     scene = project_resource_access.project_scene_or_404(project_id, scene_id)
     _ensure_idle(scene, "editing player actions")
     try:
-        delete_player_action(scene, action_id)
+        return delete_player_action(scene, action_id)
     except PlayerActionError as exc:
         status_code = 404 if str(exc) == "Player action not found" else 422
         raise HTTPException(status_code=status_code, detail=str(exc)) from exc
-    return scene
 
 
 @router.post("/{scene_id}/compare-models", status_code=202)

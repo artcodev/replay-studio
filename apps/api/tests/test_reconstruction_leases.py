@@ -517,6 +517,77 @@ def test_delayed_duplicate_runner_child_does_not_re_run_terminal_same_run(
     assert calls == []
 
 
+def test_by_id_atomically_invalidates_recoverable_job_after_scene_drift(
+    tmp_path, monkeypatch
+):
+    """A poison head job must become terminal instead of starving the queue."""
+
+    clock = MutableClock()
+    store, _other, sessions = _independent_repositories(tmp_path, clock)
+    queued = _scene("drifted-head")
+    _put_owned(store, sessions, queued)
+    next_queued = _scene("next-after-drift")
+    _put_owned(store, sessions, next_queued)
+    run_id, fingerprint = _tokens(queued)
+    assert store.runs.claim_reconstruction_run(
+        queued["id"], run_id, fingerprint, "expired-owner"
+    )
+
+    # Simulate an editor write after queueing while preserving the compact job
+    # fence.  Once the old lease expires this row is recoverable, but its dense
+    # Scene is no longer a valid input for the queued fingerprint.
+    with sessions.begin() as session:
+        row = session.get(SceneRow, queued["id"])
+        assert row is not None
+        drifted = deepcopy(row.payload)
+        drifted["payload"]["videoAsset"]["analysisFps"] = 12.0
+        row.payload = drifted
+    clock.value += 11
+    assert store.runs.list_recoverable_reconstruction_runs() == [
+        (queued["id"], run_id, fingerprint),
+        (next_queued["id"], *_tokens(next_queued)),
+    ]
+
+    calls: list[bool] = []
+    monkeypatch.setattr(reconstruction_worker_module, "scenes", store.documents)
+    monkeypatch.setattr(
+        reconstruction_worker_module,
+        "reconstruction_runs",
+        store.runs,
+    )
+    monkeypatch.setattr(
+        reconstruction_module,
+        "reconstruct_scene",
+        lambda *_args, **_kwargs: calls.append(True),
+    )
+
+    assert not reconstruction_worker_module.reconstruct_scene_by_id(
+        queued["id"], run_id, fingerprint
+    )
+    assert calls == []
+    assert store.runs.list_recoverable_reconstruction_runs() == [
+        (next_queued["id"], *_tokens(next_queued))
+    ]
+    saved = store.documents.get(queued["id"])
+    assert saved is not None
+    saved_video = saved["payload"]["videoAsset"]
+    assert saved_video["processingState"] == "frames-ready"
+    assert saved_video["reconstruction"]["status"] == "failed"
+    assert saved_video["reconstruction"]["error"] == (
+        "Reconstruction scene state does not match its queued job"
+    )
+    with sessions() as session:
+        assert session.get(ReconstructionJobRow, queued["id"]).status == "invalid"
+        assert session.get(ReconstructionLeaseRow, queued["id"]) is None
+        analysis = session.get(AnalysisRunRow, run_id)
+        assert analysis is not None
+        assert analysis.status == "failed"
+        assert analysis.error == (
+            "Reconstruction scene state does not match its queued job"
+        )
+        assert analysis.completed_at is not None
+
+
 def test_by_id_claims_and_propagates_owner_to_terminal_publish(tmp_path, monkeypatch):
     clock = MutableClock()
     store, _other, _sessions = _independent_repositories(tmp_path, clock)
@@ -611,3 +682,80 @@ def test_dedicated_runner_scans_repeatedly_not_only_at_startup(monkeypatch):
     monitor.stop()
     assert len(calls) >= 2
     assert not monitor.is_alive()
+
+
+def test_monitor_release_frees_a_crashed_lease_for_immediate_reclaim(tmp_path):
+    clock = MutableClock()
+    first, _second, _sessions = _independent_repositories(tmp_path, clock)
+    scene = _scene("hard-crash")
+    _put_owned(first, _sessions, scene)
+    run_id, fingerprint = _tokens(scene)
+    assert first.runs.claim_reconstruction_run(
+        scene["id"], run_id, fingerprint, "dead-owner"
+    )
+
+    # The supervisor observed a non-zero child exit: no TTL wait is needed.
+    assert first.runs.release_crashed_reconstruction_run(
+        scene["id"],
+        run_id,
+        fingerprint,
+        error="Reconstruction child exited with code -9",
+    )
+    # The job stays recoverable and a replacement claims it immediately,
+    # without advancing the clock past the lease TTL.
+    assert first.runs.list_recoverable_reconstruction_runs() == [
+        (scene["id"], run_id, fingerprint)
+    ]
+    assert first.runs.claim_reconstruction_run(
+        scene["id"], run_id, fingerprint, "replacement"
+    )
+    # Releasing again is a no-op for the new healthy owner’s lease run match
+    # only when the run moved on; the same run releases idempotently.
+    assert first.runs.release_crashed_reconstruction_run(
+        scene["id"], run_id, fingerprint, error="late duplicate"
+    )
+
+
+def test_crash_looping_job_dead_letters_after_the_attempt_cap(
+    tmp_path, monkeypatch
+):
+    from types import SimpleNamespace
+
+    import app.reconstruction_run_repository as repository_module
+
+    monkeypatch.setattr(
+        repository_module,
+        "get_settings",
+        lambda: SimpleNamespace(
+            reconstruction_max_attempts=2,
+            reconstruction_lease_ttl_seconds=10,
+        ),
+    )
+    clock = MutableClock()
+    first, _second, _sessions = _independent_repositories(tmp_path, clock)
+    scene = _scene("crash-loop")
+    _put_owned(first, _sessions, scene)
+    run_id, fingerprint = _tokens(scene)
+
+    for attempt in (1, 2):
+        assert first.runs.claim_reconstruction_run(
+            scene["id"], run_id, fingerprint, f"owner-{attempt}"
+        )
+        assert first.runs.release_crashed_reconstruction_run(
+            scene["id"],
+            run_id,
+            fingerprint,
+            error=f"Reconstruction child exited with code -9 (try {attempt})",
+        )
+
+    # The third claim exceeds the cap: the job dead-letters with its last
+    # error, the scene fails explicitly and nothing remains recoverable.
+    assert not first.runs.claim_reconstruction_run(
+        scene["id"], run_id, fingerprint, "owner-3"
+    )
+    assert first.runs.list_recoverable_reconstruction_runs() == []
+    stored = first.documents.get(scene["id"])
+    reconstruction = stored["payload"]["videoAsset"]["reconstruction"]
+    assert reconstruction["status"] == "failed"
+    assert "gave up after 2 attempts" in str(reconstruction.get("error"))
+    assert "exited with code -9" in str(reconstruction.get("error"))

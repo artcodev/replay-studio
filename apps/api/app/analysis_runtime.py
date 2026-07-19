@@ -3,6 +3,7 @@ from __future__ import annotations
 """Compact reconstruction telemetry read helpers and post-publication hooks."""
 
 import logging
+from time import sleep
 from typing import Any
 
 from .analysis_run_repository import AnalysisRunRepository, analysis_runs
@@ -116,14 +117,29 @@ def publish_reconstruction_terminal(
     try:
         from .project_identity import sync_project_identities_from_scene
 
-        report = sync_project_identities_from_scene(
-            scene,
-            project_id=project_id,
-            projects=projects,
-            resources=resources,
-            matches=matches,
-            identities=identities,
-        )
+        report = None
+        last_error: Exception | None = None
+        # One transient DB hiccup must not lose the sync of a successful
+        # run; a crash inside this window is repaired by the startup sweep
+        # in recover_missed_identity_sync.
+        for attempt in range(3):
+            try:
+                report = sync_project_identities_from_scene(
+                    scene,
+                    project_id=project_id,
+                    projects=projects,
+                    resources=resources,
+                    matches=matches,
+                    identities=identities,
+                )
+                break
+            except Exception as exc:
+                last_error = exc
+                if attempt < 2:
+                    sleep(0.5 * (attempt + 1))
+        if report is None:
+            assert last_error is not None
+            raise last_error
         identity_sync: dict[str, Any] = {
             "status": "succeeded",
             "peopleCreated": report.people_created,
@@ -153,3 +169,56 @@ def publish_reconstruction_terminal(
             ),
         )
     return True
+
+
+def recover_missed_identity_sync(
+    *,
+    scenes=None,
+    runs: AnalysisRunRepository = analysis_runs,
+    projects: ProjectStore = project_store,
+    resources: ProjectResourceRepository = project_resources,
+    matches: ProjectMatchRepository = project_matches,
+    identities: ProjectIdentityRepository = project_identities,
+    limit: int = 20,
+) -> int:
+    """Repeat the idempotent identity-sync epilogue for crashed windows.
+
+    A worker that died between the fenced terminal commit and the epilogue
+    leaves a succeeded run without an ``identitySync: succeeded`` diagnostic.
+    This bounded startup sweep re-runs the epilogue for those runs only while
+    the scene still belongs to the same terminal run; a superseded or active
+    scene is left alone (lifecycle state wins over stale telemetry).
+    """
+
+    if scenes is None:
+        from .scene_repository import scenes as scene_repository
+
+        scenes = scene_repository
+    repaired = 0
+    for run in runs.list_missed_identity_sync(limit=limit):
+        scene_id = str(run.scene_id or "")
+        if not scene_id:
+            continue
+        scene = scenes.get(scene_id)
+        if scene is None:
+            continue
+        reconstruction = (
+            scene.get("payload", {}).get("videoAsset", {}).get("reconstruction")
+            or {}
+        )
+        if (
+            reconstruction.get("status") != "ready"
+            or str(reconstruction.get("runId") or "") != str(run.id)
+        ):
+            continue
+        if publish_reconstruction_terminal(
+            scene,
+            "ready",
+            projects=projects,
+            resources=resources,
+            runs=runs,
+            matches=matches,
+            identities=identities,
+        ):
+            repaired += 1
+    return repaired

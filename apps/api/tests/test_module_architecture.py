@@ -693,7 +693,7 @@ def test_reconstruction_jersey_pipeline_has_direct_capability_owners() -> None:
     assert _imported_names(
         "jersey_ocr_worker_client.py",
         "jersey_ocr_worker_model_contract",
-    ) == {"validate_readiness_payload"}
+    ) == {"project_model_contract", "validate_readiness_payload"}
     assert _imported_names(
         "jersey_ocr_worker_client.py",
         "jersey_ocr_worker_batch_validation",
@@ -730,7 +730,7 @@ def test_identity_worker_client_has_strict_capability_owners() -> None:
     assert _imported_names(
         "identity_worker_client.py",
         "identity_worker_model_contract",
-    ) == {"validate_readiness_payload"}
+    ) == {"project_model_contract", "validate_readiness_payload"}
     assert _imported_names(
         "identity_worker_client.py",
         "identity_worker_batch_validation",

@@ -55,11 +55,11 @@ def test_calibration_drafts_and_manual_previews_do_not_persist_scenes() -> None:
             }
         ), module
 
-    # Proposal orchestration records diagnostics through the dedicated preview
-    # boundary; it does not reach into scene persistence itself.
+    # Proposal orchestration is a read-only diagnostic draft; only the
+    # explicit apply command may persist a calibration edit (TD-CAL-01).
     proposal_imports = _imports("reconstruction_calibration_proposal.py")
     assert "scene_repository" not in proposal_imports
-    assert "reconstruction_calibration_preview" in proposal_imports
+    assert "reconstruction_calibration_preview" not in proposal_imports
 
 
 def test_calibration_apply_is_the_manual_override_rebuild_boundary() -> None:
@@ -148,11 +148,15 @@ def test_camera_motion_producer_and_solver_share_only_the_contract() -> None:
     )
 
 
-def test_preview_persistence_is_an_explicit_single_purpose_boundary() -> None:
-    assert "scene_repository" in _imports("reconstruction_calibration_preview.py")
-    assert _functions("reconstruction_calibration_preview.py") == {
-        "persist_frame_calibration_preview"
-    }
+def test_calibration_previews_are_ephemeral_and_never_persist() -> None:
+    # TD-CAL-01: a preview/proposal must not silently bump the Scene revision.
+    assert not (APP / "reconstruction_calibration_preview.py").exists()
+    assert "scene_repository" not in _imports(
+        "reconstruction_calibration_proposal.py"
+    )
+    assert "scene_repository" not in _imports(
+        "reconstruction_calibration_manual_preview.py"
+    )
 
 
 def test_pitch_calibration_has_capability_owners_instead_of_an_aggregate() -> None:

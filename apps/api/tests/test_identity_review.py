@@ -1,4 +1,5 @@
 import asyncio
+from copy import deepcopy
 from pathlib import Path
 from unittest.mock import patch
 
@@ -12,13 +13,22 @@ from pydantic import ValidationError
 import app.identity_review_routes as review_routes
 from app.identity_review_contract import IdentityReviewResponse
 from app.identity_review_crop_service import identity_observation_crop
-from app.identity_review_errors import IdentityReviewError
+from app.identity_review_errors import (
+    IdentityReviewArtifactUnavailableError,
+    IdentityReviewError,
+)
 from app.identity_review_http_presenter import present_identity_review
 from app.identity_review_projection import build_identity_review_projection
 from app.identity_review_routes import router as identity_review_router
 from app.project_match_persistence_contract import MatchSnapshotDocument
 from app.project_resource_repository import ProjectResourceConflict
 from app.artifact_store import FilesystemArtifactStore
+from app.reconstruction_artifact_codec import encode_identity_timeline
+from app.reconstruction_artifact_manifest import (
+    IDENTITY_TIMELINE_ARTIFACT_KIND,
+    IDENTITY_TIMELINE_SCHEMA_VERSION,
+    merge_artifact_manifest,
+)
 from app.reconstruction_identity_artifacts import publish_identity_diagnostics
 
 
@@ -140,13 +150,32 @@ def _identity_diagnostics() -> dict:
     }
 
 
-def _scene_with_identity_artifact(tmp_path: Path) -> tuple[dict, FilesystemArtifactStore]:
-    value = scene()
+def _scene_with_identity_artifact(
+    tmp_path: Path,
+    value: dict | None = None,
+) -> tuple[dict, FilesystemArtifactStore]:
+    value = value or scene()
     store = FilesystemArtifactStore(tmp_path / "artifacts")
     manifest, summary = publish_identity_diagnostics(_identity_diagnostics(), store=store)
+    encoding = encode_identity_timeline(
+        value["id"],
+        value["payload"].get("tracks") or [],
+        value["payload"].get("canonicalPeople") or [],
+    )
+    timeline_reference = store.put_json(
+        kind=IDENTITY_TIMELINE_ARTIFACT_KIND,
+        schema_version=IDENTITY_TIMELINE_SCHEMA_VERSION,
+        payload=encoding.payload,
+    )
     reconstruction = value["payload"]["videoAsset"]["reconstruction"]
-    reconstruction["artifactManifest"] = manifest
+    reconstruction["status"] = "ready"
+    reconstruction["artifactManifest"] = merge_artifact_manifest(
+        manifest,
+        identityTimeline=timeline_reference,
+    )
     reconstruction["diagnostics"] = {"identity": summary}
+    value["payload"]["tracks"] = encoding.compact_tracks
+    value["payload"]["canonicalPeople"] = encoding.compact_people
     return value, store
 
 
@@ -214,7 +243,7 @@ def test_identity_review_exposes_non_ready_reconstruction_state(status: str):
     assert result["items"] == []
 
 
-def test_identity_review_marks_ready_scene_without_diagnostics_as_unavailable():
+def test_identity_review_marks_ready_scene_without_artifacts_as_unavailable():
     value = scene()
     value["payload"]["videoAsset"]["reconstruction"] = {"status": "ready"}
 
@@ -223,8 +252,45 @@ def test_identity_review_marks_ready_scene_without_diagnostics_as_unavailable():
     assert result["availability"] == {
         "state": "unavailable",
         "available": False,
-        "reasonCode": "identity-diagnostics-not-published",
+        "reasonCode": "identity-review-artifacts-not-published",
     }
+
+
+def test_identity_review_keeps_prior_artifacts_unavailable_while_rebuilding(
+    tmp_path: Path,
+):
+    value, artifact_store = _scene_with_identity_artifact(tmp_path)
+    value["payload"]["videoAsset"]["reconstruction"]["status"] = "queued"
+
+    result = build_identity_review_projection(
+        value,
+        match_snapshot=match_snapshot(),
+        artifact_store=artifact_store,
+    )
+
+    assert result["availability"] == {"state": "queued", "available": False}
+    assert result["items"] == []
+
+
+@pytest.mark.parametrize("missing_artifact", ("identityTimeline", "identityDiagnostics"))
+def test_ready_identity_review_rejects_incomplete_artifact_publication(
+    tmp_path: Path,
+    missing_artifact: str,
+):
+    value, artifact_store = _scene_with_identity_artifact(tmp_path)
+    value["payload"]["videoAsset"]["reconstruction"]["artifactManifest"][
+        "artifacts"
+    ].pop(missing_artifact)
+
+    with pytest.raises(
+        IdentityReviewArtifactUnavailableError,
+        match="publication is incomplete",
+    ):
+        build_identity_review_projection(
+            value,
+            match_snapshot=match_snapshot(),
+            artifact_store=artifact_store,
+        )
 
 
 def test_identity_observation_crop_uses_persisted_bbox(tmp_path: Path):
@@ -254,10 +320,11 @@ def test_identity_observation_crop_rejects_unknown_observation(tmp_path: Path):
 
 
 def test_source_frame_zero_is_preserved_in_projection_and_crop(tmp_path: Path):
-    value, artifact_store = _scene_with_identity_artifact(tmp_path)
-    observation = value["payload"]["canonicalPeople"][0]["observations"][0]
+    source = scene()
+    observation = source["payload"]["canonicalPeople"][0]["observations"][0]
     observation["frameIndex"] = 9
     observation["sourceFrameIndex"] = 0
+    value, artifact_store = _scene_with_identity_artifact(tmp_path, source)
 
     review = build_identity_review_projection(
         value,
@@ -339,6 +406,32 @@ def test_identity_review_response_rejects_unknown_fields(tmp_path: Path):
         IdentityReviewResponse.model_validate(payload)
 
 
+def test_identity_review_response_rejects_inconsistent_availability(tmp_path: Path):
+    value, artifact_store = _scene_with_identity_artifact(tmp_path)
+    payload = present_identity_review(
+        build_identity_review_projection(
+            value,
+            match_snapshot=match_snapshot(),
+            artifact_store=artifact_store,
+        ),
+        project_id="project-review",
+        scene_id="scene-identity",
+    )
+    inconsistent = deepcopy(payload)
+    inconsistent["availability"] = {"state": "ready", "available": False}
+    with pytest.raises(ValidationError, match="true only for the ready state"):
+        IdentityReviewResponse.model_validate(inconsistent)
+
+    unknown_reason = deepcopy(payload)
+    unknown_reason["availability"] = {
+        "state": "unavailable",
+        "available": False,
+        "reasonCode": "not-a-contract-code",
+    }
+    with pytest.raises(ValidationError):
+        IdentityReviewResponse.model_validate(unknown_reason)
+
+
 def test_identity_review_route_exposes_worker_readiness(monkeypatch, tmp_path):
     application = FastAPI()
     application.include_router(identity_review_router)
@@ -413,28 +506,33 @@ def test_identity_review_route_returns_readiness_without_diagnostics_artifact(mo
     assert response.json()["items"] == []
 
 
-def test_identity_review_route_returns_503_for_missing_referenced_artifact(monkeypatch):
+def test_identity_review_route_returns_503_for_missing_referenced_artifact(
+    monkeypatch,
+    tmp_path: Path,
+):
     application = FastAPI()
     application.include_router(identity_review_router)
-    value = scene()
-    value["payload"]["videoAsset"]["reconstruction"] = {
-        "status": "ready",
-        "artifactManifest": {
-            "schemaVersion": 1,
-            "artifacts": {
-                "identityDiagnostics": {
-                    "id": "sha256:" + "0" * 64,
-                    "kind": "reconstruction.identity-diagnostics",
-                    "schemaVersion": 1,
-                    "uri": "artifact://sha256/" + "0" * 64,
-                    "sha256": "0" * 64,
-                    "byteSize": 1,
-                    "contentType": "application/json",
-                }
-            },
-        },
+    value, artifact_store = _scene_with_identity_artifact(tmp_path)
+    value["payload"]["videoAsset"]["reconstruction"]["artifactManifest"][
+        "artifacts"
+    ]["identityDiagnostics"] = {
+        "id": "sha256:" + "0" * 64,
+        "kind": "reconstruction.identity-diagnostics",
+        "schemaVersion": 1,
+        "uri": "artifact://sha256/" + "0" * 64,
+        "sha256": "0" * 64,
+        "byteSize": 1,
+        "contentType": "application/json",
     }
     monkeypatch.setattr("app.identity_review_routes.scenes.get", lambda _: value)
+    monkeypatch.setattr(
+        "app.reconstruction_artifact_hydration.reconstruction_artifact_store",
+        lambda: artifact_store,
+    )
+    monkeypatch.setattr(
+        "app.reconstruction_identity_artifacts.reconstruction_artifact_store",
+        lambda: artifact_store,
+    )
     monkeypatch.setattr(
         "app.identity_review_routes.identity_worker_readiness",
         lambda **_: {"configured": False, "status": "unavailable"},

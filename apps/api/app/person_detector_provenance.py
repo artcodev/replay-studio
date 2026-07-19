@@ -2,14 +2,13 @@
 
 from __future__ import annotations
 
-from hashlib import sha256
 from importlib.metadata import PackageNotFoundError, version as package_version
 from pathlib import Path
-from threading import Lock
 
 import cv2
 import numpy as np
 
+from .checkpoint_identity import file_content_sha256
 from .config import get_settings
 from .person_detection_policy import (
     APPEARANCE_FEATURE_SCHEMA_VERSION,
@@ -29,31 +28,6 @@ from .person_detection_policy import (
     SHALLOW_PERSON_FOOT_Y,
     SHALLOW_PERSON_GRASS_RATIO,
 )
-
-
-_checkpoint_digest_cache: dict[tuple[str, int, int], str] = {}
-_checkpoint_digest_lock = Lock()
-
-
-def _file_sha256(path: Path) -> str:
-    digest = sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
-def _checkpoint_sha256(path: Path) -> str:
-    stat = path.stat()
-    cache_key = (str(path), int(stat.st_size), int(stat.st_mtime_ns))
-    with _checkpoint_digest_lock:
-        cached = _checkpoint_digest_cache.get(cache_key)
-    if cached is not None:
-        return cached
-    digest = _file_sha256(path)
-    with _checkpoint_digest_lock:
-        _checkpoint_digest_cache[cache_key] = digest
-    return digest
 
 
 def _person_checkpoint_identity(
@@ -85,8 +59,7 @@ def _person_checkpoint_identity(
             "contentAvailable": True,
             "name": checkpoint.name,
             "size": int(stat.st_size),
-            "mtimeNs": int(stat.st_mtime_ns),
-            "sha256": _checkpoint_sha256(checkpoint),
+            "sha256": file_content_sha256(checkpoint),
         }
     )
     return identity

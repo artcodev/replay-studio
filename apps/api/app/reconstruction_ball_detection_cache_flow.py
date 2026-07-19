@@ -4,7 +4,7 @@ from .ball_detection_cache import (
     delete_ball_detection_checkpoint,
     load_ball_detection_cache,
     load_ball_detection_checkpoint,
-    store_clean_ball_detection_cache,
+    store_ball_detection_cache,
 )
 from .ball_detection_cache_contract import BallDetectionCacheError
 from .ball_detection_contract import BallDetector
@@ -15,6 +15,28 @@ from .reconstruction_ball_detection_contract import (
     DenseBallDetectionSource,
 )
 from .reconstruction_ball_roi import AdaptiveBallRoiConfig, adaptive_ball_roi_diagnostics
+
+
+def ball_degradation_warnings(
+    failed_frame_count: int,
+    fallback_frame_count: int,
+    frame_count: int,
+) -> list[str]:
+    """Format the standard warnings for degraded dense-frame evidence."""
+
+    warnings: list[str] = []
+    if failed_frame_count:
+        warnings.append(
+            f"Ball detector failed on {failed_frame_count}/{frame_count} frames; "
+            "explicit generic COCO fallback candidates were retained where available."
+        )
+    if fallback_frame_count:
+        warnings.append(
+            f"The requested ball detector used an explicit fallback on "
+            f"{fallback_frame_count}/{frame_count} frames; inspect backendCounts "
+            "and per-frame fallbackReason."
+        )
+    return warnings
 
 
 def load_complete_ball_detection_cache(
@@ -58,8 +80,8 @@ def load_complete_ball_detection_cache(
         {
             "detectionCacheHit": True,
             "detectionCacheKey": cached_entry.cache_key,
-            "failedFrameCount": 0,
-            "fallbackFrameCount": 0,
+            "failedFrameCount": cached_entry.failed_frame_count,
+            "fallbackFrameCount": cached_entry.fallback_frame_count,
             "circuitBreaker": {"opened": False, "reason": None},
             "backendCounts": {
                 backend: sum(item.get("backend") == backend for item in batches)
@@ -80,16 +102,24 @@ def load_complete_ball_detection_cache(
         )
     except (BallDetectionCacheError, OSError):
         pass
-    return resolved, metadata, batches, source.warnings
+    warnings = list(source.warnings)
+    warnings.extend(
+        ball_degradation_warnings(
+            cached_entry.failed_frame_count,
+            cached_entry.fallback_frame_count,
+            len(source.frames),
+        )
+    )
+    return resolved, metadata, batches, warnings
 
 
-def resume_clean_ball_detection_checkpoint(
+def resume_ball_detection_checkpoint(
     source: DenseBallDetectionSource,
     detector: BallDetector,
     detector_input: dict | None,
     on_progress: BallDetectionProgress | None,
 ) -> tuple[BallFrameDetections, list[dict]]:
-    """Resume only a clean primary-backend prefix with aligned timestamps."""
+    """Resume a timestamp-aligned prefix; degraded frames keep their markers."""
 
     resolved: BallFrameDetections = []
     batches: list[dict] = []
@@ -135,7 +165,7 @@ def resume_clean_ball_detection_checkpoint(
                 on_progress(
                     prefix_length,
                     len(source.frames),
-                    f"{detector.backend_name} · resumed clean checkpoint",
+                    f"{detector.backend_name} · resumed checkpoint",
                 )
         else:
             source.metadata["detectionCheckpointInvalidReason"] = (
@@ -168,17 +198,14 @@ def initial_adaptive_image_size(
     return None
 
 
-def publish_clean_ball_detection_cache(
+def publish_ball_detection_cache(
     source: DenseBallDetectionSource,
     detector: BallDetector,
     detector_input: dict | None,
     resolved: BallFrameDetections,
     batches: list[dict],
-    *,
-    failed_frame_count: int,
-    fallback_frame_count: int,
 ) -> None:
-    """Publish only clean cache state; cache IO never invalidates evidence."""
+    """Publish the complete run; cache IO never invalidates evidence."""
 
     if not (
         source.dense_cache_key
@@ -187,21 +214,16 @@ def publish_clean_ball_detection_cache(
     ):
         return
     try:
-        stored_entry = store_clean_ball_detection_cache(
+        stored_entry = store_ball_detection_cache(
             source.cache_asset_directory,
             dense_cache_key=source.dense_cache_key,
             detector_input=detector_input,
             primary_backend=detector.backend_name,
             resolved_frames=resolved,
             batches=batches,
-            failed_frame_count=failed_frame_count,
-            fallback_frame_count=fallback_frame_count,
         )
     except (BallDetectionCacheError, OSError) as exc:
         source.metadata["detectionCacheWriteError"] = str(exc)
-        return
-    if stored_entry is None:
-        source.metadata["detectionCacheStored"] = False
         return
     source.metadata["detectionCacheKey"] = stored_entry.cache_key
     source.metadata["detectionCacheStored"] = True

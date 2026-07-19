@@ -208,9 +208,13 @@ def test_reconstruction_endpoint_only_persists_the_queued_job(monkeypatch):
         model: str | None,
         *,
         ball_backend: str | None,
+        ball_detection_profile: str | None = None,
+        jersey_ocr_profile: str | None = None,
         match_snapshot=None,
     ):
-        calls.append((scene["id"], model, ball_backend))
+        calls.append(
+            (scene["id"], model, ball_backend, ball_detection_profile, jersey_ocr_profile)
+        )
         return queued
 
     monkeypatch.setattr(scene_analysis_routes, "queue_reconstruction", persist_queue)
@@ -221,7 +225,7 @@ def test_reconstruction_endpoint_only_persists_the_queued_job(monkeypatch):
     )
 
     assert scene_analysis_routes.reconstruct_video_scene("project-api", "api-queue") is queued
-    assert calls == [("api-queue", None, None)]
+    assert calls == [("api-queue", None, None, None, None)]
     assert not hasattr(main_module, "reconstruct_scene_by_id")
 
 

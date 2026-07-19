@@ -12,6 +12,7 @@ from app.reconstruction_artifact_hydration import (
     hydrate_scene_reconstruction,
     load_dense_reconstruction_artifacts,
 )
+from app.reconstruction_artifact_manifest import artifact_references
 from app.reconstruction_artifact_publication import (
     publish_dense_reconstruction_artifacts,
 )
@@ -131,6 +132,17 @@ def test_missing_or_corrupt_artifact_fails_closed(tmp_path: Path):
     with pytest.raises(ReconstructionArtifactError, match="schema version"):
         load_identity_diagnostics({"artifactManifest": malformed}, store=store)
     assert reference["uri"].startswith("artifact://sha256/")
+
+
+@pytest.mark.parametrize("manifest", ("not-an-object", ["not-an-object"]))
+def test_non_object_artifact_manifest_fails_closed(manifest: object):
+    with pytest.raises(ReconstructionArtifactError, match="manifest is malformed"):
+        artifact_references({"artifactManifest": manifest})
+
+
+def test_absent_or_null_artifact_manifest_means_no_artifacts():
+    assert artifact_references({}) == {}
+    assert artifact_references({"artifactManifest": None}) == {}
 
 
 def test_target_scene_contract_removes_dense_exact_duplicates(tmp_path: Path):

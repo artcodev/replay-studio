@@ -8,7 +8,7 @@ from time import monotonic
 from typing import Any, Iterable, Mapping
 
 
-CACHE_SCHEMA_VERSION = "identity-embedding-cache.v1"
+CACHE_SCHEMA_VERSION = "identity-embedding-cache.v3"
 
 
 @dataclass(frozen=True, slots=True)

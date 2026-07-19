@@ -173,6 +173,55 @@ def test_queue_assigns_unique_run_revision_and_input_fingerprint(monkeypatch):
     assert first_metadata["inputFingerprint"] != second_metadata["inputFingerprint"]
 
 
+def test_queue_inherits_skip_profile_only_while_manual_ball_is_authoritative(
+    monkeypatch,
+):
+    monkeypatch.setattr("app.reconstruction_queue.frame_paths", lambda _: [])
+    monkeypatch.setattr(
+        "app.reconstruction_queue.reconstruction_runs.enqueue_reconstruction",
+        lambda value, **_kwargs: value,
+    )
+
+    manual_scene = _scene()
+    manual_scene["payload"]["ball"] = {
+        "mode": "manual",
+        "manualKeyframes": [{"t": 1.0, "x": 0.0, "z": 0.0}],
+        "keyframes": [{"t": 1.0, "x": 0.0, "z": 0.0}],
+    }
+    manual_scene["payload"]["videoAsset"]["reconstruction"].update(
+        {"status": "ready", "ballDetectionProfile": "skip-manual-authoritative"}
+    )
+    inherited = queue_reconstruction(manual_scene, match_snapshot=None)
+    assert (
+        inherited["payload"]["videoAsset"]["reconstruction"]["ballDetectionProfile"]
+        == "skip-manual-authoritative"
+    )
+
+    # The manual precondition disappeared: the inherited skip degrades to an
+    # explicit automatic run instead of silently skipping a needed pass.
+    automatic_scene = _scene()
+    automatic_scene["payload"]["ball"] = {"mode": "automatic", "keyframes": []}
+    automatic_scene["payload"]["videoAsset"]["reconstruction"].update(
+        {"status": "ready", "ballDetectionProfile": "skip-manual-authoritative"}
+    )
+    degraded = queue_reconstruction(automatic_scene, match_snapshot=None)
+    assert (
+        degraded["payload"]["videoAsset"]["reconstruction"]["ballDetectionProfile"]
+        == "automatic"
+    )
+
+    # An explicit user request without the precondition fails closed.
+    rejected_scene = _scene()
+    rejected_scene["payload"]["ball"] = {"mode": "automatic", "keyframes": []}
+    rejected_scene["payload"]["videoAsset"]["reconstruction"]["status"] = "ready"
+    with pytest.raises(ReconstructionError, match="manual ball"):
+        queue_reconstruction(
+            rejected_scene,
+            ball_detection_profile="skip-manual-authoritative",
+            match_snapshot=None,
+        )
+
+
 def test_match_snapshot_reference_change_invalidates_reconstruction_input() -> None:
     before = _scene()
     before["payload"]["videoAsset"]["reconstruction"]["matchSnapshotRef"] = {

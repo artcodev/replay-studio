@@ -134,13 +134,16 @@ checksum-verified identity artifact; observation and canonical-person shaping
 live in their own pure projections. `identity_review_http_presenter.py` adds
 project-scoped crop links, while `identity_review_crop_service.py` alone owns
 frame-path resolution and image encoding. The route publishes a strict
-capability-specific response contract. The identity-diagnostics reference in
-the reconstruction artifact manifest is the capability boundary: its absence
-is a normal query state exposed as HTTP 200 plus typed `availability`, while a
-published reference that cannot pass immutable artifact validation fails with
-HTTP 503. HTTP 409 is reserved for an actual conflicting command and is never
-used for read-model readiness. Roster readiness comes only from the structured
-`rosterQuality` fields; provider warning prose is display-only.
+capability-specific response contract. The complete identity-review artifact
+set (`identityDiagnostics` plus `identityTimeline`) in the reconstruction
+manifest is the capability boundary: absence of both is a normal query state
+exposed as HTTP 200 plus typed `availability`, while partial publication or a
+reference that cannot pass immutable artifact validation fails with HTTP 503.
+Lifecycle state takes precedence over retained last-good references, so a new
+queued/processing run cannot expose the preceding review as current. HTTP 409
+is reserved for an actual conflicting command and is never used for read-model
+readiness. Roster readiness comes only from the structured `rosterQuality`
+fields; provider warning prose is display-only.
 A generalized dependency/stale graph for compositions and future derived
 artifacts remains part of the canonical artifact migration.
 
@@ -434,10 +437,10 @@ not framework-sized god files.
   commands. Opening a project or segment creates no implicit actor selection
   and performs no identity-review query. The browser loads review evidence only
   when the user explicitly selects a canonical person, the Binding inspector is
-  visible, and the active Scene advertises an identity-diagnostics artifact;
-  requests are deduplicated by Scene revision and artifact identity. Large
-  scoped templates and styles are not split solely by line count when their
-  script and public UI contract remain cohesive.
+  visible, and the active Scene advertises both required identity-review
+  artifacts; requests are deduplicated by Scene revision and both artifact
+  identities. Large scoped templates and styles are not split solely by line
+  count when their script and public UI contract remain cohesive.
 - Worker `main` modules construct HTTP applications and translate errors only.
   Request validation, cache policy, model loading and inference live in worker
   capability modules, which are testable without FastAPI. Ball, identity and

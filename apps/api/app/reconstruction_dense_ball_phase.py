@@ -25,6 +25,25 @@ class DenseBallDetectionResult:
     metric_sample_count: int
 
 
+def skipped_dense_ball_result(profile: str) -> DenseBallDetectionResult:
+    """Explicit no-inference result for a queued skip profile."""
+
+    return DenseBallDetectionResult(
+        frames=[],
+        frame_metadata={
+            "skippedByProfile": True,
+            "profile": str(profile),
+            "detectionCacheHit": False,
+            "failedFrameCount": 0,
+            "fallbackFrameCount": 0,
+        },
+        batches=[],
+        warnings=[],
+        counts=[],
+        metric_sample_count=0,
+    )
+
+
 def _queued_detector_policy(detector_input: Mapping) -> tuple[float, str]:
     analysis_frame_rate = float(detector_input.get("analysisFrameRate") or 0.0)
     if not np.isfinite(analysis_frame_rate) or analysis_frame_rate <= 0:
@@ -100,6 +119,10 @@ def detect_dense_ball_phase(
     sampled_times = [float(time) for _, time in sampled_frames]
     for ball_frame_index, (balls, ball_time) in enumerate(ball_frames):
         if not sampled_frames:
+            continue
+        if not balls:
+            # Occluded frames are common; homography interpolation with an
+            # SVD validation per frame is wasted with nothing to project.
             continue
         projection_context = dense_ball_projection_context(
             float(ball_time),

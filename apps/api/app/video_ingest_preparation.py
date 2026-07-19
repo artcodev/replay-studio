@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 from pathlib import Path
 from typing import Callable
 
@@ -180,6 +181,11 @@ def prepare_video_generation(
             stage=final_stage,
         )
     except VideoProcessingCancelled:
+        # This generation was created by this attempt and never published:
+        # a cancelled or failed attempt must not strand proxy/frames forever
+        # (every retry claims a fresh staging key, so nothing reuses these).
+        shutil.rmtree(generation, ignore_errors=True)
         raise
     except (VideoProcessingError, OSError, ValueError, json.JSONDecodeError) as exc:
+        shutil.rmtree(generation, ignore_errors=True)
         raise VideoProcessingError(str(exc)) from exc
