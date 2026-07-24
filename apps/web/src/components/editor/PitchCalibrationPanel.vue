@@ -21,7 +21,7 @@ const emit = defineEmits<{
   changePreset: [event: Event]
   calibrateAgain: []
   returnToFrame: []
-  apply: []
+  apply: [acceptQualityWarning?: boolean]
 }>()
 
 function percent(value: number | null | undefined) {
@@ -30,6 +30,10 @@ function percent(value: number | null | undefined) {
 
 function pixels(value: number | null | undefined) {
   return value === null || value === undefined ? '—' : `${value.toFixed(1)} px`
+}
+
+function metres(value: number | null | undefined) {
+  return value === null || value === undefined ? '—' : `${value.toFixed(2)} m`
 }
 
 function visibleSideLabel(
@@ -61,6 +65,8 @@ function rawLineLabel(line: CalibrationFrameDiagnostics['lines'][number], index:
       <div><span>Inliers</span><strong>{{ diagnostics.inlierCount ?? '—' }}<template v-if="diagnostics.inlierRatio !== null"> · {{ percent(diagnostics.inlierRatio) }}</template></strong></div>
       <div><span>Projected markings · p50</span><strong>{{ pixels(diagnostics.residualP50) }}</strong></div>
       <div><span>Projected markings · p95</span><strong>{{ pixels(diagnostics.residualP95) }}</strong></div>
+      <div><span>Keypoint ground residual · p50</span><strong>{{ metres(diagnostics.groundResidualP50) }}</strong></div>
+      <div><span>Keypoint ground residual · p95</span><strong>{{ metres(diagnostics.groundResidualP95) }}</strong></div>
       <div><span>Projected markings · precision</span><strong>{{ percent(diagnostics.precision) }}</strong></div>
       <div><span>Projected markings · recall</span><strong>{{ percent(diagnostics.recall) }}</strong></div>
       <div><span>Projected markings · F1</span><strong>{{ percent(diagnostics.f1) }}</strong></div>
@@ -106,11 +112,23 @@ function rawLineLabel(line: CalibrationFrameDiagnostics['lines'][number], index:
     <p v-if="!activeAtCurrentTime">Move the playhead back to {{ draft.sceneTime.toFixed(2) }}s to edit these anchors.</p>
     <p v-else>Yellow lines are the projected pitch. Colored dots are detected source points; red vectors end at their projected positions. Drag numbered anchors to refine this frame manually.</p>
     <small v-for="warning in warnings" :key="warning">{{ warning }}</small>
-    <small class="calibration-preview-note">Preview only · diagnostics are recorded, but anchors and tracks stay unchanged until Apply & rebuild.</small>
+    <small v-if="draft.quality === 'poor'" class="calibration-preview-warning">Automatic line-mask QA disagrees with this manual fit. Check the projected markings carefully before overriding the warning.</small>
+    <small class="calibration-preview-note">Frame-local preview only · the pixel score does not measure continuity with adjacent camera matrices. Saving stages this frame; finalization is a separate action in the calibration workspace.</small>
     <div class="calibration-actions">
       <button :disabled="loading" @click="emit('calibrateAgain')">{{ loading ? 'Updating…' : 'Calibrate again' }}</button>
       <button v-if="!activeAtCurrentTime" @click="emit('returnToFrame')">Return to frame</button>
-      <button class="apply" :disabled="loading || applying" @click="emit('apply')">{{ applying ? 'Applying…' : 'Apply & rebuild' }}</button>
+      <button
+        v-if="draft.quality === 'poor'"
+        class="apply"
+        :disabled="loading || applying"
+        @click="emit('apply', true)"
+      >{{ applying ? 'Saving draft…' : 'Save despite QA warning' }}</button>
+      <button
+        v-else
+        class="apply"
+        :disabled="loading || applying"
+        @click="emit('apply')"
+      >{{ applying ? 'Saving draft…' : 'Save frame correction' }}</button>
     </div>
   </div>
 </template>

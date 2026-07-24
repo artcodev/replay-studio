@@ -9,8 +9,6 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-import app.ultralytics_person_inference as ultralytics_person_inference
-
 from .person_detection_cache import (
     PERSON_DETECTION_CACHE_SCHEMA_VERSION,
     PersonDetectionCacheError,
@@ -18,6 +16,8 @@ from .person_detection_cache import (
     lookup_person_detection_cache,
     store_person_detection_cache,
 )
+from .person_detection_candidate_selection import parse_person_prediction
+from .person_detection_provider_contract import PersonDetectionProvider
 from .reconstruction_person_detection_contract import Detection
 
 
@@ -61,7 +61,7 @@ def _base_detection_from_payload(payload: Mapping) -> Detection:
 
 
 def cached_base_frame_detections(
-    model: object,
+    provider: PersonDetectionProvider,
     path: Path,
     asset_directory: Path,
     detector_input: Mapping,
@@ -116,9 +116,31 @@ def cached_base_frame_detections(
 
     diagnostics["misses"] += 1
     diagnostics["providerCalls"] += 1
-    result = ultralytics_person_inference.predict_frame(model, path)
-    image = result.orig_img
-    people, balls = ultralytics_person_inference.parse_person_detections(result)
+    prediction = provider.predict(path)
+    image = prediction.image_bgr
+    people, balls = parse_person_prediction(prediction)
+    for source, target in (
+        ("requestSeconds", "providerRequestSeconds"),
+        ("inferenceSeconds", "providerInferenceSeconds"),
+        ("decodeSeconds", "providerDecodeSeconds"),
+    ):
+        value = prediction.diagnostics.get(source)
+        if isinstance(value, (int, float)):
+            diagnostics[target] = round(
+                float(diagnostics.get(target, 0.0)) + float(value),
+                6,
+            )
+    box_count = prediction.diagnostics.get("boxCount")
+    if isinstance(box_count, (int, float)):
+        diagnostics["providerBoxCount"] = (
+            int(diagnostics.get("providerBoxCount", 0)) + int(box_count)
+        )
+    degenerate_count = prediction.diagnostics.get("degenerateBoxCount")
+    if isinstance(degenerate_count, (int, float)):
+        diagnostics["providerDegenerateBoxCount"] = (
+            int(diagnostics.get("providerDegenerateBoxCount", 0))
+            + int(degenerate_count)
+        )
     if frame_digest is not None:
         try:
             stored = store_person_detection_cache(

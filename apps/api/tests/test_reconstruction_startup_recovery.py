@@ -210,8 +210,12 @@ def test_reconstruction_endpoint_only_persists_the_queued_job(monkeypatch):
         ball_backend: str | None,
         ball_detection_profile: str | None = None,
         jersey_ocr_profile: str | None = None,
-        match_snapshot=None,
-    ):
+            contact_point_profile: str | None = None,
+            mode: str | None = None,
+            sampling_frame_rate: float | None = None,
+            direct_calibration_max_gap_seconds: float | None = None,
+            match_snapshot=None,
+        ):
         calls.append(
             (scene["id"], model, ball_backend, ball_detection_profile, jersey_ocr_profile)
         )

@@ -1,0 +1,182 @@
+{
+ "sceneId": "identity-scene",
+ "requestedTime": 0.0,
+ "sceneTime": 0.0,
+ "ballSceneTime": 0.0,
+ "ballFrameIndex": 0,
+ "sourceTime": 3.0,
+ "frameIndex": 101,
+ "frameWidth": 960,
+ "frameHeight": 540,
+ "model": "test-model",
+ "ballBackend": "dedicated-ultralytics",
+ "projectionMode": "screen-relative",
+ "calibrationStatus": "fallback",
+ "identityLinking": {
+  "mode": "canonical-observations",
+  "schemaVersion": 3
+ },
+ "people": [
+  {
+   "id": "obs-101",
+   "observationId": "obs-101",
+   "confidence": 0.9,
+   "bbox": {
+    "x": 100.0,
+    "y": 152.0,
+    "width": 24.0,
+    "height": 48.0
+   },
+   "pitch": null,
+   "jerseyColor": "#e1382c",
+   "annotationId": null,
+   "kind": null,
+   "annotationLabel": null,
+   "source": "automatic",
+   "matchedTrackId": null,
+   "matchedTrackLabel": "Video-only person",
+   "canonicalPersonId": "canonical-video-only",
+   "identityStatus": "provisional",
+   "identityConfidence": 0.4,
+   "identitySource": "tracker+trajectory",
+   "displayName": "Video-only person",
+   "jerseyNumber": null,
+   "teamId": null,
+   "matchDistance": null,
+   "matchSource": "persisted-observation",
+   "metricStatus": "unprojected",
+   "metricReason": "metric-projection-unavailable",
+   "rawPitch": null,
+   "projectionSource": null,
+   "positionUncertaintyMetres": null,
+   "positionSource": "unprojectable",
+   "correctionAction": null,
+   "correctionScope": null,
+   "mergeTargetId": null,
+   "sourceTrackId": null,
+   "targetObservationId": null,
+   "rangeStart": null,
+   "rangeEnd": null,
+   "splitCanonicalPersonId": null,
+   "affectedPreview": null,
+   "previewState": "uncorrected"
+  }
+ ],
+ "annotations": [],
+ "correctionSummary": {
+  "confirmed": 0,
+  "excluded": 0,
+  "merged": 0,
+  "split": 0
+ },
+ "ballCandidates": [],
+ "matchedTracks": 0,
+ "matchedCanonicalPeople": 1,
+ "warnings": [
+  "No reliable ball candidate was found on this frame.",
+  "Specialized ball detector degraded to fallback: BallDetectionError: frame does not exist: /tmp/frame_00101.jpg; fallback AttributeError: 'object' object has no attribute 'predict'"
+ ],
+ "debug": {
+  "schemaVersion": 1,
+  "analyzedAt": "2026-07-23T04:32:15.976425+00:00",
+  "frameSelection": {
+   "requestedTime": 0.0,
+   "chosenSampleIndex": 0,
+   "frameFile": "frame_00101.jpg",
+   "frameTime": 0.0,
+   "sampleCount": 1
+  },
+  "detector": {
+   "schemaVersion": 2,
+   "provider": {
+    "backend": "ultralytics-yolo",
+    "version": "8.4.95",
+    "modelVersion": "content-unavaila"
+   },
+   "postprocessRuntime": {
+    "opencv": "5.0.0",
+    "numpy": "2.5.1"
+   },
+   "checkpoint": {
+    "requested": "test-model",
+    "contentAvailable": false
+   },
+   "classes": {
+    "person": 0,
+    "genericBallFallback": 32
+   },
+   "inference": {
+    "imageSize": 1280,
+    "confidence": 0.035,
+    "providerNmsIou": 0.7,
+    "maxDetections": 300,
+    "device": "cpu",
+    "batchSize": 1,
+    "torchVersion": "2.13.0",
+    "mpsFallbackEnabled": false
+   },
+   "personFilter": {
+    "version": "pitch-person-v3",
+    "localNmsIou": 0.48,
+    "minimumFootYRatio": 0.18,
+    "shallowFootYRatio": 0.34,
+    "shallowConfidence": 0.12,
+    "shallowGrassRatio": 0.52,
+    "appearanceFeatureSchema": "hsv-histogram-v1"
+   },
+   "genericBallFallbackFilter": {
+    "version": "generic-coco-ball-v2",
+    "minimumCenterYRatio": 0.3,
+    "maximumBoxSizePixels": 24.0,
+    "minimumGrassRatio": 0.24,
+    "deduplicationRadiusPixels": 10.0
+   },
+   "classNames": {}
+  },
+  "rawDetections": [],
+  "rawDetectionVerdictCounts": {},
+  "annotationsApplied": [],
+  "cameraTransform": {
+   "matrix": [
+    [
+     1.0,
+     0.0,
+     0.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "isIdentity": true
+  },
+  "stabilization": [
+   {
+    "rawX": 112,
+    "rawY": 200,
+    "stabilizedX": 112.0,
+    "stabilizedY": 200.0
+   }
+  ],
+  "calibration": {
+   "analyzeFrameUses": "saved-representative-homography",
+   "status": "fallback",
+   "confidence": null,
+   "available": false,
+   "publishedFrameEvidence": null,
+   "representativeVsPublishedDisagreementMetres": null
+  },
+  "timingsMs": {
+   "prepareMs": 0.1,
+   "inferenceMs": 0.0,
+   "parseMs": 0.0,
+   "totalMs": 1841.3
+  }
+ }
+}

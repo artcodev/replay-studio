@@ -35,6 +35,85 @@ def default_observed_line_mask(path: Path | str) -> np.ndarray | None:
     return pitch_line_mask(image)
 
 
+def demote_outlier_direct_anchors(
+    automatic_direct: dict[int, "PitchCalibration"],
+    frame_evidence: list[dict],
+    frames: list[tuple[Path, float]],
+    *,
+    manual_direct: dict[int, "PitchCalibration"],
+    max_gap_seconds: float,
+    residual_floor_pixels: float,
+    best_quartile_ratio: float,
+) -> tuple[dict[int, "PitchCalibration"], list[dict]]:
+    """Demote automatic direct anchors whose line-residual tail is an outlier.
+
+    A direct solve can fit the visible lines well at the median yet be
+    twisted at the extremes (high ``residualP95``); every frame it anchors
+    then inherits metres of ground error. Such anchors are demoted to
+    rejected observations so their frames re-solve temporally from healthier
+    neighbours — but never when a demotion would strip the only anchor some
+    frame can reach within ``max_gap_seconds``. Manual anchors are
+    authoritative and are never demoted.
+    """
+
+    measured = [
+        (sample, float((frame_evidence[sample].get("alignmentMetrics") or {}).get("residualP95")))
+        for sample in sorted(automatic_direct)
+        if sample < len(frame_evidence)
+        and isinstance(
+            (frame_evidence[sample].get("alignmentMetrics") or {}).get("residualP95"),
+            (int, float),
+        )
+    ]
+    if len(measured) < 3 or best_quartile_ratio <= 0:
+        return automatic_direct, []
+    baseline = float(np.percentile([value for _, value in measured], 25))
+    threshold = max(float(residual_floor_pixels), baseline * float(best_quartile_ratio))
+    candidates = sorted(
+        ((sample, value) for sample, value in measured if value > threshold),
+        key=lambda item: -item[1],
+    )
+    if not candidates:
+        return automatic_direct, []
+
+    times = [float(time) for _, time in frames]
+
+    def covered_samples(anchor_samples: set[int]) -> set[int]:
+        anchor_times = [times[sample] for sample in anchor_samples if sample < len(times)]
+        return {
+            index
+            for index, time in enumerate(times)
+            if any(abs(time - anchor) <= max_gap_seconds + 1e-9 for anchor in anchor_times)
+        }
+
+    surviving = dict(automatic_direct)
+    baseline_cover = covered_samples(set(surviving) | set(manual_direct))
+    demotions: list[dict] = []
+    for sample, value in candidates:
+        trial = set(surviving) - {sample} | set(manual_direct)
+        if not baseline_cover <= covered_samples(trial):
+            continue
+        surviving.pop(sample, None)
+        evidence = frame_evidence[sample]
+        evidence["status"] = "rejected"
+        evidence["rejectionReasons"] = list(
+            dict.fromkeys(
+                [
+                    *(evidence.get("rejectionReasons") or []),
+                    "direct-anchor-residual-p95-outlier",
+                ]
+            )
+        )
+        demotions.append(
+            {
+                "sampleIndex": int(sample),
+                "residualP95": round(value, 3),
+                "thresholdPixels": round(threshold, 3),
+            }
+        )
+    return surviving, demotions
+
+
 def merge_direct_calibration_anchors(
     automatic: dict[int, PitchCalibration],
     manual: dict[int, PitchCalibration],
@@ -62,6 +141,7 @@ def resolve_temporal_frame_calibrations(
     *,
     max_gap_seconds: float = 2.0,
     observed_mask_loader: ObservedLineMaskLoader | None = None,
+    target_sample_indices: set[int] | None = None,
 ) -> tuple[
     dict[int, PitchCalibration],
     dict[int, int],
@@ -99,6 +179,11 @@ def resolve_temporal_frame_calibrations(
 
     for descriptor, evidence in zip(descriptors, frame_evidence):
         sample_index = descriptor.sample_index
+        if (
+            target_sample_indices is not None
+            and sample_index not in target_sample_indices
+        ):
+            continue
         observation_status = str(evidence.get("status") or "missing")
         observation_source = str(evidence.get("projectionSource") or "none")
         direct_observation = observation_source in {"direct", "manual-direct"}

@@ -55,14 +55,25 @@ def probe_video(source: Path) -> dict:
     duration = float(
         payload.get("format", {}).get("duration") or stream.get("duration") or 0
     )
-    rate = str(stream.get("avg_frame_rate") or stream.get("r_frame_rate") or "0/1")
-    numerator, denominator = (rate.split("/", 1) + ["1"])[:2]
-    fps = float(numerator) / max(1.0, float(denominator))
+    def parse_rate(value: object) -> float:
+        raw = str(value or "0/1")
+        numerator, denominator = (raw.split("/", 1) + ["1"])[:2]
+        return float(numerator) / max(1.0, float(denominator))
+
+    # r_frame_rate is the stream's nominal/native cadence (for example
+    # 30000/1001 or 60000/1001). avg_frame_rate drifts when the container
+    # duration includes a partial final frame; using it silently turned a
+    # 29.97 FPS source into 29.9503 FPS and changed sampling cardinality.
+    nominal_fps = parse_rate(stream.get("r_frame_rate"))
+    average_fps = parse_rate(stream.get("avg_frame_rate"))
+    fps = nominal_fps if nominal_fps > 0.0 else average_fps
     return {
         "duration": duration,
         "width": int(stream.get("width") or 0),
         "height": int(stream.get("height") or 0),
         "fps": fps,
+        "averageFps": average_fps,
+        "sourceFrameCount": int(stream.get("nb_frames") or 0),
     }
 
 
@@ -180,9 +191,11 @@ def sample_detector_frames(
             "-i",
             str(source),
             "-vf",
-            f"fps={fps:g},scale=1280:-2",
+            f"fps={fps:g}",
             "-q:v",
-            "3",
+            "1",
+            "-pix_fmt",
+            "yuvj444p",
             str(destination_pattern),
         ]
     )

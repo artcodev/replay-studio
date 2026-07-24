@@ -3,6 +3,10 @@ import { calibrationClient } from '../lib/api/calibration'
 import { clientPointToContainedMedia } from '../lib/videoReviewTransform'
 import { usePitchCalibrationPresentation } from '../features/calibration/usePitchCalibrationPresentation'
 import { preserveSceneActorSelection } from '../features/editor/selection/preserveSceneActorSelection'
+import {
+  PITCH_CALIBRATION_PRESETS,
+  projectPitchCalibrationPresetAnchors,
+} from '../lib/pitchCalibrationPresets'
 import type { CalibrationFrameEvidence, PitchCalibrationPreset } from '../types/calibration'
 import type { SceneDocument } from '../types/scene'
 
@@ -22,19 +26,7 @@ type PitchCalibrationEditorOptions = {
   projectId: () => string
   seekTo: (time: number) => void
   clearFrameAnalysis: () => void
-  startReconstructionPolling: (sceneId: string) => Promise<void>
 }
-
-export const PITCH_CALIBRATION_PRESETS: Array<{
-  value: PitchCalibrationPreset
-  label: string
-}> = [
-  { value: 'penalty-area-left', label: 'Left penalty area' },
-  { value: 'goal-area-left', label: 'Left goal area' },
-  { value: 'center-circle', label: 'Center circle' },
-  { value: 'goal-area-right', label: 'Right goal area' },
-  { value: 'penalty-area-right', label: 'Right penalty area' },
-]
 
 /** Owns current-frame pitch calibration and attack-direction edits. */
 export function usePitchCalibrationEditor(options: PitchCalibrationEditorOptions) {
@@ -87,7 +79,17 @@ export function usePitchCalibrationEditor(options: PitchCalibrationEditorOptions
   }
 
   async function changePreset(event: Event) {
-    await open((event.target as HTMLSelectElement).value as PitchCalibrationPreset)
+    const value = draft.value
+    if (!value || loading.value) return
+    preset.value = (event.target as HTMLSelectElement).value as PitchCalibrationPreset
+    value.preset = preset.value
+    value.anchors = projectPitchCalibrationPresetAnchors(
+      value.imageToPitch,
+      preset.value,
+      value.frameWidth,
+      value.frameHeight,
+    )
+    await refresh()
   }
 
   function imagePoint(event: PointerEvent) {
@@ -176,30 +178,33 @@ export function usePitchCalibrationEditor(options: PitchCalibrationEditorOptions
     options.saveState.value = 'Pitch calibration cancelled'
   }
 
-  async function apply() {
+  async function apply(acceptQualityWarning = false) {
     const scene = options.scene.value
     const value = draft.value
     if (!scene || !value || applying.value) return
     applying.value = true
-    options.reconstructing.value = true
-    options.clearFrameAnalysis()
-    options.saveState.value = 'Applying pitch calibration and rebuilding tracks…'
+    options.saveState.value = 'Saving frame correction as a draft…'
     try {
-      const updated = await calibrationClient.apply(
+      const updated = await calibrationClient.saveDraft(
         options.projectId(),
         scene.id,
         value.sceneTime,
         preset.value,
         value.anchors,
+        value.source,
+        acceptQualityWarning,
       )
       if (options.scene.value?.id !== scene.id) return
+      const selection = preserveSceneActorSelection(updated, {
+        trackId: options.selectedTrackId.value,
+        canonicalPersonId: options.selectedCanonicalPersonId.value,
+      })
       options.scene.value = updated
       draft.value = null
-      options.selectedTrackId.value = null
-      options.selectedCanonicalPersonId.value = null
-      await options.startReconstructionPolling(scene.id)
+      options.selectedTrackId.value = selection.trackId
+      options.selectedCanonicalPersonId.value = selection.canonicalPersonId
+      options.saveState.value = 'Frame correction staged · finalize it in the calibration workspace'
     } catch (cause) {
-      options.reconstructing.value = false
       options.error.value = cause instanceof Error ? cause.message : 'Could not apply pitch calibration'
     } finally {
       applying.value = false

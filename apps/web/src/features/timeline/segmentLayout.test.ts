@@ -28,16 +28,28 @@ function video(): SceneVideo {
 }
 
 describe('segment layout edits', () => {
-  it('only allows splitting a continuous tail', () => {
+  it('allows splitting any continuous run that leaves a remainder', () => {
     const fixture = video()
     expect(canSplitSegmentTail(fixture, ['b', 'c'])).toBe(true)
-    expect(canSplitSegmentTail(fixture, ['a'])).toBe(false)
-    expect(canSplitSegmentTail(fixture, ['b'])).toBe(false)
+    expect(canSplitSegmentTail(fixture, ['a'])).toBe(true)
+    expect(canSplitSegmentTail(fixture, ['b'])).toBe(true)
+    // The whole event and cross-event picks stay refused.
+    expect(canSplitSegmentTail(fixture, ['a', 'b', 'c'])).toBe(false)
+    expect(canSplitSegmentTail(fixture, ['a', 'c'])).toBe(false)
+    expect(canSplitSegmentTail(fixture, ['c', 'd'])).toBe(false)
   })
 
   it('creates a new event and shifts later events', () => {
     const fixture = video()
     expect(splitSegmentTail(fixture, ['b', 'c'])).toBe(2)
+    expect(fixture.segments?.map((segment) => segment.layout?.label)).toEqual([
+      '1-A', '2-A', '2-B', '3-A',
+    ])
+  })
+
+  it('splits a head run keeping broadcast-time event order', () => {
+    const fixture = video()
+    expect(splitSegmentTail(fixture, ['a'])).toBe(1)
     expect(fixture.segments?.map((segment) => segment.layout?.label)).toEqual([
       '1-A', '2-A', '2-B', '3-A',
     ])

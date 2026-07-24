@@ -11,12 +11,12 @@ describe('three view preferences', () => {
       options: { models: true, labels: false, trajectory: true, pathTracking: true, allPaths: false, ball: true, analysisMarkers: false },
       renderQuality: 'enhanced',
     }))).toEqual({
-      options: { models: true, labels: false, trajectory: true, pathTracking: true, allPaths: false, ball: true, analysisMarkers: false },
+      options: { models: true, labels: false, trajectory: true, pathTracking: true, allPaths: false, ball: true, analysisMarkers: false, inferredPositions: 'transparent' },
       renderQuality: 'enhanced',
     })
   })
 
-  it('migrates a stored v1 preference by defaulting the new path layer off', () => {
+  it('migrates a stored v1 preference by defaulting the new layers off', () => {
     expect(parseThreeViewPreferences(JSON.stringify({
       options: { models: false, labels: false, trajectory: true, ball: true, analysisMarkers: false },
       renderQuality: 'basic',
@@ -29,9 +29,22 @@ describe('three view preferences', () => {
         allPaths: false,
         ball: true,
         analysisMarkers: false,
+        inferredPositions: 'transparent',
       },
       renderQuality: 'basic',
     })
+  })
+
+  it('keeps a persisted inferred-position mode and backfills an unknown one', () => {
+    const base = { models: true, labels: true, trajectory: true, pathTracking: false, allPaths: false, ball: true, analysisMarkers: true }
+    expect(parseThreeViewPreferences(JSON.stringify({
+      options: { ...base, inferredPositions: 'hidden' },
+      renderQuality: 'basic',
+    }))?.options.inferredPositions).toBe('hidden')
+    expect(parseThreeViewPreferences(JSON.stringify({
+      options: { ...base, inferredPositions: 'bogus' },
+      renderQuality: 'basic',
+    }))?.options.inferredPositions).toBe('transparent')
   })
 
   it('ignores malformed or incomplete persisted state', () => {
@@ -61,7 +74,7 @@ describe('three view preferences', () => {
     expect(saveThreeViewPreferences({
       setItem: () => { throw new Error('quota exceeded') },
     }, {
-      options: { models: true, labels: true, trajectory: true, pathTracking: false, allPaths: false, ball: true, analysisMarkers: true },
+      options: { models: true, labels: true, trajectory: true, pathTracking: false, allPaths: false, ball: true, analysisMarkers: true, inferredPositions: 'normal' },
       renderQuality: 'basic',
     })).toBe(false)
   })

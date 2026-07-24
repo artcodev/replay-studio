@@ -71,8 +71,6 @@ watch(projectId, () => { void loadRoute() }, { immediate: true })
     :segment-count="workspace.media.segments.value.length"
     save-state=""
     :project-loading="workspace.catalog.loading.value"
-    :save-disabled="true"
-    :saving="false"
     @open-import="videoIngestOpen = true"
   />
   <ProjectWorkspaceSurface v-model:active-tab="dashboardTab" @retry-route="loadRoute" />

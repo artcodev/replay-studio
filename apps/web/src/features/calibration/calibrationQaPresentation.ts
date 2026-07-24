@@ -1,10 +1,160 @@
 import type { CalibrationFrameEvidence } from '../../types/calibration'
 import type {
+  CalibrationReview,
+  CalibrationReviewSample,
   ProcessingStatus,
   QualityGateStatus,
   QualityVerdict,
   ReconstructionQuality,
 } from '../../types/reconstruction'
+import type { SceneFrameExclusion } from '../../types/scene'
+
+type CalibrationReviewRecoveryOptions = {
+  inputFingerprint?: string | null
+  calibrationInputFingerprint?: string | null
+  warnings?: readonly string[]
+  fallbackConsent?: {
+    sampleIndices: readonly number[]
+    confirmedAt?: string | null
+  } | null
+}
+
+/**
+ * Recover the calibration-stage read model from the immutable frame evidence.
+ * Older full runs discarded `calibrationReview` even though they retained and
+ * consumed the same calibration artifact. This keeps those scenes inspectable
+ * without inventing any new calibration result in Reconstruction.
+ */
+export function calibrationReviewFromEvidence(
+  evidenceFrames: readonly CalibrationFrameEvidence[],
+  options: CalibrationReviewRecoveryOptions = {},
+): CalibrationReview | null {
+  if (!evidenceFrames.length) return null
+
+  const frames: CalibrationReviewSample[] = evidenceFrames.map((evidence, index) => {
+    const solutionStatus = evidence.solutionStatus ?? (
+      evidence.status === 'accepted' ? 'direct-accepted' : 'unresolved'
+    )
+    const resolved = solutionStatus.includes('accepted')
+      && evidence.projectionSource !== 'none'
+    const manual = solutionStatus.startsWith('manual')
+      || evidence.projectionSource.startsWith('manual')
+    return {
+      sampleIndex: evidence.sampleIndex ?? index,
+      sourceFrameIndex: evidence.sourceFrameIndex ?? null,
+      sceneTime: evidence.sceneTime ?? null,
+      solutionStatus,
+      projectionSource: evidence.projectionSource ?? null,
+      resolved,
+      residualP95: evidence.alignmentMetrics?.residualP95
+        ?? evidence.reprojectionP95
+        ?? null,
+      rejectionReasons: [...(evidence.rejectionReasons ?? [])],
+      acceptedByOperator: false,
+      manual,
+      imageToPitch: resolved ? (evidence.imageToPitch ?? null) : null,
+      frameWidth: evidence.frameWidth ?? null,
+      frameHeight: evidence.frameHeight ?? null,
+    }
+  })
+  const unresolvedSamples = frames.filter((frame) => !frame.resolved)
+  const consentIndices = new Set(options.fallbackConsent?.sampleIndices ?? [])
+  const consentCoversEveryGap = unresolvedSamples.length > 0
+    && unresolvedSamples.every((frame) => consentIndices.has(frame.sampleIndex))
+  const totalFrames = frames.length
+  const resolvedFrames = totalFrames - unresolvedSamples.length
+
+  return {
+    status: unresolvedSamples.length === 0
+      ? 'ready'
+      : consentCoversEveryGap
+        ? 'confirmed'
+        : 'review',
+    inputFingerprint: options.inputFingerprint ?? null,
+    calibrationInputFingerprint: options.calibrationInputFingerprint ?? null,
+    totalFrames,
+    resolvedFrames,
+    unresolvedFrames: unresolvedSamples.length,
+    resolvedRatio: totalFrames ? resolvedFrames / totalFrames : 1,
+    frames,
+    unresolvedSamples,
+    warnings: [...(options.warnings ?? [])],
+    ...(consentCoversEveryGap
+      ? {
+          confirmedAt: options.fallbackConsent?.confirmedAt ?? null,
+          fallbackPolicy: 'explicit-image-fallback' as const,
+          fallbackSampleIndices: [...consentIndices].sort((a, b) => a - b),
+        }
+      : {}),
+  }
+}
+
+export function calibrationFramesWithExclusions(
+  frames: readonly CalibrationReviewSample[],
+  exclusions: readonly SceneFrameExclusion[],
+): CalibrationReviewSample[] {
+  const exclusionBySourceFrame = new Map(
+    exclusions.map((item) => [item.sourceFrameIndex, item]),
+  )
+  const result = frames.map((frame) => {
+    const exclusion = frame.sourceFrameIndex == null
+      ? null
+      : exclusionBySourceFrame.get(frame.sourceFrameIndex)
+    if (!exclusion) return { ...frame }
+    exclusionBySourceFrame.delete(exclusion.sourceFrameIndex)
+    return {
+      ...frame,
+      sceneTime: exclusion.sceneTime,
+      solutionStatus: 'excluded',
+      projectionSource: null,
+      resolved: false,
+      excluded: true,
+      imageToPitch: null,
+      rejectionReasons: [],
+    }
+  })
+  for (const exclusion of exclusionBySourceFrame.values()) {
+    result.push({
+      sampleIndex: -(exclusion.sourceFrameIndex + 1),
+      sourceFrameIndex: exclusion.sourceFrameIndex,
+      sceneTime: exclusion.sceneTime,
+      solutionStatus: 'excluded',
+      projectionSource: null,
+      resolved: false,
+      excluded: true,
+      residualP95: null,
+      rejectionReasons: [],
+      acceptedByOperator: false,
+      manual: false,
+      imageToPitch: null,
+      frameWidth: null,
+      frameHeight: null,
+    })
+  }
+  return result.sort((left, right) => (
+    (left.sceneTime ?? 0) - (right.sceneTime ?? 0)
+    || (left.sourceFrameIndex ?? 0) - (right.sourceFrameIndex ?? 0)
+  ))
+}
+
+export type CalibrationReviewTimelineStatus =
+  | 'direct'
+  | 'temporal'
+  | 'manual'
+  | 'unresolved'
+  | 'excluded'
+
+export function calibrationReviewTimelineStatus(
+  frame: CalibrationReviewSample,
+): CalibrationReviewTimelineStatus {
+  if (frame.excluded) return 'excluded'
+  if (!frame.resolved) return 'unresolved'
+  if (frame.projectionSource?.startsWith('temporal-') || frame.solutionStatus === 'temporal-accepted') {
+    return 'temporal'
+  }
+  if (frame.manual || frame.projectionSource?.startsWith('manual-')) return 'manual'
+  return 'direct'
+}
 
 export type CalibrationGateView = {
   id: string

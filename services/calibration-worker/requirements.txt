@@ -8,4 +8,7 @@ opencv-python-headless==4.11.0.86
 scipy==1.13.1
 shapely==2.0.7
 --extra-index-url https://download.pytorch.org/whl/cpu
-torch==1.13.1+cpu
+# 2.2.2 is the first pinned runtime in this project with official Linux
+# aarch64 CPU wheels.  Keeping 1.13.1+cpu forced Docker Desktop to run the
+# complete HRNet workload as an amd64 image through Rosetta on Apple Silicon.
+torch==2.2.2

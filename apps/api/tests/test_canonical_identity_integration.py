@@ -326,14 +326,24 @@ def test_frame_analysis_links_canonical_person_even_without_render_track(monkeyp
             }
         ]
     )
-    result = SimpleNamespace(orig_img=np.zeros((540, 960, 3), dtype=np.uint8))
+    result = SimpleNamespace(
+        image_bgr=np.zeros((540, 960, 3), dtype=np.uint8),
+        names={},
+        diagnostics={},
+    )
     detection = Detection(112, 200, 24, 48, 0.9, np.zeros(12, dtype=np.float32))
     monkeypatch.setattr("app.reconstruction_frame_analysis.frame_paths", lambda _: [(frame_path, 0.0)])
     monkeypatch.setattr("app.reconstruction_frame_analysis.load_model", lambda _: object())
-    monkeypatch.setattr("app.ultralytics_person_inference.predict_frame", lambda *_: result)
     monkeypatch.setattr(
-        "app.ultralytics_person_inference.parse_person_detections",
-        lambda _: ([detection], []),
+        "app.reconstruction_frame_analysis.build_person_detection_provider",
+        lambda *_: SimpleNamespace(
+            predict=lambda _path: result,
+            info=lambda: {},
+        ),
+    )
+    monkeypatch.setattr(
+        "app.reconstruction_frame_analysis.parse_person_prediction",
+        lambda _prediction, **_kwargs: ([detection], []),
     )
 
     analysis = analyze_scene_frame(scene, 0.0)

@@ -2,8 +2,10 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 
 import app.reconstruction_calibration_detection as reconstruction_module
+from app.calibration_worker import CalibrationWorkerError
 from app.pitch_calibration_contract import PitchCalibration
 
 
@@ -60,11 +62,10 @@ def test_automatic_calibration_sends_only_anchor_frames_to_worker(monkeypatch):
         "get_settings",
         lambda: SimpleNamespace(
             calibration_worker_url="http://calibration-worker:8090",
-            calibration_anchor_max_gap_seconds=1.0,
         ),
     )
 
-    def calibrate(indexed, on_progress=None, timeout=None):
+    def calibrate(indexed, on_progress=None, on_batch=None, timeout=None):
         worker_calls.append((indexed, timeout))
         result = {index: _calibration(index) for index, _ in indexed}
         if on_progress is not None:
@@ -76,18 +77,11 @@ def test_automatic_calibration_sends_only_anchor_frames_to_worker(monkeypatch):
         "calibrate_frames_with_worker",
         calibrate,
     )
-    monkeypatch.setattr(
-        reconstruction_module,
-        "local_frame_calibrations",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(
-            AssertionError("complete worker anchors must not invoke local fallback")
-        ),
-    )
-
     result, warnings = reconstruction_module.automatic_frame_calibrations(
         frames,
         lambda *update: progress.append(update),
         worker_timeout=123.0,
+        direct_calibration_max_gap_seconds=1.0,
     )
 
     assert [index for index, _ in worker_calls[0][0]] == [0, 10, 20, 30, 35]
@@ -97,7 +91,54 @@ def test_automatic_calibration_sends_only_anchor_frames_to_worker(monkeypatch):
     assert progress[-1][1:3] == (5, 5)
 
 
+def test_automatic_calibration_defaults_to_every_selected_frame(monkeypatch):
+    frames = _frames([index / 10 for index in range(6)])
+    worker_indices = []
+    monkeypatch.setattr(
+        reconstruction_module,
+        "get_settings",
+        lambda: SimpleNamespace(
+            calibration_worker_url="http://calibration-worker:8090",
+        ),
+    )
+
+    def calibrate(indexed, **_kwargs):
+        worker_indices.extend(index for index, _ in indexed)
+        return {index: _calibration(index) for index, _ in indexed}
+
+    monkeypatch.setattr(
+        reconstruction_module,
+        "calibrate_frames_with_worker",
+        calibrate,
+    )
+
+    reconstruction_module.automatic_frame_calibrations(frames)
+
+    assert worker_indices == list(range(6))
+
+
 def test_single_frame_calibration_is_never_sampled_away():
     frames = _frames([4.2])
 
     assert reconstruction_module.select_calibration_anchor_frames(frames, 1.0) == frames
+
+
+def test_worker_failure_is_fail_closed_without_an_automatic_fallback(monkeypatch):
+    frames = _frames([0.0, 0.1])
+    monkeypatch.setattr(
+        reconstruction_module,
+        "get_settings",
+        lambda: SimpleNamespace(
+            calibration_worker_url="http://calibration-worker:8090",
+        ),
+    )
+    monkeypatch.setattr(
+        reconstruction_module,
+        "calibrate_frames_with_worker",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            CalibrationWorkerError("worker disconnected")
+        ),
+    )
+
+    with pytest.raises(CalibrationWorkerError, match="worker disconnected"):
+        reconstruction_module.automatic_frame_calibrations(frames)

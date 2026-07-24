@@ -7,6 +7,7 @@ from typing import Callable
 
 from .config import get_settings
 from .project_identifiers import stable_identifier
+from .reconstruction_inputs import resolve_analysis_frame_rate
 from .sample import make_video_scene
 from .segment_layout import propose_segment_layout
 from .video_ffmpeg import (
@@ -111,7 +112,7 @@ def prepare_video_generation(
         frames = generation / "frames"
         checkpoint()
         frames.mkdir(exist_ok=True)
-        analysis_fps = min(get_settings().analysis_frame_rate, metadata["fps"])
+        analysis_fps = resolve_analysis_frame_rate(metadata["fps"])
         sample_detector_frames(
             source,
             frames / "frame_%05d.jpg",
@@ -119,6 +120,20 @@ def prepare_video_generation(
         )
         checkpoint()
         frame_count = len(list(frames.glob("frame_*.jpg")))
+        analysis_frame_input = {
+            "schemaVersion": 1,
+            "source": "uploaded-video",
+            "coordinateSpace": "source-video-pixels",
+            "width": metadata["width"],
+            "height": metadata["height"],
+            "resize": "none",
+            "format": "jpeg",
+            "jpegQscale": 1,
+            "chromaSampling": "4:4:4",
+            "sourceFps": float(metadata["fps"]),
+            "averageFps": float(metadata.get("averageFps") or metadata["fps"]),
+            "sourceFrameCount": int(metadata.get("sourceFrameCount") or 0),
+        }
         checkpoint()
         update(stage="Grouping replay angles", progress=86, frame_count=frame_count)
         segment_layout = propose_segment_layout(
@@ -138,6 +153,10 @@ def prepare_video_generation(
                 "filename": asset["original_name"],
                 "fps": metadata["fps"],
                 "analysisFps": analysis_fps,
+                # Analysis/calibration frames keep the uploaded video's pixel
+                # grid.  The browser proxy is a presentation artifact only and
+                # must never become an inference input or coordinate space.
+                "analysisFrameInput": analysis_frame_input,
                 "frameCount": frame_count,
                 "generationKey": staging_key,
                 "processingState": "frames-ready",
@@ -164,6 +183,9 @@ def prepare_video_generation(
                     "assetId": asset_id,
                     "generationKey": staging_key,
                     "frameCount": frame_count,
+                    "sourceFps": float(metadata["fps"]),
+                    "analysisFps": analysis_fps,
+                    "analysisFrameInput": analysis_frame_input,
                 },
                 sort_keys=True,
             )

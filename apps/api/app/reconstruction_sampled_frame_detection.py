@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-"""Single-pass sampled-frame detection and calibration accumulation."""
+"""Single-pass sampled-frame detection with no calibration authority."""
 
 from pathlib import Path
 
@@ -19,42 +19,40 @@ from .reconstruction_person_annotations import (
 )
 from .reconstruction_progress import ReconstructionProgress
 from .reconstruction_reid_evidence import capture_detection_observations
-from .reconstruction_sampled_calibration import SampledCalibrationAccumulator
 from .reconstruction_sampled_detection_preparation import (
     SampledDetectionRuntime,
 )
 from .reconstruction_sampled_frame_contract import (
-    SampledCalibrationInputs,
-    SampledFrameAnalysis,
+    SampledDetectionAnalysis,
 )
 
 
-def analyze_sampled_frames(
+def analyze_sampled_detections(
     scene: dict,
     frames: list[tuple[Path, float]],
     runtime: SampledDetectionRuntime,
-    calibration_inputs: SampledCalibrationInputs,
     progress: ReconstructionProgress,
-) -> SampledFrameAnalysis:
+) -> SampledDetectionAnalysis:
     person_frames = []
     generic_ball_frames = []
     person_counts: list[int] = []
     ball_counts: list[int] = []
-    calibration = SampledCalibrationAccumulator(scene, calibration_inputs)
+    frame_sizes: dict[int, tuple[int, int]] = {}
     crop_store_directory, crop_policy = person_crop_store_runtime()
     crop_store_diagnostics: dict = {"hits": 0, "stores": 0, "storeErrors": 0}
 
     for sample_index, (path, time) in enumerate(frames):
-        # This is the only sampled-frame decode boundary. Camera/calibration
-        # consumes the returned image directly rather than reading it again.
+        # Detection may decode frames, but it has no authority to derive or
+        # update camera/calibration state.
         image, people, balls = person_base_detection_cache.cached_base_frame_detections(
-            runtime.model,
+            runtime.person_provider,
             path,
             runtime.person_cache_directory,
             runtime.person_detector_input,
             runtime.person_cache_diagnostics,
         )
         source_index = source_frame_index(path)
+        frame_sizes[sample_index] = (image.shape[1], image.shape[0])
         people = apply_person_annotations(
             image,
             people,
@@ -75,13 +73,6 @@ def analyze_sampled_frames(
                 diagnostics=crop_store_diagnostics,
             )
             attach_crop_records(people, crop_records, frame_sha256=frame_digest)
-        calibration.add_frame(
-            sample_index=sample_index,
-            source_index=source_index,
-            scene_time=time,
-            image=image,
-            people=people,
-        )
         person_counts.append(len(people))
         ball_counts.append(len(balls))
         person_frames.append((people, time))
@@ -89,11 +80,11 @@ def analyze_sampled_frames(
         progress.update(
             "detection",
             3,
-            "Detecting people and camera evidence",
+            "Detecting people",
             f"Sample {sample_index + 1}/{len(frames)} · "
             f"{len(people)} people · {len(balls)} generic ball fallback candidate(s).",
-            62,
-            84,
+            8,
+            38,
             completed=sample_index + 1,
             total=len(frames),
             eta_padding=5.0,
@@ -116,13 +107,13 @@ def analyze_sampled_frames(
             "personCropStore": crop_store_diagnostics,
         }
     )
-    return SampledFrameAnalysis(
+    return SampledDetectionAnalysis(
         person_frames=person_frames,
         generic_ball_frames=generic_ball_frames,
         person_counts=person_counts,
         ball_counts=ball_counts,
-        calibration=calibration.result(),
+        frame_sizes=frame_sizes,
     )
 
 
-__all__ = ["analyze_sampled_frames"]
+__all__ = ["analyze_sampled_detections"]

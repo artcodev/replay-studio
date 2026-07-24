@@ -193,7 +193,7 @@ def test_multiple_anchors_on_both_sides_keep_alternatives_and_choose_nearest_con
         ),
         6: _calibration(
             expected[6],
-            method="roboflow-field-keypoints",
+            method="pnlcalib-points-lines",
             confidence=0.82,
         ),
     }
@@ -384,7 +384,7 @@ def test_same_sample_manual_anchor_wins_without_mutating_automatic_candidates() 
     )
     automatic_at_three = _calibration(
         expected[3],
-        method="roboflow-field-keypoints",
+        method="pnlcalib-points-lines",
         confidence=0.90,
     )
     manual_at_one = _calibration(

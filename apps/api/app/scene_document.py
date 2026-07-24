@@ -7,6 +7,7 @@ import json
 from copy import deepcopy
 
 from .project_match import normalized_match_snapshot_reference, project_parent_scene_id
+from .scene_frame_exclusions import frame_exclusion_fingerprint_input
 
 
 class SceneRevisionConflict(RuntimeError):
@@ -40,10 +41,21 @@ def reconstruction_input_fingerprint(
     inputs = {
         "source": {
             "assetId": video.get("id"),
+            "generationKey": video.get("generationKey"),
+            "analysisFrameInput": video.get("analysisFrameInput"),
             "selectedSegmentId": video.get("selectedSegmentId"),
             "sourceStart": video.get("sourceStart"),
             "sourceEnd": video.get("sourceEnd"),
             "analysisFps": video.get("analysisFps"),
+            "frameExclusions": frame_exclusion_fingerprint_input(scene),
+            "samplingFrameRate": (
+                reconstruction.get("samplingFrameRate") or video.get("fps")
+            ),
+            "directCalibrationMaxGapSeconds": (
+                reconstruction.get("directCalibrationMaxGapSeconds")
+                if reconstruction.get("directCalibrationMaxGapSeconds") is not None
+                else 0.0
+            ),
         },
         "multiPass": (
             {
@@ -74,6 +86,16 @@ def reconstruction_input_fingerprint(
             {"jerseyOcr": {"profile": reconstruction.get("jerseyOcrProfile")}}
             if (reconstruction.get("jerseyOcrProfile") or "automatic")
             != "automatic"
+            else {}
+        ),
+        **(
+            {
+                "contactPoint": {
+                    "profile": reconstruction.get("contactPointProfile")
+                }
+            }
+            if (reconstruction.get("contactPointProfile") or "bbox-bottom")
+            != "bbox-bottom"
             else {}
         ),
         "frameAnnotations": reconstruction.get("frameAnnotations") or [],
@@ -127,6 +149,14 @@ def annotate_reconstruction_input_state(
         if stored_fingerprint == current_fingerprint
         else "stale"
     )
+    stage = str(reconstruction.get("stage") or "")
+    reconstruction["resultState"] = (
+        "calibration-only"
+        if stage == "calibration"
+        else reconstruction["inputState"]
+        if stage == "reconstruction"
+        else "unavailable"
+    )
     if reconstruction["inputState"] == "stale":
         reconstruction["inputStateReason"] = "reconstruction-input-changed"
     else:
@@ -176,4 +206,5 @@ def next_scene_payload(scene: dict, revision: int) -> dict:
         reconstruction.pop("currentInputFingerprint", None)
         reconstruction.pop("inputState", None)
         reconstruction.pop("inputStateReason", None)
+        reconstruction.pop("resultState", None)
     return payload

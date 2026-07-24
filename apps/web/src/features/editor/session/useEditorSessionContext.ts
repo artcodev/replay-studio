@@ -88,9 +88,17 @@ export function useEditorSessionContext(options: EditorSessionContextOptions) {
     return 'Internal scene'
   })
 
+  let titleTimer: ReturnType<typeof setTimeout> | null = null
+
   function updateSceneTitle(title: string) {
     if (!mutateScene((document) => { document.title = title })) return
-    saveState.value = 'Unsaved changes'
+    // Typing persists through the dedicated title command; debounce so a
+    // rename is one write rather than one per keystroke.
+    if (titleTimer !== null) clearTimeout(titleTimer)
+    titleTimer = setTimeout(() => {
+      titleTimer = null
+      void sceneSession.saveTitle(title)
+    }, 700)
   }
 
   async function openTimelineSegment(segment: VideoSegment) {
@@ -172,7 +180,11 @@ export function useEditorSessionContext(options: EditorSessionContextOptions) {
     videoIngestOpen,
     sceneSession,
     saving: sceneSession.saving,
-    saveScene: sceneSession.save,
+    saveTitle: sceneSession.saveTitle,
+    saveEventBindings: sceneSession.saveEventBindings,
+    saveTrackMetadata: sceneSession.saveTrackMetadata,
+    saveTrackTrajectory: sceneSession.saveTrackTrajectory,
+    saveSegmentLayout: sceneSession.saveSegmentLayout,
     routeSession,
     replaceEditorRouteView: routeSession.replaceView,
     navigateEditorScene: routeSession.navigateScene,

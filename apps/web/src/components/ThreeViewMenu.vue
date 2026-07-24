@@ -1,8 +1,12 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, useId, watch } from 'vue'
+import { computed, toRef, useId } from 'vue'
+import { useDisclosureMenu } from '../composables/useDisclosureMenu'
 import {
+  INFERRED_POSITION_RENDER_MODE_ITEMS,
   THREE_VIEW_LAYER_ITEMS,
+  withInferredPositionRenderMode,
   withThreeViewOption,
+  type InferredPositionRenderMode,
   type ThreeRenderQuality,
   type ThreeViewOptionKey,
   type ThreeViewOptions,
@@ -22,6 +26,7 @@ const emit = defineEmits<{
 }>()
 
 const displayItems = THREE_VIEW_LAYER_ITEMS
+const inferredPositionItems = INFERRED_POSITION_RENDER_MODE_ITEMS
 
 const qualityItems: ReadonlyArray<{
   value: ThreeRenderQuality
@@ -32,13 +37,13 @@ const qualityItems: ReadonlyArray<{
   { value: 'enhanced', label: 'Enhanced', detail: 'Higher detail, lighting and shadows' },
 ]
 
-const root = ref<HTMLElement | null>(null)
-const trigger = ref<HTMLButtonElement | null>(null)
-const panel = ref<HTMLElement | null>(null)
-const open = ref(false)
+const { root, trigger, panel, open, toggleMenu } = useDisclosureMenu(
+  toRef(props, 'disabled'),
+)
 const componentId = useId()
 const panelId = `${componentId}-three-view-panel`
 const qualityGroupId = `${componentId}-render-quality`
+const inferredPositionGroupId = `${componentId}-inferred-positions`
 
 const hiddenCount = computed(() => (
   displayItems.reduce((total, item) => total + (props.modelValue[item.key] ? 0 : 1), 0)
@@ -50,20 +55,6 @@ const triggerLabel = computed(() => (
     : 'View settings'
 ))
 
-function closeMenu(restoreFocus = false) {
-  if (!open.value) return
-  open.value = false
-  if (restoreFocus) nextTick(() => trigger.value?.focus())
-}
-
-function toggleMenu() {
-  if (props.disabled) return
-  open.value = !open.value
-  if (open.value) {
-    nextTick(() => panel.value?.querySelector<HTMLInputElement>('input')?.focus())
-  }
-}
-
 function updateOption(key: ThreeViewOptionKey, event: Event) {
   const input = event.target as HTMLInputElement
   emit('update:modelValue', withThreeViewOption(props.modelValue, key, input.checked))
@@ -73,36 +64,12 @@ function updateQuality(quality: ThreeRenderQuality, event: Event) {
   if ((event.target as HTMLInputElement).checked) emit('update:renderQuality', quality)
 }
 
-function onDocumentPointerDown(event: PointerEvent) {
-  if (open.value && !root.value?.contains(event.target as Node)) closeMenu()
-}
-
-function onDocumentKeyDown(event: KeyboardEvent) {
-  if (open.value && event.key === 'Escape') {
-    event.preventDefault()
-    closeMenu(true)
+function updateInferredPositionMode(mode: InferredPositionRenderMode, event: Event) {
+  if ((event.target as HTMLInputElement).checked) {
+    emit('update:modelValue', withInferredPositionRenderMode(props.modelValue, mode))
   }
 }
 
-function onDocumentFocusIn(event: FocusEvent) {
-  if (open.value && !root.value?.contains(event.target as Node)) closeMenu()
-}
-
-watch(() => props.disabled, (disabled) => {
-  if (disabled) closeMenu()
-})
-
-onMounted(() => {
-  document.addEventListener('pointerdown', onDocumentPointerDown)
-  document.addEventListener('keydown', onDocumentKeyDown)
-  document.addEventListener('focusin', onDocumentFocusIn)
-})
-
-onBeforeUnmount(() => {
-  document.removeEventListener('pointerdown', onDocumentPointerDown)
-  document.removeEventListener('keydown', onDocumentKeyDown)
-  document.removeEventListener('focusin', onDocumentFocusIn)
-})
 </script>
 
 <template>
@@ -157,6 +124,25 @@ onBeforeUnmount(() => {
             <small>{{ item.detail }}</small>
           </span>
         </label>
+      </fieldset>
+
+      <fieldset>
+        <legend>Inferred positions</legend>
+        <div class="quality-options inferred-position-options">
+          <label v-for="item in inferredPositionItems" :key="item.value">
+            <input
+              type="radio"
+              :name="inferredPositionGroupId"
+              :value="item.value"
+              :checked="modelValue.inferredPositions === item.value"
+              @change="updateInferredPositionMode(item.value, $event)"
+            />
+            <span>
+              <strong>{{ item.label }}</strong>
+              <small>{{ item.detail }}</small>
+            </span>
+          </label>
+        </div>
       </fieldset>
 
       <fieldset :aria-describedby="`${qualityGroupId}-hint`">
@@ -368,6 +354,14 @@ legend {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 6px;
+}
+
+.inferred-position-options { grid-template-columns: 1fr; }
+
+.inferred-position-options label > span {
+  min-height: 0;
+  align-items: flex-start;
+  text-align: left;
 }
 
 .quality-options label { position: relative; cursor: pointer; }

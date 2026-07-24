@@ -10,6 +10,25 @@ from .reconstruction_inputs import frame_paths
 from .reconstruction_motion import camera_motion_estimate
 
 
+def sampled_frame_context(
+    scene: dict,
+    scene_time: float,
+) -> tuple[int, float, np.ndarray]:
+    """Decode the nearest sampled frame without recomputing camera motion."""
+
+    frames = frame_paths(scene)
+    if not frames:
+        raise ReconstructionError("No sampled frames are available for this moment")
+    target_index = min(
+        range(len(frames)),
+        key=lambda index: abs(frames[index][1] - scene_time),
+    )
+    image = cv2.imread(str(frames[target_index][0]))
+    if image is None:
+        raise ReconstructionError("The sampled frame could not be read")
+    return target_index, float(frames[target_index][1]), image
+
+
 def calibration_frame_context(
     scene: dict,
     scene_time: float,
@@ -46,3 +65,6 @@ def calibration_frame_context(
         target_image,
         camera_transform,
     )
+
+
+__all__ = ("calibration_frame_context", "sampled_frame_context")

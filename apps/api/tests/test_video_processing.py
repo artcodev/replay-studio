@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -7,6 +8,7 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
 import app.video_ingest_preparation as video_preparation
+import app.video_ffmpeg as video_ffmpeg
 from app.analysis_run_repository import AnalysisRunRepository
 from app.database import Base, VideoAssetRow
 from app.analysis_run_contract import AnalysisRunCreate
@@ -77,6 +79,62 @@ def test_rank_reconstruction_shots_marks_top_eligible_segments():
     assert [segment["recommended"] for segment in segments] == [False, True, True, False]
 
 
+def test_analysis_frames_keep_source_resolution_at_maximum_jpeg_quality(
+    monkeypatch,
+    tmp_path,
+):
+    commands: list[list[str]] = []
+    monkeypatch.setattr(
+        video_ffmpeg,
+        "run_media_command",
+        lambda command: commands.append(command),
+    )
+
+    video_ffmpeg.sample_detector_frames(
+        tmp_path / "source.mp4",
+        tmp_path / "frames" / "frame_%05d.jpg",
+        fps=25.0,
+    )
+
+    command = commands[0]
+    assert command[command.index("-vf") + 1] == "fps=25"
+    assert "scale=" not in command[command.index("-vf") + 1]
+    assert command[command.index("-q:v") + 1] == "1"
+    assert command[command.index("-pix_fmt") + 1] == "yuvj444p"
+
+
+def test_probe_video_prefers_the_stream_nominal_native_frame_rate(monkeypatch):
+    monkeypatch.setattr(video_ffmpeg.shutil, "which", lambda _name: "/usr/bin/ffprobe")
+    monkeypatch.setattr(
+        video_ffmpeg,
+        "run_media_command",
+        lambda _command: SimpleNamespace(
+            stdout=json.dumps(
+                {
+                    "streams": [
+                        {
+                            "codec_type": "video",
+                            "width": 1920,
+                            "height": 1080,
+                            "duration": "54.4903",
+                            "r_frame_rate": "30000/1001",
+                            "avg_frame_rate": "16320000/544903",
+                            "nb_frames": "1632",
+                        }
+                    ],
+                    "format": {"duration": "54.502018"},
+                }
+            )
+        ),
+    )
+
+    metadata = video_ffmpeg.probe_video(Path("source.mp4"))
+
+    assert metadata["fps"] == pytest.approx(30000 / 1001)
+    assert metadata["averageFps"] == pytest.approx(16320000 / 544903)
+    assert metadata["sourceFrameCount"] == 1632
+
+
 def test_ingest_stops_after_preparing_recommended_scenes(monkeypatch, tmp_path):
     asset_id = "asset-ingest-only"
     source = tmp_path / "source.mp4"
@@ -142,6 +200,20 @@ def test_ingest_stops_after_preparing_recommended_scenes(monkeypatch, tmp_path):
         result.root_scene["payload"]["videoAsset"]["generationKey"]
         == "lease-ingest-only"
     )
+    assert result.root_scene["payload"]["videoAsset"]["analysisFrameInput"] == {
+        "schemaVersion": 1,
+        "source": "uploaded-video",
+        "coordinateSpace": "source-video-pixels",
+        "width": 1920,
+        "height": 1080,
+        "resize": "none",
+        "format": "jpeg",
+            "jpegQscale": 1,
+            "chromaSampling": "4:4:4",
+            "sourceFps": 25.0,
+            "averageFps": 25.0,
+            "sourceFrameCount": 0,
+        }
     result.validate()
     assert all(update.get("stage") != "Reconstructing players and ball" for update in updates)
     assert updates[-1] == {

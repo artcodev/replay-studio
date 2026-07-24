@@ -9,6 +9,7 @@ from sqlalchemy import create_engine, event, select
 from sqlalchemy.orm import sessionmaker
 
 import app.reconstruction as reconstruction_module
+import app.reconstruction_calibration_process as calibration_process_module
 import app.reconstruction_recovery as recovery_module
 import app.reconstruction_worker as reconstruction_worker_module
 from app.database import Base, ReconstructionJobRow, ReconstructionLeaseRow, SceneRow
@@ -632,6 +633,59 @@ def test_by_id_claims_and_propagates_owner_to_terminal_publish(tmp_path, monkeyp
     assert "lease" not in saved["payload"]["videoAsset"]["reconstruction"]
 
 
+def test_by_id_dispatches_calibration_to_its_dedicated_process_entry(
+    tmp_path,
+    monkeypatch,
+):
+    clock = MutableClock()
+    store, _other, sessions = _independent_repositories(tmp_path, clock)
+    queued = _scene("calibration-by-id")
+    reconstruction = queued["payload"]["videoAsset"]["reconstruction"]
+    reconstruction["mode"] = "calibrate"
+    reconstruction["inputFingerprint"] = reconstruction_input_fingerprint(queued)
+    _put_owned(store, sessions, queued)
+    run_id, fingerprint = _tokens(queued)
+    calls: list[str] = []
+    monkeypatch.setattr(reconstruction_worker_module, "scenes", store.documents)
+    monkeypatch.setattr(
+        reconstruction_worker_module,
+        "reconstruction_runs",
+        store.runs,
+    )
+
+    def calibrate(
+        scene: dict,
+        *,
+        expected_run_id: str,
+        expected_input_fingerprint: str,
+        expected_lease_owner_id: str,
+        match_snapshot=None,
+    ) -> dict:
+        calls.append("calibrate")
+        scene["payload"]["videoAsset"]["reconstruction"]["status"] = "ready"
+        assert store.runs.put_if_reconstruction_run(
+            scene,
+            expected_run_id,
+            expected_input_fingerprint,
+            expected_lease_owner_id,
+        )
+        return scene
+
+    monkeypatch.setattr(calibration_process_module, "calibrate_scene", calibrate)
+    monkeypatch.setattr(
+        reconstruction_module,
+        "reconstruct_scene",
+        lambda *_args, **_kwargs: pytest.fail(
+            "calibration must not enter the full Reconstruction process"
+        ),
+    )
+
+    assert reconstruction_worker_module.reconstruct_scene_by_id(
+        queued["id"], run_id, fingerprint
+    )
+    assert calls == ["calibrate"]
+
+
 def test_unexpected_by_id_crash_persists_failure_and_clears_lease(
     tmp_path, monkeypatch
 ):
@@ -759,3 +813,27 @@ def test_crash_looping_job_dead_letters_after_the_attempt_cap(
     assert reconstruction["status"] == "failed"
     assert "gave up after 2 attempts" in str(reconstruction.get("error"))
     assert "exited with code -9" in str(reconstruction.get("error"))
+
+    # The crashed owner's lease outlives the dead-letter until its TTL; an
+    # immediate re-queue is refused explicitly and succeeds after expiry.
+    clock.value += 11.0
+
+    # An explicit new queue command is a fresh life: the dead-lettered
+    # attempts must not poison it into an instant give-up on first claim.
+    requeued = deepcopy(stored)
+    requeued["payload"]["videoAsset"]["reconstruction"] = {
+        **reconstruction,
+        "status": "queued",
+        "processingStatus": "queued",
+        "runId": "run-after-dead-letter",
+        "inputFingerprint": fingerprint,
+        "error": None,
+        "progress": reconstruction.get("progress") or {},
+    }
+    first.runs.enqueue_reconstruction(
+        requeued,
+        expected_input_fingerprint=reconstruction_input_fingerprint(stored),
+    )
+    assert first.runs.claim_reconstruction_run(
+        scene["id"], "run-after-dead-letter", fingerprint, "fresh-owner"
+    )

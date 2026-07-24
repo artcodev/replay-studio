@@ -112,7 +112,6 @@ export function useEditorAnalysisContext(
     projectId: session.editorProjectId,
     seekTo: viewport.seekTo,
     clearFrameAnalysis: frameAnalysis.clear,
-    startReconstructionPolling: reconstruction.startPolling,
   })
   const videoReview = useVideoReviewViewport({
     isZoomBlocked: () => Boolean(
@@ -129,6 +128,9 @@ export function useEditorAnalysisContext(
     { value: 'yolo26m.pt', label: '26m · balanced' },
     { value: 'yolo26l.pt', label: '26l' },
     { value: 'yolo26x.pt', label: '26x · max' },
+    // Owner-supplied football-tuned checkpoint at the repository root;
+    // queuing fails with an installation hint while the file is absent.
+    { value: 'football.pt', label: 'football · custom weights' },
   ]
   const ballDetectionBackends: Array<{ value: BallDetectionBackend; label: string }> = [
     { value: 'dedicated-ultralytics', label: 'Roboflow · tiled' },
@@ -180,6 +182,11 @@ export function useEditorAnalysisContext(
   watch(modelComparison.job, (currentJob, previousJob) => {
     if (!isAnalysisJobTerminalTransition(previousJob, currentJob)) return
     void modelComparison.syncAfterTerminal(currentJob as AnalysisJob)
+  })
+
+  watch(reconstruction.frameGenerationJob, (currentJob, previousJob) => {
+    if (!isAnalysisJobTerminalTransition(previousJob, currentJob)) return
+    void reconstruction.syncAfterFrameGeneration(currentJob as AnalysisJob)
   })
 
   watch(() => session.scene.value?.id, (sceneId) => {

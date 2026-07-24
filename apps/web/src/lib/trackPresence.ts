@@ -1,6 +1,6 @@
 import type { Keyframe, Track } from '../types/tracking'
 
-export type TrackPresenceState = NonNullable<Keyframe['presenceState']>
+export type TrackPresenceState = 'observed' | 'inferred-gap' | 'outside-observed-window'
 
 export type TrackPresenceSnapshot = {
   state: TrackPresenceState
@@ -31,19 +31,14 @@ const statePresentation: Record<TrackPresenceState, Pick<TrackPresenceSnapshot, 
     detail: 'Supported by a detector/tracker observation at this timestamp.',
     observed: true,
   },
-  'inferred-before-first': {
-    label: 'INFERRED · BEFORE',
-    detail: 'Latent position before the first confirmed observation.',
-    observed: false,
-  },
   'inferred-gap': {
     label: 'INFERRED · GAP',
     detail: 'Latent position through a gap between confirmed observations.',
     observed: false,
   },
-  'inferred-after-last': {
-    label: 'INFERRED · AFTER',
-    detail: 'Latent position after the last confirmed observation.',
+  'outside-observed-window': {
+    label: 'NOT OBSERVED',
+    detail: 'No player position is published outside the confirmed observation window.',
     observed: false,
   },
 }
@@ -109,10 +104,10 @@ function presenceStateAtTime(track: Track, time: number): TrackPresenceState {
   const observedStart = observed.length ? observed[0].t : metadataStart
   const observedEnd = observed.length ? observed[observed.length - 1].t : metadataEnd
   if (observedStart !== null && observedStart !== undefined && time < observedStart) {
-    return 'inferred-before-first'
+    return 'outside-observed-window'
   }
   if (observedEnd !== null && observedEnd !== undefined && time > observedEnd) {
-    return 'inferred-after-last'
+    return 'outside-observed-window'
   }
   if (observedStart !== null && observedStart !== undefined) return 'inferred-gap'
 
@@ -127,7 +122,9 @@ export function trackPresenceAtTime(track: Track, time: number): TrackPresenceSn
   return {
     state,
     ...statePresentation[state],
-    uncertaintyMetres: uncertaintyAtTime(track.keyframes, time),
+    uncertaintyMetres: state === 'outside-observed-window'
+      ? null
+      : uncertaintyAtTime(track.keyframes, time),
   }
 }
 

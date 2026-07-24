@@ -10,6 +10,8 @@ import app.person_base_detection_cache as person_base_detection_cache
 
 from .ball_detection_contract import BallDetector
 from .config import get_settings
+from .person_detection_provider_contract import PersonDetectionProvider
+from .person_detection_provider_factory import build_person_detection_provider
 from .person_detector_provenance import person_detection_input
 from .reconstruction_ball_detector_selection import configured_ball_detectors
 from .reconstruction_errors import ReconstructionError
@@ -20,6 +22,7 @@ from .reconstruction_progress import ReconstructionProgress
 @dataclass(frozen=True)
 class SampledDetectionRuntime:
     model: Any
+    person_provider: PersonDetectionProvider
     person_detector_input: dict
     person_cache_diagnostics: dict
     person_cache_directory: Path
@@ -37,20 +40,25 @@ def load_sampled_frames(
         "Preparing sampled frames",
         "Reading the scene range and checking extracted images.",
         0,
-        4,
+        8,
         completed=0,
         total=1,
     )
     frames = frame_paths(scene)
     if not frames:
         raise ReconstructionError("No sampled frames are available for this moment")
+    video = scene["payload"]["videoAsset"]
+    reconstruction = video.get("reconstruction") or {}
     progress.update(
         "preparing",
         1,
         "Inputs ready",
-        f"Found {len(frames)} sampled frames for analysis.",
+        f"Found {len(frames)} frames at "
+        f"{float(reconstruction.get('samplingFrameRate') or video.get('fps') or 0):g} "
+        f"FPS (source {float(video.get('fps') or 0):g} FPS; materialized "
+        f"{float(video.get('analysisFps') or 0):g} FPS).",
         0,
-        4,
+        8,
         completed=1,
         total=1,
         eta_padding=max(8.0, len(frames) * 0.35),
@@ -72,13 +80,19 @@ def prepare_sampled_detectors(
         3,
         "Loading object detectors",
         f"Preparing {model_name} for people and {ball_backend} for dense ball inference.",
-        62,
-        84,
+        8,
+        38,
         completed=0,
         total=len(frames),
     )
     model = load_model(model_name)
-    detector_input = person_detection_input(model_name, model)
+    person_provider = build_person_detection_provider(model_name, model)
+    provider_info = person_provider.info()
+    detector_input = person_detection_input(
+        model_name,
+        model,
+        provider_info=provider_info,
+    )
     cache_diagnostics = person_base_detection_cache.base_detection_cache_diagnostics(
         len(frames),
         detector_input,
@@ -94,6 +108,7 @@ def prepare_sampled_detectors(
     )
     return SampledDetectionRuntime(
         model=model,
+        person_provider=person_provider,
         person_detector_input=detector_input,
         person_cache_diagnostics=cache_diagnostics,
         person_cache_directory=cache_directory,

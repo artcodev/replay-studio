@@ -12,7 +12,7 @@ from .reconstruction_ball_detection import detect_ball_frames
 from .reconstruction_ball_candidate_projection import apply_dense_ball_projection
 from .reconstruction_dense_ball_projection_context import dense_ball_projection_context
 from .reconstruction_progress import ReconstructionProgress
-from .reconstruction_temporal_calibration_phase import TemporalCalibrationResult
+from .temporal_calibration_contract import TemporalCalibrationResult
 
 
 @dataclass(frozen=True)
@@ -78,8 +78,8 @@ def detect_dense_ball_phase(
             f"Decoding up to {analysis_frame_rate:g} FPS "
             f"for {backend}; player/calibration samples stay unchanged."
         ),
-        62,
-        84,
+        38,
+        56,
         completed=0,
         total=max(1, round(float(scene["duration"]) * analysis_frame_rate)),
         eta_padding=5.0,
@@ -91,8 +91,8 @@ def detect_dense_ball_phase(
             3,
             "Detecting and scoring ball hypotheses",
             f"Dense ball frame {completed}/{total} · {detail}.",
-            62,
-            84,
+            38,
+            56,
             completed=completed,
             total=total,
             eta_padding=3.0,

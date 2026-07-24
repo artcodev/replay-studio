@@ -166,7 +166,7 @@ function chooseAttackingGoal(event: Event) {
         <div><strong>Calibration frames</strong><small>click a sample to inspect the exact projection</small></div>
         <div class="qa-timeline-legend" aria-hidden="true">
           <i class="direct" /> direct
-          <i class="recovered" /> recovered
+          <i class="recovered" /> temporal
           <i class="propagated" /> manual
           <i class="ambiguous" /> ambiguous
           <i class="rejected" /> rejected
@@ -204,8 +204,10 @@ function chooseAttackingGoal(event: Event) {
           <div><dt>Resolved solution</dt><dd>{{ solutionLabel(selectedFrame) }}</dd></div>
           <div><dt>Projection</dt><dd>{{ selectedFrame.projectionSource }}</dd></div>
           <div><dt>Backend</dt><dd>{{ selectedFrame.backend || selectedFrame.source || '—' }}</dd></div>
+          <div v-if="selectedFrame.pnlcalibAttempts"><dt>PnLCalib attempts</dt><dd>{{ selectedFrame.pnlcalibAttempts.attemptCount }} / {{ selectedFrame.pnlcalibAttempts.maximumAttempts }} · accepted {{ selectedFrame.pnlcalibAttempts.acceptedAttempt ?? 'no' }}</dd></div>
           <div><dt>Confidence</dt><dd>{{ percent(selectedFrame.confidence) }}</dd></div>
           <div><dt>Reprojection p50 / p95</dt><dd>{{ number(selectedFrame.reprojectionError, ' px') }} / {{ number(selectedFrame.reprojectionP95, ' px') }}</dd></div>
+          <div><dt>Keypoint ground p50 / p95</dt><dd>{{ number(selectedFrame.groundErrorP50Metres, ' m') }} / {{ number(selectedFrame.groundErrorP95Metres, ' m') }}</dd></div>
           <div><dt>Keypoints / inliers</dt><dd>{{ selectedFrame.keypointCount ?? '—' }} / {{ selectedFrame.inlierCount ?? '—' }}</dd></div>
           <div><dt>Inlier ratio</dt><dd>{{ percent(selectedFrame.inlierRatio) }}</dd></div>
           <div><dt>Visible side</dt><dd>{{ selectedFrame.visiblePitchSide || 'unknown' }}</dd></div>
@@ -265,7 +267,7 @@ function chooseAttackingGoal(event: Event) {
           <span v-for="reason in selectedFrame.rejectionReasons" :key="reason">{{ calibrationRejectionReasonLabel(reason) }}</span>
         </p>
         <p v-else-if="selectedFrame.status === 'accepted'" class="qa-evidence-note">
-          The video overlay uses this sample's stored homography. Recovered samples name their anchor and uncertainty; motion cuts are hard temporal boundaries.
+          The video overlay uses this sample's stored homography. Reprojection is a frame-local fit, not a temporal-continuity score. Recovered samples name their anchor and uncertainty; motion cuts are hard temporal boundaries.
         </p>
         <button class="qa-calibrate-button" @click="emit('calibrate', selectedFrame.sceneTime)">Adjust this frame manually</button>
       </article>

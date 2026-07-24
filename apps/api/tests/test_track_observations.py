@@ -98,13 +98,23 @@ def _scene(tracks: list[dict], *, observation_schema: bool) -> dict:
 
 
 def _patch_analysis(monkeypatch, detections: list[Detection]) -> None:
-    result = SimpleNamespace(orig_img=np.zeros((540, 960, 3), dtype=np.uint8))
+    result = SimpleNamespace(
+        image_bgr=np.zeros((540, 960, 3), dtype=np.uint8),
+        names={},
+        diagnostics={},
+    )
     monkeypatch.setattr("app.reconstruction_frame_analysis.frame_paths", lambda _: [(FRAME_PATH, 0.0)])
     monkeypatch.setattr("app.reconstruction_frame_analysis.load_model", lambda _: object())
-    monkeypatch.setattr("app.ultralytics_person_inference.predict_frame", lambda *_: result)
     monkeypatch.setattr(
-        "app.ultralytics_person_inference.parse_person_detections",
-        lambda _: (detections, []),
+        "app.reconstruction_frame_analysis.build_person_detection_provider",
+        lambda *_: SimpleNamespace(
+            predict=lambda _path: result,
+            info=lambda: {},
+        ),
+    )
+    monkeypatch.setattr(
+        "app.reconstruction_frame_analysis.parse_person_prediction",
+        lambda _prediction, **_kwargs: (detections, []),
     )
 
 
@@ -244,7 +254,8 @@ def test_rejected_metric_fragment_keeps_authoritative_video_identity(monkeypatch
     assert rejected["frameIndex"] == FRAME_INDEX
     assert rejected["bbox"]["x"] == 100.0
     assert rejected["metricStatus"] == "rejected"
-    assert rejected["metricReason"] == "trajectory-fragment-rejected"
+    assert rejected["metricReason"] == "identity-grade-speed-boundary"
+    assert rejected["trajectoryRejection"]["observationCount"] == 1
     assert rejected["rawPitch"] == {"x": -40.0, "z": 0.0}
     assert "pitch" not in rejected
     assert published["trajectoryQa"]["publishedIdentityObservationCount"] == 4
@@ -267,7 +278,7 @@ def test_rejected_metric_fragment_keeps_authoritative_video_identity(monkeypatch
     person = next(item for item in analysis["people"] if item["bbox"]["x"] == 100.0)
     assert person["matchedTrackId"] == published["id"]
     assert person["metricStatus"] == "rejected"
-    assert person["metricReason"] == "trajectory-fragment-rejected"
+    assert person["metricReason"] == "identity-grade-speed-boundary"
     assert person["positionSource"] == "track-inferred"
     assert person["rawPitch"] == {"x": -40.0, "z": 0.0}
 
@@ -364,6 +375,36 @@ def test_stored_observation_is_returned_when_fresh_detector_misses(monkeypatch):
     missed = next(person for person in result["people"] if person["matchedTrackId"] == "detector-missed")
     assert missed["bbox"]["x"] == 300
     assert missed["matchSource"] == "persisted-observation"
+
+
+def test_unprojectable_observation_reports_no_position_instead_of_centre(
+    monkeypatch,
+):
+    # A published identity observation whose metric was rejected and whose
+    # track has no keyframes used to be placed at the {0,0} placeholder —
+    # a phantom marker on the centre circle.
+    track = _track(
+        "dropped-by-qa",
+        0.0,
+        0.0,
+        observations=[
+            _observation(300, 180, 3, 2, metricStatus="rejected"),
+        ],
+    )
+    track["keyframes"] = []
+    _patch_analysis(
+        monkeypatch,
+        [Detection(310, 220, 20, 40, 0.8, np.zeros(12, dtype=np.float32))],
+    )
+
+    result = analyze_scene_frame(_scene([track], observation_schema=True), 0.0)
+
+    person = next(
+        item for item in result["people"] if item["matchedTrackId"] == "dropped-by-qa"
+    )
+    assert person["pitch"] is None
+    assert person["positionSource"] == "unprojectable"
+    assert person["metricStatus"] == "rejected"
 
 
 def test_inferred_track_without_observation_never_claims_video_bbox(monkeypatch):

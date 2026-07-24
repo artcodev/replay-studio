@@ -174,6 +174,38 @@ def test_dense_ball_frame_timestamps_are_relative_to_scene_range(monkeypatch, tm
     assert command[command.index("-t") + 1] == "0.300000"
 
 
+def test_dense_ball_frames_omit_the_moment_of_an_excluded_source_frame(
+    monkeypatch,
+    tmp_path: Path,
+):
+    _source(tmp_path)
+    calls: list[list[str]] = []
+    monkeypatch.setattr(ball_frames, "get_settings", lambda: _settings(tmp_path, 10.0))
+    monkeypatch.setattr(ball_frames.shutil, "which", lambda _: "/fake/ffmpeg")
+    monkeypatch.setattr(
+        ball_frames.subprocess,
+        "run",
+        _successful_ffmpeg(4, calls),
+    )
+    scene = _scene(source_fps=20.0, source_end=0.3, duration=0.3)
+    scene["payload"]["videoAsset"]["frameExclusions"] = [
+        {"sourceFrameIndex": 3, "sceneTime": 0.1},
+    ]
+
+    result = ball_frames.dense_ball_frame_paths(scene)
+
+    assert [timestamp for _, timestamp in result.frames] == pytest.approx(
+        [0.0, 0.2, 0.3]
+    )
+    assert result.cache_key != ball_frames._cache_key(
+        ball_frames._cache_contract(
+            scene,
+            tmp_path / "asset-ball-frames" / "source.mp4",
+            10.0,
+        )
+    )
+
+
 def test_dense_ball_frame_rate_is_capped_by_source_fps(monkeypatch, tmp_path: Path):
     _source(tmp_path)
     calls: list[list[str]] = []

@@ -12,6 +12,8 @@ export type CalibrationFrameDiagnostics = {
   inlierRatio: number | null
   residualP50: number | null
   residualP95: number | null
+  groundResidualP50: number | null
+  groundResidualP95: number | null
   precision: number | null
   recall: number | null
   f1: number | null
@@ -24,6 +26,7 @@ const rejectionReasonLabels: Record<string, string> = {
   'semantic-line-alignment-poor': 'Projected markings do not align with the observed pitch lines.',
   'semantic-line-alignment-unscored': 'Projected-markings alignment could not be scored on this frame.',
   'temporal-semantic-line-alignment-poor': 'Temporally projected markings do not align with the observed pitch lines.',
+  'semantic-keypoint-ground-error-too-high': 'Semantic keypoints have a ground-plane residual tail above 1 metre.',
 }
 
 export function calibrationRejectionReasonLabel(reason: string) {
@@ -175,6 +178,12 @@ export function calibrationFrameDiagnostics(
     inlierRatio: draft.inlierRatio ?? evidence?.inlierRatio ?? null,
     residualP50: metrics?.residualP50 ?? draft.alignmentError ?? evidence?.reprojectionError ?? null,
     residualP95: metrics?.residualP95 ?? draft.reprojectionP95 ?? evidence?.reprojectionP95 ?? null,
+    groundResidualP50: draft.groundErrorP50Metres
+      ?? evidence?.groundErrorP50Metres
+      ?? null,
+    groundResidualP95: draft.groundErrorP95Metres
+      ?? evidence?.groundErrorP95Metres
+      ?? null,
     precision: metrics?.precision ?? null,
     recall: metrics?.recall ?? null,
     f1: metrics?.f1 ?? null,

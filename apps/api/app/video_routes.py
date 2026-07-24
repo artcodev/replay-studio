@@ -8,6 +8,7 @@ from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 
 from .config import get_settings
+from .analysis_frame_generation_pipeline import analysis_frame_generation_pipeline
 from .pipeline_domain import PipelineJobConflict
 from .project_store import project_store
 from . import project_resource_access
@@ -116,6 +117,31 @@ def video_poster(project_id: str, asset_id: str):
     if not path.exists():
         raise HTTPException(status_code=409, detail="Poster is not ready")
     return FileResponse(path, media_type="image/jpeg")
+
+
+@router.post("/{asset_id}/analysis-frames/regenerate", status_code=202)
+def regenerate_analysis_frames(project_id: str, asset_id: str) -> dict:
+    """Queue an explicit destructive cutover to source-resolution frames.
+
+    Publication invalidates calibration and reconstruction results tied to the
+    previous pixel grid. It never runs calibration automatically.
+    """
+
+    project_resource_access.project_video_or_404(project_id, asset_id)
+    try:
+        job = analysis_frame_generation_pipeline.enqueue(
+            job_id=f"analysis-frames-{uuid4().hex}",
+            project_id=project_id,
+            asset_id=asset_id,
+        )
+    except PipelineJobConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return {
+        "runId": job.id,
+        "assetId": asset_id,
+        "kind": job.kind,
+        "status": job.status,
+    }
 
 
 @router.post(

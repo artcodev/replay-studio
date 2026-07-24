@@ -21,6 +21,7 @@ from typing import Iterator
 from uuid import uuid4
 
 from .config import get_settings
+from .scene_frame_exclusions import scene_frame_exclusions
 
 
 class DenseBallFramesError(RuntimeError):
@@ -216,11 +217,38 @@ def dense_ball_frame_paths(scene: dict) -> DenseBallFrameSet:
         (path, min(duration, (index - 1) / target_fps))
         for index, path in enumerate(paths, start=1)
     )
+    exclusions = scene_frame_exclusions(scene)
+    excluded_dense_indices = {
+        max(0, min(len(frames) - 1, int(float(item["sceneTime"]) * target_fps + 0.5)))
+        for item in exclusions
+    } if frames else set()
+    if excluded_dense_indices:
+        frames = tuple(
+            frame
+            for index, frame in enumerate(frames)
+            if index not in excluded_dense_indices
+        )
+    filtered_key = (
+        sha256(
+            json.dumps(
+                {
+                    "denseCacheKey": key,
+                    "excludedSourceFrames": [
+                        int(item["sourceFrameIndex"]) for item in exclusions
+                    ],
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode()
+        ).hexdigest()[:20]
+        if exclusions
+        else key
+    )
     return DenseBallFrameSet(
         frames=frames,
         frame_rate=target_fps,
         source_start=contract["sourceStart"],
         source_end=contract["sourceEnd"],
-        cache_key=key,
+        cache_key=filtered_key,
         cache_hit=cache_hit,
     )

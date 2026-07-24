@@ -25,6 +25,9 @@ DIAGNOSTIC_FIELDS = frozenset(
         "deduplicatedObservationCount",
         "concurrentDeduplicatedCount",
         "providerInferenceCount",
+        "providerCallCount",
+        "providerInferenceSeconds",
+        "requestSeconds",
         "corruptCacheMissCount",
         "expiredCacheMissCount",
         "uniqueEvidenceFingerprintCount",
@@ -32,6 +35,11 @@ DIAGNOSTIC_FIELDS = frozenset(
         "cache",
     }
 )
+TIMING_DIAGNOSTIC_FIELDS = frozenset(
+    {"providerInferenceSeconds", "requestSeconds"}
+)
+
+
 def _validated_diagnostics(value: object) -> dict:
     if not isinstance(value, dict):
         raise IdentityWorkerError("Identity worker returned malformed diagnostics")
@@ -50,7 +58,11 @@ def _validated_diagnostics(value: object) -> dict:
             raise IdentityWorkerError(
                 f"Identity worker returned invalid diagnostic {field}"
             )
-        normalized[field] = int(diagnostic)
+        normalized[field] = (
+            float(diagnostic)
+            if field in TIMING_DIAGNOSTIC_FIELDS
+            else int(diagnostic)
+        )
     return normalized
 
 

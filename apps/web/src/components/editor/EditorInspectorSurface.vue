@@ -6,6 +6,7 @@ import ManualBallInspector from './ManualBallInspector.vue'
 import FrameAnalysisInspector from './FrameAnalysisInspector.vue'
 import ModelComparisonCard from './ModelComparisonCard.vue'
 import PlayerTrackInspector from './PlayerTrackInspector.vue'
+import TrackProjectionDebugCard from './TrackProjectionDebugCard.vue'
 import { frameMetricBadge } from '../../lib/videoTrackSelection'
 import { identityValidationSummary } from '../../lib/reconstructionUi'
 import type {
@@ -198,6 +199,19 @@ const {
       >
         <template #presence><TrackPresenceCard :track="selection.track" :current-time="currentTime" /></template>
       </PlayerTrackInspector>
+      <TrackProjectionDebugCard
+        v-if="selection.track?.observations?.length || selection.canonicalPerson?.observations?.length"
+        :label="selection.track?.label ?? selection.canonicalPerson?.displayName ?? 'Selected identity'"
+        :observations="selection.track?.observations ?? selection.canonicalPerson?.observations"
+        :tracks="scene.payload.tracks"
+        :calibration-frames="analysis.calibrationFrames"
+        :pitch="scene.payload.pitch"
+        :current-time="currentTime"
+        :contact-point-profile="scene.payload.videoAsset?.reconstruction?.contactPointProfile ?? 'bbox-bottom'"
+        :calibration-busy="pitchCalibration.loading.value || pitchCalibration.applying.value || reconstruction.running.value"
+        @seek="commands.seek"
+        @recalibrate="pitchCalibration.calibrateQaFrame"
+      />
       <FrameAnalysisInspector
         v-if="frameAnalysis.analysis.value"
         :analysis="frameAnalysis.analysis.value"

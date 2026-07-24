@@ -13,6 +13,12 @@ from .reconstruction_pitch_projection import project_pitch_point
 
 
 MAXIMUM_PLAYER_SPEED_METRES_PER_SECOND = 14.0
+# Above this implied speed two neighbouring observations cannot belong to
+# one person even under projection noise: such a splice is an identity
+# boundary. Between the two thresholds a splice is measurement noise — the
+# fragments on both sides still belong to the same person and are retained
+# as one chain instead of discarding everything but the longest fragment.
+TRACK_IDENTITY_SPLIT_SPEED_METRES_PER_SECOND = 25.0
 
 
 def _smooth_axis(values: list[float]) -> list[float]:
@@ -106,6 +112,9 @@ def project_track_trajectory(
 
     segments: list[list[ProjectedTrajectoryPoint]] = [[]]
     raw_speeds: list[float] = []
+    adjusted_speeds: list[float] = []
+    splice_speeds: list[float] = []
+    splice_events: list[dict] = []
     for item in projected:
         segment = segments[-1]
         if segment:
@@ -114,30 +123,135 @@ def project_track_trajectory(
                 0.001,
                 item.source_point["t"] - previous.source_point["t"],
             )
-            speed = hypot(item.x - previous.x, item.z - previous.z) / elapsed
+            distance = hypot(item.x - previous.x, item.z - previous.z)
+            speed = distance / elapsed
+            uncertainty_allowance = min(
+                2.5,
+                (
+                    float(previous.uncertainty_metres or 0.0)
+                    + float(item.uncertainty_metres or 0.0)
+                )
+                * 0.5,
+            )
+            adjusted_speed = max(0.0, distance - uncertainty_allowance) / elapsed
             raw_speeds.append(speed)
-            if speed > MAXIMUM_PLAYER_SPEED_METRES_PER_SECOND:
+            adjusted_speeds.append(adjusted_speed)
+            if adjusted_speed > MAXIMUM_PLAYER_SPEED_METRES_PER_SECOND:
+                splice_speeds.append(adjusted_speed)
+                splice_events.append(
+                    {
+                        "leftTime": round(
+                            float(previous.source_point["t"]),
+                            3,
+                        ),
+                        "rightTime": round(
+                            float(item.source_point["t"]),
+                            3,
+                        ),
+                        "leftFrameIndex": previous.source_point.get(
+                            "frameIndex"
+                        ),
+                        "rightFrameIndex": item.source_point.get(
+                            "frameIndex"
+                        ),
+                        "rawDistanceMetres": round(distance, 3),
+                        "uncertaintyAllowanceMetres": round(
+                            uncertainty_allowance,
+                            3,
+                        ),
+                        "rawSpeedMetresPerSecond": round(speed, 3),
+                        "adjustedSpeedMetresPerSecond": round(
+                            adjusted_speed,
+                            3,
+                        ),
+                        "classification": (
+                            "identity-boundary"
+                            if adjusted_speed
+                            > TRACK_IDENTITY_SPLIT_SPEED_METRES_PER_SECOND
+                            else "measurement-noise"
+                        ),
+                    }
+                )
                 segments.append([])
                 segment = segments[-1]
         segment.append(item)
 
-    retained = max(segments, key=len)
-    non_empty_segments = [segment for segment in segments if segment]
-    impossible_speed_count = sum(
-        speed > MAXIMUM_PLAYER_SPEED_METRES_PER_SECOND for speed in raw_speeds
+    # Fragments joined by measurement-noise splices form one chain; only an
+    # identity-grade splice breaks the chain. The longest chain is retained,
+    # so a clearly visible early span is no longer sacrificed to one noisy
+    # step, while observations beyond an identity switch stay quarantined.
+    chains: list[list[list[ProjectedTrajectoryPoint]]] = [[segments[0]]]
+    for boundary_speed, segment in zip(splice_speeds, segments[1:]):
+        if boundary_speed > TRACK_IDENTITY_SPLIT_SPEED_METRES_PER_SECOND:
+            chains.append([segment])
+        else:
+            chains[-1].append(segment)
+    retained_chain_index = max(
+        range(len(chains)),
+        key=lambda index: sum(
+            len(segment) for segment in chains[index]
+        ),
     )
+    retained_chain = chains[retained_chain_index]
+    retained = [item for segment in retained_chain for item in segment]
+    impossible_speed_count = sum(
+        speed > MAXIMUM_PLAYER_SPEED_METRES_PER_SECOND
+        for speed in adjusted_speeds
+    )
+    discarded_ranges = [
+        {
+            "chainIndex": index,
+            "startTime": round(
+                float(chain[0][0].source_point["t"]),
+                3,
+            ),
+            "endTime": round(
+                float(chain[-1][-1].source_point["t"]),
+                3,
+            ),
+            "startFrameIndex": chain[0][0].source_point.get("frameIndex"),
+            "endFrameIndex": chain[-1][-1].source_point.get("frameIndex"),
+            "observationCount": sum(len(segment) for segment in chain),
+            "reason": "identity-grade-speed-boundary",
+        }
+        for index, chain in enumerate(chains)
+        if index != retained_chain_index
+    ]
+    for event in splice_events:
+        event["retainedAcrossBoundary"] = (
+            event["classification"] == "measurement-noise"
+        )
     discarded_observations = len(projected) - len(retained)
     quality = {
         "rawObservationCount": len(projected),
         "retainedObservationCount": len(retained),
         "discardedObservationCount": discarded_observations,
-        "fragmentCount": len(non_empty_segments),
-        "discardedFragmentCount": max(0, len(non_empty_segments) - 1),
+        "fragmentCount": len(segments),
+        "retainedFragmentCount": len(retained_chain),
+        "discardedFragmentCount": len(segments) - len(retained_chain),
+        "softSpliceBridgedCount": len(retained_chain) - 1,
+        "identitySpliceCount": sum(
+            speed > TRACK_IDENTITY_SPLIT_SPEED_METRES_PER_SECOND
+            for speed in splice_speeds
+        ),
+        "retentionPolicy": "soft-splice-chains-v1",
         "rawSpeedSampleCount": len(raw_speeds),
         "impossibleSpeedSegmentCount": impossible_speed_count,
+        "rawImpossibleSpeedSegmentCount": sum(
+            speed > MAXIMUM_PLAYER_SPEED_METRES_PER_SECOND
+            for speed in raw_speeds
+        ),
         "maximumRawSpeedMetresPerSecond": (
             round(max(raw_speeds), 3) if raw_speeds else None
         ),
+        "maximumUncertaintyAdjustedSpeedMetresPerSecond": (
+            round(max(adjusted_speeds), 3)
+            if adjusted_speeds
+            else None
+        ),
+        "retainedChainIndex": retained_chain_index,
+        "spliceEvents": splice_events,
+        "discardedRanges": discarded_ranges,
     }
 
     xs = _smooth_axis([item.x for item in retained])

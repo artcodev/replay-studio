@@ -1,8 +1,13 @@
 import * as THREE from 'three'
 import { shouldRenderActor, shouldRenderPlayerVisual } from '../../lib/actorVisibility'
-import { interpolateKeyframes } from '../../lib/interpolate'
+import { interpolateKeyframes, isInferredAt } from '../../lib/interpolate'
+import type { InferredPositionRenderMode } from '../../lib/threeViewOptions'
 import type { Track } from '../../types/tracking'
 import { disposeObjectResources } from './threeResources'
+
+// Latent positions are faded so an identity-continuity interpolation cannot
+// be mistaken for an observed player.
+const INFERRED_OPACITY = 0.28
 
 export type PlayerVisualOptions = {
   showModels: boolean
@@ -23,7 +28,7 @@ function createLabel(track: Track, visible: boolean) {
   context.fillRect(18, 25, 8, 46)
   context.fillStyle = '#f3f5ef'
   context.font = '600 33px Arial, sans-serif'
-  context.fillText(`${track.number}  ${track.label}`, 42, 60)
+  context.fillText(track.number ? `${track.number}  ${track.label}` : track.label, 42, 60)
 
   const texture = new THREE.CanvasTexture(canvas)
   texture.colorSpace = THREE.SRGBColorSpace
@@ -46,7 +51,12 @@ function createPlayer(track: Track, options: PlayerVisualOptions) {
   const color = new THREE.Color(track.color)
   const body = new THREE.Mesh(
     new THREE.CapsuleGeometry(0.52, 1.25, 6, 12),
-    new THREE.MeshStandardMaterial({ color, roughness: 0.48, metalness: 0.12 }),
+    new THREE.MeshStandardMaterial({
+      color,
+      roughness: 0.48,
+      metalness: 0.12,
+      transparent: true,
+    }),
   )
   body.position.y = 1.45
   body.castShadow = options.shadows
@@ -57,7 +67,11 @@ function createPlayer(track: Track, options: PlayerVisualOptions) {
 
   const head = new THREE.Mesh(
     new THREE.SphereGeometry(0.34, 16, 12),
-    new THREE.MeshStandardMaterial({ color: 0xd4a47d, roughness: 0.72 }),
+    new THREE.MeshStandardMaterial({
+      color: 0xd4a47d,
+      roughness: 0.72,
+      transparent: true,
+    }),
   )
   head.position.y = 2.72
   head.castShadow = options.shadows
@@ -104,15 +118,52 @@ export class PlayerLayer {
     })
   }
 
-  update(tracks: Track[], currentTime: number, duration: number) {
+  update(
+    tracks: Track[],
+    currentTime: number,
+    duration: number,
+    inferredPositionMode: InferredPositionRenderMode = 'transparent',
+  ) {
     tracks.forEach((track) => {
       const group = this.groups.get(track.id)
       if (!group) return
+      const inferred = isInferredAt(track.keyframes, currentTime)
+      if (inferred && inferredPositionMode === 'hidden') {
+        group.visible = false
+        return
+      }
       const position = interpolateKeyframes(track.keyframes, currentTime)
       group.position.set(position.x, 0, position.z)
       const next = interpolateKeyframes(track.keyframes, Math.min(duration, currentTime + 0.2))
       group.rotation.y = Math.atan2(next.x - position.x, next.z - position.z)
-      group.visible = shouldRenderActor(track)
+      group.visible = shouldRenderActor(track, currentTime)
+      // Identity confidence does not alter positional evidence. Every person is
+      // solid on observed frames; only an internal inferred gap may be faded.
+      this.applyInferredState(
+        group,
+        inferred && inferredPositionMode === 'transparent',
+      )
+    })
+  }
+
+  private applyInferredState(group: THREE.Group, inferred: boolean) {
+    if (group.userData.inferred === inferred) return
+    group.userData.inferred = inferred
+    group.traverse((object) => {
+      if (object instanceof THREE.Mesh) {
+        const materials = Array.isArray(object.material) ? object.material : [object.material]
+        materials.forEach((material) => {
+          if (
+            material instanceof THREE.MeshStandardMaterial
+            || material instanceof THREE.MeshBasicMaterial
+          ) {
+            const solid = material instanceof THREE.MeshBasicMaterial ? 0.72 : 1
+            material.opacity = inferred ? INFERRED_OPACITY : solid
+          }
+        })
+      } else if (object instanceof THREE.Sprite) {
+        object.material.opacity = inferred ? 0.4 : 1
+      }
     })
   }
 

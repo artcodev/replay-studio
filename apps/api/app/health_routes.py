@@ -2,9 +2,13 @@ from fastapi import APIRouter
 
 from .ball_worker import ball_worker_readiness
 from .calibration_worker import calibration_worker_readiness
+from .config import get_settings
 from .identity_worker_client import identity_worker_readiness
 from .jersey_ocr_worker_client import jersey_ocr_worker_readiness
 from .providers.registry import sports_provider
+from .remote_person_detection_provider import (
+    person_detection_worker_readiness,
+)
 
 
 router = APIRouter(tags=["health"])
@@ -12,6 +16,7 @@ router = APIRouter(tags=["health"])
 
 @router.get("/api/health")
 def health() -> dict:
+    settings = get_settings()
     return {
         "status": "ok",
         "service": "replay-studio-api",
@@ -22,4 +27,7 @@ def health() -> dict:
         "identity_worker": identity_worker_readiness(),
         "jersey_ocr_worker": jersey_ocr_worker_readiness(),
         "ball_worker": ball_worker_readiness(),
+        "person_detection_worker": person_detection_worker_readiness(
+            settings.person_detection_worker_url
+        ),
     }

@@ -1,7 +1,8 @@
 <script setup lang="ts">
+import { computed } from 'vue'
 import type { ReconstructionPhase, ReconstructionProgress } from '../../types/reconstruction'
 
-defineProps<{
+const props = defineProps<{
   progress: ReconstructionProgress | null
   phases: ReconstructionPhase[]
   frameCount: number
@@ -11,6 +12,15 @@ defineProps<{
 }>()
 
 const emit = defineEmits<{ cancel: [] }>()
+
+// Derive the phase counter from the live checklist rather than the persisted
+// progress index (which is frozen at queue time), so it matches the ticking list.
+const currentPhaseNumber = computed(() => {
+  const current = props.phases.findIndex((phase) => phase.status === 'current')
+  if (current >= 0) return current + 1
+  const completed = props.phases.filter((phase) => phase.status === 'completed').length
+  return Math.min(Math.max(1, completed), Math.max(1, props.phases.length))
+})
 
 function durationLabel(seconds: number | null | undefined) {
   if (seconds === null || seconds === undefined || !Number.isFinite(seconds)) return 'estimating…'
@@ -32,7 +42,7 @@ function phaseStatusLabel(status: ReconstructionPhase['status']) {
   <section class="analysis-progress-panel" aria-live="polite" aria-label="Video analysis progress">
     <div class="analysis-progress-heading">
       <div>
-        <span>ANALYSIS PIPELINE · PHASE {{ progress?.phaseIndex ?? 1 }} OF {{ progress?.phaseCount ?? phases.length }}</span>
+        <span>ANALYSIS PIPELINE · PHASE {{ currentPhaseNumber }} OF {{ phases.length }}</span>
         <strong>{{ progress?.label ?? 'Waiting to start' }}</strong>
         <small>{{ progress?.detail ?? `Queued ${frameCount} sampled frames for analysis.` }}</small>
       </div>

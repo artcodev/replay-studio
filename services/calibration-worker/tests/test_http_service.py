@@ -14,6 +14,7 @@ from calibration_worker_service.main import create_app
 class FakeCalibrationService:
     def __init__(self) -> None:
         self.request: tuple[str, list[bytes]] | None = None
+        self.recalibration_request: tuple[str, list[bytes]] | None = None
 
     def readiness(self) -> dict:
         return {
@@ -36,6 +37,10 @@ class FakeCalibrationService:
             "diagnostics": {},
             "frames": [{"frameIndex": 7}],
         }
+
+    def recalibrate(self, frame_indices: str, payloads: list[bytes]) -> dict:
+        self.recalibration_request = (frame_indices, payloads)
+        return self.calibrate(frame_indices, payloads)
 
 
 async def _request(application, method: str, path: str, **kwargs) -> Response:
@@ -75,6 +80,18 @@ def test_http_root_preserves_health_and_batch_contract() -> None:
     assert response.status_code == 200
     assert response.json()["frames"] == [{"frameIndex": 7}]
     assert service.request == ("[7]", [b"image-bytes"])
+
+    refreshed = asyncio.run(
+        _request(
+            application,
+            "POST",
+            "/v1/recalibrate",
+            files=[("frames", ("frame.jpg", b"fresh-bytes", "image/jpeg"))],
+            data={"frame_indices": "[8]"},
+        )
+    )
+    assert refreshed.status_code == 200
+    assert service.recalibration_request == ("[8]", [b"fresh-bytes"])
 
 
 def test_http_root_maps_request_and_inference_failures() -> None:

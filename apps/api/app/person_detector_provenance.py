@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from importlib.metadata import PackageNotFoundError, version as package_version
 from pathlib import Path
+from typing import Mapping
 
 import cv2
 import numpy as np
@@ -72,27 +73,63 @@ def _installed_package_version(name: str) -> str | None:
         return None
 
 
-def person_detection_input(model_name: str, model: object | None = None) -> dict:
+def local_person_detection_provider_info(
+    model_name: str,
+    model: object | None = None,
+) -> dict:
+    checkpoint = _person_checkpoint_identity(model_name, model)
+    digest = str(checkpoint.get("sha256") or "content-unavailable")
+    return {
+        "backend": "ultralytics-yolo",
+        "providerVersion": _installed_package_version("ultralytics"),
+        "modelVersion": digest[:16],
+        "checkpoint": checkpoint,
+        "device": str(get_settings().reconstruction_device),
+        "batchSize": 1,
+        "torchVersion": _installed_package_version("torch"),
+        "mpsFallbackEnabled": False,
+    }
+
+
+def person_detection_input(
+    model_name: str,
+    model: object | None = None,
+    *,
+    provider_info: Mapping | None = None,
+) -> dict:
     """Return the complete cache identity for sampled-frame base inference."""
 
+    runtime = dict(
+        provider_info
+        or local_person_detection_provider_info(model_name, model)
+    )
     return {
-        "schemaVersion": 1,
+        "schemaVersion": 2,
         "provider": {
-            "backend": "ultralytics-yolo",
-            "version": _installed_package_version("ultralytics"),
+            "backend": runtime.get("backend"),
+            "version": runtime.get("providerVersion"),
+            "modelVersion": runtime.get("modelVersion"),
         },
         "postprocessRuntime": {
             "opencv": str(cv2.__version__),
             "numpy": str(np.__version__),
         },
-        "checkpoint": _person_checkpoint_identity(model_name, model),
+        "checkpoint": dict(
+            runtime.get("checkpoint")
+            or _person_checkpoint_identity(model_name, model)
+        ),
         "classes": {"person": 0, "genericBallFallback": 32},
         "inference": {
             "imageSize": int(GENERIC_ULTRALYTICS_IMAGE_SIZE),
             "confidence": float(GENERIC_ULTRALYTICS_CONFIDENCE),
             "providerNmsIou": float(DETECTOR_PROVIDER_NMS_IOU),
             "maxDetections": int(DETECTOR_MAX_DETECTIONS),
-            "device": str(get_settings().reconstruction_device),
+            "device": str(runtime.get("device") or "unknown"),
+            "batchSize": int(runtime.get("batchSize") or 1),
+            "torchVersion": runtime.get("torchVersion"),
+            "mpsFallbackEnabled": bool(
+                runtime.get("mpsFallbackEnabled", False)
+            ),
         },
         "personFilter": {
             "version": PERSON_FILTER_POLICY_VERSION,

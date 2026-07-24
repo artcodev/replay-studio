@@ -20,6 +20,23 @@ from .pitch_image_evidence import (
 )
 
 
+# All image-space QA is expressed in the model's fixed reference grid.  The
+# source frame may be 720p, 1080p or 4K, but a 6px residual must mean the same
+# geometric disagreement and must not change merely because ingest preserved
+# more pixels.
+CALIBRATION_QA_REFERENCE_WIDTH = 960
+CALIBRATION_QA_REFERENCE_HEIGHT = 540
+
+
+def _reference_pixel_scale(width: int, height: int) -> float:
+    source_diagonal = hypot(float(width), float(height))
+    reference_diagonal = hypot(
+        float(CALIBRATION_QA_REFERENCE_WIDTH),
+        float(CALIBRATION_QA_REFERENCE_HEIGHT),
+    )
+    return reference_diagonal / max(1.0, source_diagonal)
+
+
 def calibration_alignment_metrics(
     image: np.ndarray,
     calibration: PitchCalibration,
@@ -38,18 +55,23 @@ def calibration_alignment_metrics_from_mask(
     residuals = alignment_residuals_from_mask(observed_mask, calibration)
     if residuals is None:
         return None
-    precision = float(np.mean(residuals.model_to_observed <= tolerance_pixels))
-    recall = float(np.mean(residuals.observed_to_model <= tolerance_pixels))
+    height, width = observed_mask.shape[:2]
+    reference_scale = _reference_pixel_scale(width, height)
+    source_tolerance = tolerance_pixels / reference_scale
+    precision = float(np.mean(residuals.model_to_observed <= source_tolerance))
+    recall = float(np.mean(residuals.observed_to_model <= source_tolerance))
     f1 = 2.0 * precision * recall / max(1e-9, precision + recall)
     return CalibrationAlignmentMetrics(
         precision=precision,
         recall=recall,
         f1=f1,
-        residual_p50=float(np.median(residuals.model_to_observed)),
-        residual_p95=float(np.percentile(residuals.model_to_observed, 95)),
+        residual_p50=float(np.median(residuals.model_to_observed)) * reference_scale,
+        residual_p95=float(np.percentile(residuals.model_to_observed, 95)) * reference_scale,
         model_sample_count=residuals.model_sample_count,
         observed_sample_count=residuals.observed_sample_count,
         tolerance_pixels=float(tolerance_pixels),
+        reference_width=CALIBRATION_QA_REFERENCE_WIDTH,
+        reference_height=CALIBRATION_QA_REFERENCE_HEIGHT,
     )
 
 

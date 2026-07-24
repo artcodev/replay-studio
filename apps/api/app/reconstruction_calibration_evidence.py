@@ -172,7 +172,6 @@ def frame_calibration_evidence(
         "qualityGates": qa["qualityGates"],
     }
 
-
 def calibration_attempt_payload(evidence: dict) -> dict:
     return {
         "backend": evidence.get("backend"),
@@ -180,30 +179,10 @@ def calibration_attempt_payload(evidence: dict) -> dict:
         "confidence": evidence.get("confidence"),
         "reprojectionError": evidence.get("reprojectionError"),
         "reprojectionP95": evidence.get("reprojectionP95"),
+        "groundErrorP50Metres": evidence.get("groundErrorP50Metres"),
+        "groundErrorP95Metres": evidence.get("groundErrorP95Metres"),
         "visiblePitchSide": evidence.get("visiblePitchSide"),
         "rejectionReasons": list(evidence.get("rejectionReasons") or []),
         "backendDiagnostics": deepcopy(evidence.get("backendDiagnostics")),
+        "qualityGates": deepcopy(evidence.get("qualityGates") or []),
     }
-
-
-def calibration_backend_rank(evidence: dict) -> float:
-    backend = str(evidence.get("backend") or evidence.get("source") or "")
-    if backend.startswith("pnlcalib"):
-        return 3.0
-    if "keypoint" in backend:
-        return 2.0
-    if backend == "pitch-lines-ransac":
-        return 0.0
-    return 1.0
-
-
-def calibration_evidence_rank(evidence: dict) -> tuple[float, float, float, float, float]:
-    alignment = evidence.get("alignmentMetrics") or {}
-    residual = evidence.get("reprojectionP95")
-    return (
-        1.0 if evidence.get("status") == "accepted" else 0.0,
-        calibration_backend_rank(evidence),
-        float(alignment.get("f1") or 0.0),
-        float(evidence.get("confidence") or 0.0),
-        -float(residual) if residual is not None else -1e9,
-    )

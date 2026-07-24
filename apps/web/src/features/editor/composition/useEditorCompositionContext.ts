@@ -68,7 +68,7 @@ export function useEditorCompositionContext(
     saveState: session.saveState,
     error: session.error,
     projectId: session.editorProjectId,
-    saveScene: session.saveScene,
+    saveSegmentLayout: session.saveSegmentLayout,
     seekTo: viewport.seekTo,
     writeRouteTime: (time) => session.replaceEditorRouteView({ time }),
     notifySceneMutation: session.notifySceneMutation,
@@ -148,9 +148,13 @@ export function useEditorCompositionContext(
     return notes.length ? notes.join(' · ') : null
   })
 
+  let trackMetadataTimer: ReturnType<typeof setTimeout> | null = null
+  let trajectoryTimer: ReturnType<typeof setTimeout> | null = null
+
   function moveSelected(position: { x: number; z: number }) {
     const trackId = selection.selectedTrack.value?.id
     if (!trackId) return
+    let manualKeyframes: Array<{ t: number; x: number; z: number }> = []
     session.mutateScene((document) => {
       const track = document.payload.tracks.find((item) => item.id === trackId)
       if (!track) return
@@ -159,9 +163,21 @@ export function useEditorCompositionContext(
         x: Number(position.x.toFixed(2)),
         z: Number(position.z.toFixed(2)),
         confidence: 1,
+        observed: true,
+        positionSource: 'manual',
       })
+      manualKeyframes = track.keyframes
+        .filter((keyframe) => keyframe.positionSource === 'manual')
+        .map((keyframe) => ({ t: keyframe.t, x: keyframe.x, z: keyframe.z }))
     })
-    session.saveState.value = 'Unsaved changes'
+    // Dragging used to mutate the document only, and the write path stripped
+    // dense keyframes — the correction was lost while the UI said "Saved".
+    // It now publishes as a durable correction against the canonical identity.
+    if (trajectoryTimer !== null) clearTimeout(trajectoryTimer)
+    trajectoryTimer = setTimeout(() => {
+      trajectoryTimer = null
+      void session.saveTrackTrajectory(trackId, manualKeyframes)
+    }, 500)
   }
 
   function updateSelectedTrackMetadata(field: 'label' | 'number', value: string | number) {
@@ -173,7 +189,16 @@ export function useEditorCompositionContext(
       if (field === 'label') track.label = String(value)
       else track.number = Number(value)
     })
-    session.saveState.value = 'Unsaved changes'
+    // Renames persist through the dedicated track command; debounce so
+    // typing is one write rather than one per keystroke.
+    if (trackMetadataTimer !== null) clearTimeout(trackMetadataTimer)
+    trackMetadataTimer = setTimeout(() => {
+      trackMetadataTimer = null
+      void session.saveTrackMetadata(
+        trackId,
+        field === 'label' ? { label: String(value) } : { number: Number(value) },
+      )
+    }, 700)
   }
 
   function updateTrackPosition(axis: 'x' | 'z', value: string) {

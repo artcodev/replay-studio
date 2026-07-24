@@ -41,7 +41,7 @@ def create_app(
 
     application = FastAPI(
         title="Replay Studio PnLCalib Worker",
-        version="1.1.0",
+        version="1.2.0",
         lifespan=lifespan,
     )
     application.state.calibration_service = configured_service
@@ -71,6 +71,25 @@ def create_app(
         try:
             return await run_in_threadpool(
                 configured_service.calibrate,
+                frame_indices,
+                payloads,
+            )
+        except CalibrationRequestError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except CalibrationInferenceError as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    @application.post("/v1/recalibrate")
+    async def recalibrate(
+        frames: list[UploadFile] = File(...),
+        frame_indices: str = Form(...),
+    ) -> dict:
+        """Force a fresh single/batch inference for an explicit retry."""
+
+        payloads = [await upload.read() for upload in frames]
+        try:
+            return await run_in_threadpool(
+                configured_service.recalibrate,
                 frame_indices,
                 payloads,
             )

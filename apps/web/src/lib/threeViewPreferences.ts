@@ -1,5 +1,6 @@
 import {
   DEFAULT_THREE_VIEW_OPTIONS,
+  isInferredPositionRenderMode,
   type ThreeRenderQuality,
   type ThreeViewOptions,
 } from './threeViewOptions'
@@ -30,10 +31,16 @@ export function parseThreeViewPreferences(value: string | null): ThreeViewPrefer
     const options = parsed.options
     if (!options || (parsed.renderQuality !== 'basic' && parsed.renderQuality !== 'enhanced')) return null
     if (V1_REQUIRED_OPTION_KEYS.some((key) => typeof options[key] !== 'boolean')) return null
-    const keys = Object.keys(DEFAULT_THREE_VIEW_OPTIONS) as Array<keyof ThreeViewOptions>
-    if (keys.some((key) => options[key] !== undefined && typeof options[key] !== 'boolean')) return null
+    const booleanKeys = (Object.keys(DEFAULT_THREE_VIEW_OPTIONS) as Array<keyof ThreeViewOptions>)
+      .filter((key) => typeof DEFAULT_THREE_VIEW_OPTIONS[key] === 'boolean')
+    if (booleanKeys.some((key) => options[key] !== undefined && typeof options[key] !== 'boolean')) return null
+    // inferredPositions is an enum field: an unknown/absent value backfills to
+    // the default rather than rejecting an otherwise valid v1 payload.
+    const inferredPositions = isInferredPositionRenderMode(options.inferredPositions)
+      ? options.inferredPositions
+      : DEFAULT_THREE_VIEW_OPTIONS.inferredPositions
     return {
-      options: { ...DEFAULT_THREE_VIEW_OPTIONS, ...options },
+      options: { ...DEFAULT_THREE_VIEW_OPTIONS, ...options, inferredPositions },
       renderQuality: parsed.renderQuality,
     }
   } catch {

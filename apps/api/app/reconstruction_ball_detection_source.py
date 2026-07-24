@@ -53,7 +53,10 @@ def resolve_dense_ball_detection_source(
                     scene.get("payload", {})
                     .get("videoAsset", {})
                     .get("analysisFps")
-                    or get_settings().reconstruction_frame_rate
+                    # analysisFps is always materialized by ingest; this only
+                    # guards a malformed scene and must stay a positive cadence
+                    # now that the sampling cap defaults to 0 ("no thinning").
+                    or get_settings().ball_analysis_frame_rate
                 ),
                 "frameCount": len(sampled_frames),
                 "cacheHit": False,

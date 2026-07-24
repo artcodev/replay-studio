@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted } from 'vue'
+import { onBeforeUnmount, onMounted } from 'vue'
 import { useRoute, useRouter, type RouteLocationRaw } from 'vue-router'
 import EditorWorkspaceSurface from '../components/editor/EditorWorkspaceSurface.vue'
 import { useSceneDocumentState } from '../composables/useSceneDocumentState'
@@ -32,10 +32,6 @@ const composition = useEditorCompositionContext(session, viewport, analysis)
 const identity = useEditorIdentityContext(session, viewport, analysis, composition)
 provideEditorContexts({ session, viewport, analysis, composition, identity })
 
-const mutationBusy = computed(() => (
-  analysis.busy.value || composition.busy.value || identity.busy.value
-))
-
 function onKeydown(event: KeyboardEvent) {
   if ((event.target as HTMLElement)?.matches('input, select, textarea, button, [role="button"]')) return
   if (event.code === 'Space') {
@@ -43,8 +39,10 @@ function onKeydown(event: KeyboardEvent) {
     viewport.togglePlay()
   }
   if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 's') {
+    // Every edit persists immediately through its own dedicated scene command,
+    // so there is no whole-scene save to trigger — just suppress the browser's
+    // native save-page dialog.
     event.preventDefault()
-    if (!mutationBusy.value) void session.saveScene()
   }
 }
 

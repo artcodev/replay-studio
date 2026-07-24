@@ -5,6 +5,8 @@ from __future__ import annotations
 import argparse
 from threading import Event, Thread
 
+from .analysis_frame_generation import prepare_analysis_frame_generation
+from .analysis_frame_generation_pipeline import analysis_frame_generation_pipeline
 from .config import get_settings
 from .model_comparison import compare_scene_models
 from .model_comparison_pipeline_service import ModelComparisonPipelineService
@@ -104,6 +106,28 @@ def _execute_video(job: PipelineJob, token: str, heartbeat: _PipelineHeartbeat) 
     )
     if not published:
         raise PipelineClaimLost("Video-processing claim was fenced")
+
+
+def _execute_analysis_frame_generation(
+    job: PipelineJob,
+    token: str,
+    heartbeat: _PipelineHeartbeat,
+) -> None:
+    prepared = prepare_analysis_frame_generation(
+        job.subject_id,
+        staging_key=token,
+        claim_check=heartbeat.current,
+        progress_writer=lambda progress: pipeline_store.update_progress(
+            job.id,
+            token,
+            progress,
+        ),
+    )
+    if not heartbeat.current():
+        raise PipelineClaimLost("Analysis-frame generation claim was fenced")
+    published = analysis_frame_generation_pipeline.publish(job.id, token, prepared)
+    if not published:
+        raise PipelineClaimLost("Analysis-frame generation claim was fenced")
 
 
 def _execute_multi_pass(job: PipelineJob, token: str) -> None:
@@ -214,6 +238,8 @@ def execute_claimed_pipeline_job(job_id: str, token: str) -> bool:
         with _PipelineHeartbeat(job_id, token) as heartbeat:
             if job.kind == "video-processing":
                 _execute_video(job, token, heartbeat)
+            elif job.kind == "analysis-frame-generation":
+                _execute_analysis_frame_generation(job, token, heartbeat)
             elif job.kind == "multi-pass":
                 _execute_multi_pass(job, token)
             elif job.kind == "model-comparison":

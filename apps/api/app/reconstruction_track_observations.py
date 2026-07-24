@@ -62,6 +62,19 @@ def materialize_track_observations(
             },
             "confidence": round(float(point.get("confidence") or 0.0), 3),
             "annotationId": point.get("annotationId"),
+            **(
+                {
+                    "associationCost": point.get("associationCost"),
+                    "associationMargin": point.get("associationMargin"),
+                    "associationDiagnostics": deepcopy(
+                        point.get("associationDiagnostics")
+                    ),
+                    "trackingDecision": point.get("trackingDecision"),
+                }
+                if point.get("associationCost") is not None
+                or point.get("trackingDecision") is not None
+                else {}
+            ),
         }
         if track.canonical_person_id:
             observation.update(
@@ -96,14 +109,36 @@ def materialize_track_observations(
             source = projected.projection_source
             calibration_frame_index = projected.calibration_frame_index
             uncertainty = projected.uncertainty_metres
+            discarded_range = next(
+                (
+                    item
+                    for item in trajectory.quality.get(
+                        "discardedRanges",
+                        [],
+                    )
+                    if float(item["startTime"]) - 1e-6
+                    <= float(point["t"])
+                    <= float(item["endTime"]) + 1e-6
+                ),
+                None,
+            )
             observation.update(
                 {
                     "metricStatus": "rejected",
-                    "metricReason": "trajectory-fragment-rejected",
+                    "metricReason": (
+                        str(discarded_range.get("reason"))
+                        if discarded_range is not None
+                        else "trajectory-fragment-rejected"
+                    ),
                     "rawPitch": {
                         "x": round(float(projected.x), 2),
                         "z": round(float(projected.z), 2),
                     },
+                    **(
+                        {"trajectoryRejection": deepcopy(discarded_range)}
+                        if discarded_range is not None
+                        else {}
+                    ),
                 }
             )
         else:

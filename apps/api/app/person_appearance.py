@@ -74,16 +74,37 @@ def is_pitch_person(
     hsv: np.ndarray,
     box: tuple[float, float, float, float],
     confidence: float,
+    debug: dict | None = None,
 ) -> bool:
-    """Reject spectators and graphics without losing small far-side players."""
+    """Reject spectators and graphics without losing small far-side players.
+
+    When a ``debug`` dict is supplied, every measured value and the final
+    verdict are recorded so a rejected box can be explained after the fact.
+    """
 
     x1, y1, x2, y2 = box
     height, _ = hsv.shape[:2]
     box_width, box_height = x2 - x1, y2 - y1
+
+    def verdict(value: bool, reason: str) -> bool:
+        if debug is not None:
+            debug["verdict"] = reason
+        return value
+
+    if debug is not None:
+        debug.update(
+            {
+                "boxWidth": round(box_width, 1),
+                "boxHeight": round(box_height, 1),
+                "footY": round(y2, 1),
+                "minimumFootY": round(height * MINIMUM_PERSON_FOOT_Y, 1),
+                "confidence": round(float(confidence), 3),
+            }
+        )
     if box_height < 14 or box_width < 5 or box_height < box_width * 1.05:
-        return False
+        return verdict(False, "rejected-box-shape")
     if y2 < height * MINIMUM_PERSON_FOOT_Y:
-        return False
+        return verdict(False, "rejected-foot-above-horizon")
     center_x = (x1 + x2) / 2
     pitch_ratio = green_ratio(
         hsv,
@@ -92,6 +113,8 @@ def is_pitch_person(
         max(8, int(box_width)),
         max(6, int(box_height * 0.16)),
     )
+    if debug is not None:
+        debug["pitchRatio"] = round(pitch_ratio, 3)
     if pitch_ratio < 0.38:
         # Strong detector evidence may survive painted lines and crowded boxes.
         if not (
@@ -99,9 +122,15 @@ def is_pitch_person(
             and y2 >= height * 0.24
             and pitch_ratio >= 0.15
         ):
-            return False
+            return verdict(False, "rejected-off-grass")
+        if debug is not None:
+            debug["strongConfidenceOverride"] = True
     if y2 < height * SHALLOW_PERSON_FOOT_Y:
-        return confidence >= SHALLOW_PERSON_CONFIDENCE and (
+        accepted = confidence >= SHALLOW_PERSON_CONFIDENCE and (
             pitch_ratio >= SHALLOW_PERSON_GRASS_RATIO or confidence >= 0.55
         )
-    return True
+        return verdict(
+            accepted,
+            "accepted-shallow" if accepted else "rejected-shallow-low-confidence",
+        )
+    return verdict(True, "accepted")

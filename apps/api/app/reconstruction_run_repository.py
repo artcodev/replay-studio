@@ -213,6 +213,11 @@ class ReconstructionRunRepository:
                 job.input_revision = queued_run.input_revision
                 job.status = "queued"
                 job.requested_at = now
+                # An explicit new queue command is a fresh life: exhausted
+                # attempts from a dead-lettered predecessor must not poison
+                # it into an instant give-up on first claim.
+                job.attempts = 0
+                job.error = None
                 job.updated_at = now
             self._upsert_telemetry(
                 session,

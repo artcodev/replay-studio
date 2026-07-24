@@ -143,14 +143,14 @@ export function useEditorIdentityContext(
         type: item.kind,
       })
     })) return
-    session.saveState.value = 'Unsaved event marker'
+    void session.saveEventBindings()
   }
 
   function removeEventBinding(index: number) {
     if (!session.mutateScene((document) => {
       document.payload.eventBindings.splice(index, 1)
     })) return
-    session.saveState.value = 'Unsaved changes'
+    void session.saveEventBindings()
   }
 
   const identityReviewSource = computed(() => {

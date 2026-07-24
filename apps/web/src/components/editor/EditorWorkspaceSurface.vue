@@ -23,7 +23,6 @@ const {
   saveState,
   error,
   saving,
-  saveScene,
   videoIngestOpen,
   projects,
   activeProjectId,
@@ -42,6 +41,7 @@ const {
   trackQuery,
   editMode,
   viewOptions,
+  videoOverlayOptions,
   renderQuality,
   viewMode,
   activeCamera,
@@ -167,9 +167,6 @@ const {
   refresh: refreshMatchSnapshot,
   importFile: importManualRosterFile,
 } = projectMatchEditor
-const editorBusy = computed(() => (
-  saving.value || analysis.busy.value || composition.busy.value || identity.busy.value
-))
 const timelineSceneVideo = computed(() => timelineScene.value?.payload.videoAsset ?? null)
 const hasMasterTimeline = computed(() => Boolean(
   timelineSceneVideo.value?.segmentLayout
@@ -188,12 +185,14 @@ const viewportPlaybackContext = { scene, sceneVideo, currentTime, sourceVideo, s
 const viewportViewContext = {
   mode: viewMode,
   options: viewOptions,
+  videoOverlayOptions,
   renderQuality,
   activeTab,
   viewport: viewportApi,
 }
 const viewportSelectionContext = {
   selectedTrack,
+  selectedCanonicalPerson,
   selectedTrackId,
   selectedFramePersonId,
   editMode,
@@ -205,6 +204,7 @@ const viewportSelectionContext = {
 }
 const viewportAnalysisContext = {
   frameCount: analysisFrameCount,
+  calibrationFrames,
   videoPathUsesReferenceCamera,
   videoPathProjectionContext,
   videoPathUnavailableReason,
@@ -252,12 +252,9 @@ const stageToolbarCommands = {
       :segment-count="workspaceSegments.length"
       :save-state="saveState"
       :project-loading="projectLoading"
-      :save-disabled="editorBusy"
-      :saving="saving"
       @update:scene-title="updateSceneTitle"
       @open-import="videoIngestOpen = true"
       @return-projects="returnToProjects"
-      @save="saveScene"
     />
 
     <section v-if="error && !scene" class="fatal-state">

@@ -1,3 +1,11 @@
+import {
+  DEFAULT_VIDEO_OVERLAY_OPTIONS,
+  type VideoOverlayOptions,
+} from '../../../lib/videoOverlayOptions'
+import {
+  loadVideoOverlayOptions,
+  saveVideoOverlayOptions,
+} from '../../../lib/videoOverlayPreferences'
 import { computed, onMounted, ref, watch } from 'vue'
 import { useMultiPassPlayback } from '../../../composables/useMultiPassPlayback'
 import { usePlaybackClock } from '../../../composables/usePlaybackClock'
@@ -26,6 +34,7 @@ export function useEditorViewportContext(document: SceneDocumentState) {
   const trackQuery = ref('')
   const editMode = ref(false)
   const viewOptions = ref<ThreeViewOptions>({ ...DEFAULT_THREE_VIEW_OPTIONS })
+  const videoOverlayOptions = ref<VideoOverlayOptions>({ ...DEFAULT_VIDEO_OVERLAY_OPTIONS })
   const renderQuality = ref<ThreeRenderQuality>('basic')
   const viewMode = ref<EditorViewMode>('split')
   const activeCamera = ref<EditorCameraName>('broadcast')
@@ -80,6 +89,15 @@ export function useEditorViewportContext(document: SceneDocumentState) {
     renderQuality.value = saved.renderQuality
   })
 
+  onMounted(() => {
+    const savedOverlay = loadVideoOverlayOptions(window.localStorage)
+    if (savedOverlay) videoOverlayOptions.value = savedOverlay
+  })
+
+  watch(videoOverlayOptions, (options) => {
+    saveVideoOverlayOptions(window.localStorage, { ...options })
+  }, { deep: true })
+
   watch([viewOptions, renderQuality], ([options, quality]) => {
     saveThreeViewPreferences(window.localStorage, {
       options: { ...options },
@@ -113,6 +131,7 @@ export function useEditorViewportContext(document: SceneDocumentState) {
     trackQuery,
     editMode,
     viewOptions,
+    videoOverlayOptions,
     renderQuality,
     viewMode,
     activeCamera,

@@ -1087,7 +1087,11 @@ def test_frame_analysis_uses_one_sampled_frame_for_video_people_and_ball(
         (tmp_path / "frame_00102.jpg", 0.1),
     ]
     detector = RecordingDetector("dedicated-ultralytics", candidate=True)
-    result = SimpleNamespace(orig_img=np.zeros((540, 960, 3), dtype=np.uint8))
+    result = SimpleNamespace(
+        image_bgr=np.zeros((540, 960, 3), dtype=np.uint8),
+        names={},
+        diagnostics={},
+    )
     scene = {
         "id": "frame-sync",
         "duration": 1.0,
@@ -1113,10 +1117,16 @@ def test_frame_analysis_uses_one_sampled_frame_for_video_people_and_ball(
     }
     monkeypatch.setattr("app.reconstruction_frame_analysis.frame_paths", lambda _: frames)
     monkeypatch.setattr("app.reconstruction_frame_analysis.load_model", lambda _: object())
-    monkeypatch.setattr("app.ultralytics_person_inference.predict_frame", lambda *_: result)
     monkeypatch.setattr(
-        "app.ultralytics_person_inference.parse_person_detections",
-        lambda _: ([], []),
+        "app.reconstruction_frame_analysis.build_person_detection_provider",
+        lambda *_: SimpleNamespace(
+            predict=lambda _path: result,
+            info=lambda: {},
+        ),
+    )
+    monkeypatch.setattr(
+        "app.reconstruction_frame_analysis.parse_person_prediction",
+        lambda _prediction, **_kwargs: ([], []),
     )
     monkeypatch.setattr(
             "app.reconstruction_frame_ball_analysis.configured_ball_detectors",

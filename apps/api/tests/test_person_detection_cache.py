@@ -266,17 +266,21 @@ def _write_frame(path: Path, green: int) -> None:
     assert cv2.imwrite(str(path), image)
 
 
-def _predictor(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+def _predictor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[list[str], object]:
     calls: list[str] = []
 
-    def predict(_model: object, path: Path | str) -> _Result:
-        calls.append(Path(path).name)
-        image = cv2.imread(str(path))
-        assert image is not None
-        return _Result(image)
+    class Provider:
+        def predict(self, path: Path):
+            calls.append(path.name)
+            image = cv2.imread(str(path))
+            assert image is not None
+            return person_inference.prediction_from_ultralytics_result(
+                _Result(image)
+            )
 
-    monkeypatch.setattr(person_inference, "predict_frame", predict)
-    return calls
+    return calls, Provider()
 
 
 def _diagnostics(detector_input: dict, frame_count: int = 1) -> dict:
@@ -292,11 +296,11 @@ def test_pipeline_helper_second_identical_run_has_no_provider_call_and_is_detach
 ) -> None:
     frame = tmp_path / "frame_00001.jpg"
     _write_frame(frame, 150)
-    calls = _predictor(monkeypatch)
+    calls, provider = _predictor(monkeypatch)
     detector_input = _detector_input()
     first_diagnostics = _diagnostics(detector_input)
     _, first_people, first_balls = base_cache.cached_base_frame_detections(
-        object(), frame, tmp_path, detector_input, first_diagnostics
+        provider, frame, tmp_path, detector_input, first_diagnostics
     )
     identity_evidence.capture_detection_observations(first_people, 1)
     first_observation_id = first_people[0].observation_id
@@ -306,7 +310,7 @@ def test_pipeline_helper_second_identical_run_has_no_provider_call_and_is_detach
 
     second_diagnostics = _diagnostics(detector_input)
     _, second_people, second_balls = base_cache.cached_base_frame_detections(
-        object(), frame, tmp_path, detector_input, second_diagnostics
+        provider, frame, tmp_path, detector_input, second_diagnostics
     )
     identity_evidence.capture_detection_observations(second_people, 1)
 
@@ -328,11 +332,11 @@ def test_one_changed_frame_content_causes_exactly_one_miss(
     frames = [tmp_path / "frame_00001.jpg", tmp_path / "frame_00002.jpg"]
     _write_frame(frames[0], 140)
     _write_frame(frames[1], 160)
-    calls = _predictor(monkeypatch)
+    calls, provider = _predictor(monkeypatch)
     detector_input = _detector_input()
     for path in frames:
         base_cache.cached_base_frame_detections(
-            object(), path, tmp_path, detector_input, _diagnostics(detector_input)
+            provider, path, tmp_path, detector_input, _diagnostics(detector_input)
         )
     assert len(calls) == 2
 
@@ -340,7 +344,7 @@ def test_one_changed_frame_content_causes_exactly_one_miss(
     diagnostics = _diagnostics(detector_input, frame_count=2)
     for path in frames:
         base_cache.cached_base_frame_detections(
-            object(), path, tmp_path, detector_input, diagnostics
+            provider, path, tmp_path, detector_input, diagnostics
         )
 
     assert len(calls) == 3
@@ -355,20 +359,20 @@ def test_model_or_filter_policy_change_invalidates_pipeline_cache(
 ) -> None:
     frame = tmp_path / "frame_00001.jpg"
     _write_frame(frame, 150)
-    calls = _predictor(monkeypatch)
+    calls, provider = _predictor(monkeypatch)
     first = _detector_input()
     base_cache.cached_base_frame_detections(
-        object(), frame, tmp_path, first, _diagnostics(first)
+        provider, frame, tmp_path, first, _diagnostics(first)
     )
 
     changed_model = _detector_input("players-v2.pt")
     base_cache.cached_base_frame_detections(
-        object(), frame, tmp_path, changed_model, _diagnostics(changed_model)
+        provider, frame, tmp_path, changed_model, _diagnostics(changed_model)
     )
     changed_policy = _detector_input()
     changed_policy["personFilter"]["localNmsIou"] = 0.40
     base_cache.cached_base_frame_detections(
-        object(), frame, tmp_path, changed_policy, _diagnostics(changed_policy)
+        provider, frame, tmp_path, changed_policy, _diagnostics(changed_policy)
     )
 
     assert calls == [frame.name, frame.name, frame.name]
@@ -380,10 +384,10 @@ def test_corrupt_pipeline_artifact_recomputes_and_replaces_it(
 ) -> None:
     frame = tmp_path / "frame_00001.jpg"
     _write_frame(frame, 150)
-    calls = _predictor(monkeypatch)
+    calls, provider = _predictor(monkeypatch)
     detector_input = _detector_input()
     base_cache.cached_base_frame_detections(
-        object(), frame, tmp_path, detector_input, _diagnostics(detector_input)
+        provider, frame, tmp_path, detector_input, _diagnostics(detector_input)
     )
     frame_digest = cache.frame_content_sha256(frame)
     lookup = cache.lookup_person_detection_cache(
@@ -396,7 +400,7 @@ def test_corrupt_pipeline_artifact_recomputes_and_replaces_it(
 
     diagnostics = _diagnostics(detector_input)
     base_cache.cached_base_frame_detections(
-        object(), frame, tmp_path, detector_input, diagnostics
+        provider, frame, tmp_path, detector_input, diagnostics
     )
 
     assert calls == [frame.name, frame.name]
@@ -420,10 +424,10 @@ def test_manual_bbox_is_applied_after_cache_and_does_not_invalidate_base_artifac
 ) -> None:
     frame = tmp_path / "frame_00001.jpg"
     _write_frame(frame, 150)
-    calls = _predictor(monkeypatch)
+    calls, provider = _predictor(monkeypatch)
     detector_input = _detector_input()
     image, base_people, _ = base_cache.cached_base_frame_detections(
-        object(), frame, tmp_path, detector_input, _diagnostics(detector_input)
+        provider, frame, tmp_path, detector_input, _diagnostics(detector_input)
     )
     annotated = person_annotations.apply_person_annotations(
         image,
@@ -439,7 +443,7 @@ def test_manual_bbox_is_applied_after_cache_and_does_not_invalidate_base_artifac
         ],
     )
     _, rebuilt_base_people, _ = base_cache.cached_base_frame_detections(
-        object(), frame, tmp_path, detector_input, _diagnostics(detector_input)
+        provider, frame, tmp_path, detector_input, _diagnostics(detector_input)
     )
 
     assert calls == [frame.name]

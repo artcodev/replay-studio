@@ -133,6 +133,12 @@ def calibration_draft(
         and alignment_metrics.f1 >= 0.15
         else "review"
         if semantic_alignment_passes_review(alignment_metrics)
+        # A manual homography is built from human-placed anchors; it remains a
+        # usable review candidate even when the frame has too few visible
+        # markings to score an overlay. Only genuinely misaligned overlays
+        # (markings visible but disagreeing) stay "poor".
+        else "review"
+        if source == "manual" and alignment_metrics is None
         else "poor"
     )
     draft_warnings = list(warnings or [])

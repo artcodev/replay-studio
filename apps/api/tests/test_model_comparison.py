@@ -1,3 +1,8 @@
+from pathlib import Path
+
+import pytest
+
+import app.model_comparison as model_comparison
 from app.model_comparison import _comparison_summary, _pair_frame_observations
 
 
@@ -68,3 +73,23 @@ def test_comparison_requires_review_when_candidate_trades_in_pitch_coverage_for_
     assert summary["inPitchObservationGain"] == -3
     assert summary["outsidePitchDetectionDelta"] == -14
     assert summary["verdict"] == "review"
+
+
+def test_model_comparison_refuses_tracking_without_pitch_calibration(monkeypatch):
+    monkeypatch.setattr(
+        model_comparison,
+        "_frame_paths",
+        lambda _: [(Path("/tmp/frame.jpg"), 0.0)],
+    )
+    monkeypatch.setattr(model_comparison, "_saved_pitch_calibration", lambda _: None)
+    monkeypatch.setattr(
+        model_comparison,
+        "_load_model",
+        lambda _: pytest.fail("model must not load before calibration is accepted"),
+    )
+
+    with pytest.raises(ValueError, match="Pitch calibration is required"):
+        model_comparison._run_model(
+            {"payload": {"pitch": {"length": 105.0, "width": 68.0}}},
+            "detector.pt",
+        )

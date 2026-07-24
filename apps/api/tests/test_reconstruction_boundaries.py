@@ -640,10 +640,10 @@ def test_identity_annotation_capabilities_have_no_aggregate_or_dual_write_path()
 
 
 def test_frame_and_identity_entrypoints_stay_orchestrators() -> None:
-    # 120 accommodates the explicit ball-profile branch and the post-solve
-    # ReID ordering while still rejecting a drift back into a god function.
+    # The full-run phase orchestrates detection around an immutable calibration
+    # input. Calibration calculation modules must never enter this call graph.
     assert _top_level_function_lengths("reconstruction_detection_phase.py")[
-        "detect_and_calibrate_phase"
+        "detect_with_persisted_calibration_phase"
     ] <= 120
     detection_phase_source = (
         APP_ROOT / "reconstruction_detection_phase.py"
@@ -654,7 +654,27 @@ def test_frame_and_identity_entrypoints_stay_orchestrators() -> None:
         for node in detection_phase_tree.body
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
     }
-    assert detection_phase_functions == {"detect_and_calibrate_phase"}
+    assert detection_phase_functions == {"detect_with_persisted_calibration_phase"}
+    forbidden_calibration_compute = {
+        "reconstruction_calibration_detection",
+        "reconstruction_calibration_only_phase",
+        "reconstruction_sampled_calibration",
+        "reconstruction_temporal_calibration_phase",
+        "temporal_calibration_solver",
+    }
+    for full_run_module in (
+        "reconstruction_detection_phase.py",
+        "reconstruction_calibration_snapshot.py",
+        "reconstruction_calibration_application.py",
+    ):
+        full_run_imports = {
+            node.module or ""
+            for node in ast.walk(
+                ast.parse((APP_ROOT / full_run_module).read_text(encoding="utf-8"))
+            )
+            if isinstance(node, ast.ImportFrom)
+        }
+        assert not forbidden_calibration_compute.intersection(full_run_imports)
     for consumer in (
         "reconstruction_publish_payloads.py",
         "reconstruction_publish_phase.py",
@@ -681,9 +701,12 @@ def test_frame_and_identity_entrypoints_stay_orchestrators() -> None:
     }
     assert "config" not in dense_ball_imports
     assert "reconstruction_detection_phase" not in dense_ball_imports
+    # 190 accommodates the per-step debug journal (stage timings, raw-verdict
+    # capture and the debug-builder handoff) — deliberate observability, not
+    # logic drift; the assembled debug payload itself lives in the builder.
     assert _top_level_function_lengths("reconstruction_frame_analysis.py")[
         "analyze_scene_frame"
-    ] <= 150
+    ] <= 190
     assert not (APP_ROOT / "reconstruction_identity_documents.py").exists()
     assert set(
         _top_level_function_lengths(

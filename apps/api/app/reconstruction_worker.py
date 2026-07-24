@@ -106,7 +106,13 @@ def _mark_owned_reconstruction_crashed(
             "error": message,
             "completedAt": now,
             "progress": {
-                **(reconstruction.get("progress") or queued_progress(0)),
+                **(
+                    reconstruction.get("progress")
+                    or queued_progress(
+                        0,
+                        mode=str(reconstruction.get("mode") or "full"),
+                    )
+                ),
                 "phase": "failed",
                 "label": "Analysis failed",
                 "detail": message,
@@ -187,9 +193,27 @@ def reconstruct_scene_by_id(
             owner_id,
         ):
             match_snapshot = captured_match_snapshot(claimed_scene)
-            from .reconstruction import reconstruct_scene
+            mode = str(
+                claimed_scene.get("payload", {})
+                .get("videoAsset", {})
+                .get("reconstruction", {})
+                .get("mode")
+                or "full"
+            )
+            if mode == "calibrate":
+                from .reconstruction_calibration_process import calibrate_scene
 
-            reconstruct_scene(
+                process_entry = calibrate_scene
+            elif mode == "full":
+                from .reconstruction import reconstruct_scene
+
+                process_entry = reconstruct_scene
+            else:
+                raise ReconstructionError(
+                    f"Unknown claimed reconstruction process mode {mode!r}"
+                )
+
+            process_entry(
                 claimed_scene,
                 expected_run_id=run_id,
                 expected_input_fingerprint=input_fingerprint,

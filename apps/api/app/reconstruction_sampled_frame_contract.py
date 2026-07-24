@@ -35,16 +35,16 @@ class SampledCalibrationAnalysis:
 
 
 @dataclass(frozen=True)
-class SampledFrameAnalysis:
+class SampledDetectionAnalysis:
     person_frames: list[tuple[list[Detection], float]]
     generic_ball_frames: list[tuple[list[dict], float]]
     person_counts: list[int]
     ball_counts: list[int]
-    calibration: SampledCalibrationAnalysis
+    frame_sizes: dict[int, tuple[int, int]]
 
 
 __all__ = [
     "SampledCalibrationAnalysis",
     "SampledCalibrationInputs",
-    "SampledFrameAnalysis",
+    "SampledDetectionAnalysis",
 ]

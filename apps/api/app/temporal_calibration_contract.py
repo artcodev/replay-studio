@@ -25,6 +25,17 @@ class TemporalCalibrationFrame:
 
 
 @dataclass(frozen=True)
+class TemporalCalibrationResult:
+    resolved_by_sample: dict[int, PitchCalibration]
+    anchor_by_sample: dict[int, int]
+    uncertainty_by_sample: dict[int, float]
+    recovered_frame_count: int
+    metric_person_sample_count: int
+    contact_point_diagnostics: dict | None = None
+    demoted_anchors: list[dict] | None = None
+
+
+@dataclass(frozen=True)
 class CalibrationHypothesis:
     id: str
     target_sample_index: int

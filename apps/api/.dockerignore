@@ -1,7 +1,0 @@
-.pytest_cache
-tests
-**/__pycache__
-**/*.py[cod]
-*.db
-*.egg-info
-data/media

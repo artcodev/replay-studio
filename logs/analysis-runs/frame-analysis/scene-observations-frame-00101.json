@@ -1,0 +1,193 @@
+{
+ "sceneId": "scene-observations",
+ "requestedTime": 0.0,
+ "sceneTime": 0.0,
+ "ballSceneTime": 0.0,
+ "ballFrameIndex": 0,
+ "sourceTime": 0.0,
+ "frameIndex": 101,
+ "frameWidth": 960,
+ "frameHeight": 540,
+ "model": "test-model",
+ "ballBackend": "dedicated-ultralytics",
+ "projectionMode": "screen-relative",
+ "calibrationStatus": "fallback",
+ "identityLinking": {
+  "mode": "rebuild-required",
+  "schemaVersion": null
+ },
+ "people": [
+  {
+   "id": "person-1",
+   "observationId": null,
+   "confidence": 0.8,
+   "bbox": {
+    "x": 90.0,
+    "y": 160.0,
+    "width": 20.0,
+    "height": 40.0
+   },
+   "pitch": {
+    "x": -39.9,
+    "z": -9.26
+   },
+   "jerseyColor": "#e1382c",
+   "annotationId": null,
+   "kind": null,
+   "annotationLabel": null,
+   "source": "automatic",
+   "matchedTrackId": null,
+   "matchedTrackLabel": null,
+   "canonicalPersonId": null,
+   "identityStatus": null,
+   "identityConfidence": null,
+   "identitySource": null,
+   "displayName": null,
+   "jerseyNumber": null,
+   "teamId": null,
+   "matchDistance": null,
+   "matchSource": null,
+   "metricStatus": "unprojected",
+   "metricReason": "metric-projection-unavailable",
+   "rawPitch": null,
+   "projectionSource": null,
+   "positionUncertaintyMetres": null,
+   "positionSource": "observation",
+   "correctionAction": null,
+   "correctionScope": null,
+   "mergeTargetId": null,
+   "sourceTrackId": null,
+   "targetObservationId": null,
+   "rangeStart": null,
+   "rangeEnd": null,
+   "splitCanonicalPersonId": null,
+   "affectedPreview": null,
+   "previewState": "uncorrected"
+  }
+ ],
+ "annotations": [],
+ "correctionSummary": {
+  "confirmed": 0,
+  "excluded": 0,
+  "merged": 0,
+  "split": 0
+ },
+ "ballCandidates": [],
+ "matchedTracks": 0,
+ "matchedCanonicalPeople": 0,
+ "warnings": [
+  "This scene has no authoritative video-track observations; rebuild tracks before using video ↔ 3D identity linking.",
+  "No reliable ball candidate was found on this frame.",
+  "Specialized ball detector degraded to fallback: BallDetectionError: frame does not exist: /tmp/frame_00101.jpg; fallback AttributeError: 'object' object has no attribute 'predict'"
+ ],
+ "debug": {
+  "schemaVersion": 1,
+  "analyzedAt": "2026-07-23T04:32:23.273200+00:00",
+  "frameSelection": {
+   "requestedTime": 0.0,
+   "chosenSampleIndex": 0,
+   "frameFile": "frame_00101.jpg",
+   "frameTime": 0.0,
+   "sampleCount": 1
+  },
+  "detector": {
+   "schemaVersion": 2,
+   "provider": {
+    "backend": "ultralytics-yolo",
+    "version": "8.4.95",
+    "modelVersion": "content-unavaila"
+   },
+   "postprocessRuntime": {
+    "opencv": "5.0.0",
+    "numpy": "2.5.1"
+   },
+   "checkpoint": {
+    "requested": "test-model",
+    "contentAvailable": false
+   },
+   "classes": {
+    "person": 0,
+    "genericBallFallback": 32
+   },
+   "inference": {
+    "imageSize": 1280,
+    "confidence": 0.035,
+    "providerNmsIou": 0.7,
+    "maxDetections": 300,
+    "device": "cpu",
+    "batchSize": 1,
+    "torchVersion": "2.13.0",
+    "mpsFallbackEnabled": false
+   },
+   "personFilter": {
+    "version": "pitch-person-v3",
+    "localNmsIou": 0.48,
+    "minimumFootYRatio": 0.18,
+    "shallowFootYRatio": 0.34,
+    "shallowConfidence": 0.12,
+    "shallowGrassRatio": 0.52,
+    "appearanceFeatureSchema": "hsv-histogram-v1"
+   },
+   "genericBallFallbackFilter": {
+    "version": "generic-coco-ball-v2",
+    "minimumCenterYRatio": 0.3,
+    "maximumBoxSizePixels": 24.0,
+    "minimumGrassRatio": 0.24,
+    "deduplicationRadiusPixels": 10.0
+   },
+   "classNames": {}
+  },
+  "rawDetections": [],
+  "rawDetectionVerdictCounts": {},
+  "annotationsApplied": [],
+  "cameraTransform": {
+   "matrix": [
+    [
+     1.0,
+     0.0,
+     0.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "isIdentity": true
+  },
+  "stabilization": [
+   {
+    "rawX": 100,
+    "rawY": 200,
+    "stabilizedX": 100.0,
+    "stabilizedY": 200.0
+   }
+  ],
+  "calibration": {
+   "analyzeFrameUses": "saved-representative-homography",
+   "status": "fallback",
+   "confidence": null,
+   "available": false,
+   "publishedFrameEvidence": {
+    "observationStatus": null,
+    "solutionStatus": "direct-accepted",
+    "projectionSource": null,
+    "selectedHypothesisId": null,
+    "rejectionReasons": null,
+    "residualP95": null
+   },
+   "representativeVsPublishedDisagreementMetres": null
+  },
+  "timingsMs": {
+   "prepareMs": 0.0,
+   "inferenceMs": 0.0,
+   "parseMs": 0.0,
+   "totalMs": 2.0
+  }
+ }
+}

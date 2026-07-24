@@ -10,7 +10,21 @@ export type PitchCalibrationAnchor = {
   label: string
   image: { x: number; y: number }
   pitch: { x: number; z: number }
+  source?: 'seed' | 'projected' | 'manual' | string
 }
+
+export type CalibrationDraftSource =
+  | 'reconstruction'
+  | 'frame-evidence'
+  | 'saved'
+  | 'approximate-seed'
+  | 'manual-seed'
+  | 'manual'
+  | 'borrowed-previous'
+  | 'borrowed-next'
+  | 'borrowed-interpolation'
+
+export type CalibrationBorrowSource = 'previous' | 'next' | 'interpolation'
 
 export type PitchCalibrationAlignmentMetrics = {
   precision: number
@@ -21,6 +35,9 @@ export type PitchCalibrationAlignmentMetrics = {
   modelSampleCount?: number
   observedSampleCount?: number
   tolerancePixels?: number
+  residualUnit?: 'reference-pixel'
+  referenceWidth?: number
+  referenceHeight?: number
 }
 
 export type PitchCalibrationBackendDiagnostics = {
@@ -62,7 +79,7 @@ export type PitchCalibrationDraft = {
   frameIndex: number
   frameWidth: number
   frameHeight: number
-  source: 'reconstruction' | 'frame-evidence' | 'saved' | 'approximate-seed' | 'manual-seed' | 'manual'
+  source: CalibrationDraftSource
   status?: 'accepted' | 'review' | 'rejected' | 'missing'
   method?: string | null
   backend?: string | null
@@ -92,6 +109,8 @@ export type PitchCalibrationDraft = {
   inlierRatio?: number | null
   keypointCount?: number | null
   reprojectionP95?: number | null
+  groundErrorP50Metres?: number | null
+  groundErrorP95Metres?: number | null
   rejectionReasons?: string[]
   evidence?: {
     backendDiagnostics?: PitchCalibrationBackendDiagnostics | null
@@ -111,6 +130,7 @@ export type ProjectionSource =
   | 'temporal-interpolation'
   | 'dense-bracket-interpolated'
   | 'manual-propagated'
+  | 'manual-direct'
   | 'screen-approximate'
   | 'propagated'
   | 'presence-inferred'
@@ -189,12 +209,16 @@ export type CalibrationUncertaintyEvidence = {
 }
 
 export type CalibrationEvidencePoint = {
-  id?: string | null
+  id?: string | number | null
   label?: string | null
   image: { x: number; y: number }
+  pitch?: { x: number; z: number } | null
+  confidence?: number | null
   projected?: { x: number; y: number } | null
   projectedImage?: { x: number; y: number } | null
   residualPx?: number | null
+  imageResidualPixels?: number | null
+  groundResidualMetres?: number | null
   residualVector?: { dx: number; dy: number; magnitude: number } | null
   inlier?: boolean | null
 }
@@ -258,6 +282,9 @@ export type CalibrationFrameEvidence = {
   inlierRatio?: number | null
   reprojectionError?: number | null
   reprojectionP95?: number | null
+  alignmentMetrics?: PitchCalibrationAlignmentMetrics | null
+  groundErrorP50Metres?: number | null
+  groundErrorP95Metres?: number | null
   visiblePitchSide?: 'left' | 'right' | 'unknown' | null
   rejectionReasons?: string[]
   personSupport?: number | { supported: number; total: number; ratio: number } | null
@@ -273,6 +300,23 @@ export type CalibrationFrameEvidence = {
   keypoints?: CalibrationEvidencePoint[]
   rawLines?: CalibrationEvidenceLine[]
   markings?: CalibrationEvidenceMarking[]
+  pnlcalibAttempts?: {
+    attemptCount: number
+    maximumAttempts: number
+    acceptedAttempt: number | null
+    attempts: Array<{
+      attempt: number
+      requestKind:
+        | 'initial-cache-aware'
+        | 'forced-refresh-single-frame'
+        | 'forced-refresh-single-frame-after-p95-demotion'
+        | `forced-refresh-batch-round-${number}`
+        | 'forced-refresh-batch-after-p95-demotion'
+      status: 'accepted' | 'rejected' | 'missing'
+      selected: boolean
+      rejectionReasons: string[]
+    }>
+  } | null
 }
 
 export type CalibrationEvidence = {

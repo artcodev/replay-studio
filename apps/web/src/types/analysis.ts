@@ -69,7 +69,9 @@ export type FrameAnalysis = {
     id: string
     confidence: number
     bbox: { x: number; y: number; width: number; height: number }
-    pitch: { x: number; z: number }
+    // null: the person is real but has no honest pitch position
+    // (off-pitch, or the published track was dropped by QA).
+    pitch: { x: number; z: number } | null
     jerseyColor: string
     annotationId: string | null
     annotationIds?: string[]
@@ -93,6 +95,7 @@ export type FrameAnalysis = {
     matchMargin?: number | null
     metricStatus: MetricProjectionStatus | null
     metricReason: string | null
+    rawPitch?: { x: number; z: number } | null
     positionSource: ObservationPositionSource | null
     correctionAction: FrameIdentityAction | null
     correctionScope: FrameIdentityScope | null

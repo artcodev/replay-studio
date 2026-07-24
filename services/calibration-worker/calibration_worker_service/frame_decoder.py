@@ -20,7 +20,10 @@ def decode_frame(frame_index: int, data: bytes) -> DecodedFrame:
     resized = (
         image
         if image.size == (INPUT_WIDTH, INPUT_HEIGHT)
-        else image.resize((INPUT_WIDTH, INPUT_HEIGHT), Image.Resampling.BILINEAR)
+        # The API now sends source-resolution analysis frames.  PnLCalib still
+        # owns a fixed 960x540 tensor, so use a high-quality single downsample
+        # here instead of the old source -> 1280 JPEG -> bilinear chain.
+        else image.resize((INPUT_WIDTH, INPUT_HEIGHT), Image.Resampling.LANCZOS)
     )
     array = np.asarray(resized, dtype=np.float32) / 255.0
     tensor = torch.from_numpy(array).permute(2, 0, 1).contiguous()

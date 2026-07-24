@@ -1,8 +1,8 @@
 # Ball detection and trajectory reconstruction
 
 The ball pipeline is intentionally separate from person detection. A football
-is a much smaller and faster target than a player, so reusing the 10 FPS COCO
-pass as the primary source loses observations and encourages false tracks. The
+is a much smaller and faster target than a player, so reusing the player/
+calibration COCO pass as the primary source loses observations and encourages false tracks. The
 current pipeline decodes its own dense frames, keeps several detector
 hypotheses per frame, and resolves one trajectory over the complete shot.
 
@@ -199,8 +199,8 @@ min(source video FPS, BALL_ANALYSIS_FRAME_RATE)
 ```
 
 The default maximum is 25 FPS. Frames remain at source resolution and are
-encoded as high-quality JPEGs; the 10 FPS player/calibration samples are not
-changed.
+encoded as high-quality JPEGs; the player/calibration samples (now sampled at
+the source frame rate up to 25 FPS) are a separate pass and are not changed.
 
 The cache lives below the media asset:
 

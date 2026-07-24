@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from hashlib import md5
+import os
 from pathlib import Path
 import shutil
 from urllib.request import Request, urlopen
@@ -54,4 +55,4 @@ def fetch(target_dir: Path) -> None:
 
 
 if __name__ == "__main__":
-    fetch(Path("/models"))
+    fetch(Path(os.environ.get("REID_MODEL_DIRECTORY", "/models")))

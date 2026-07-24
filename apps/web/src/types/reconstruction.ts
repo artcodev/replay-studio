@@ -7,6 +7,7 @@ export type ReconstructionModel =
   | 'yolo26m.pt'
   | 'yolo26l.pt'
   | 'yolo26x.pt'
+  | 'football.pt'
 
 export type BallDetectionBackend =
   | 'generic-ultralytics'
@@ -20,6 +21,92 @@ export type BallDetectionProfile = 'automatic' | 'skip-manual-authoritative'
 
 /** Queued immutable run input: 'off' trades automatic shirt-number merge evidence for a cheaper run. */
 export type JerseyOcrProfile = 'automatic' | 'off'
+export type ContactPointProfile = 'bbox-bottom' | 'pose-feet'
+
+/**
+ * A calibrate run computes and publishes an immutable calibration artifact.
+ * A full run may only consume that artifact; it has no calibration authority.
+ */
+export type ReconstructionMode = 'calibrate' | 'full'
+
+/** Which stage the last run produced. Absent on pre-two-stage scenes. */
+export type ReconstructionStage = 'calibration' | 'reconstruction'
+export type ReconstructionResultState =
+  | 'calibration-only'
+  | 'current'
+  | 'stale'
+  | 'unknown'
+  | 'unavailable'
+export type TrackingCoordinatePolicy = 'metric-required' | 'explicit-image-fallback'
+
+export type CalibrationProvenance = {
+  schemaVersion: 1
+  runId?: string | null
+  producedAt?: string | null
+  calibrationInputFingerprint: string
+  dataFingerprint: string
+  artifact: ReconstructionArtifactReference
+  samplingFrameRate?: number | null
+  directCalibrationMaxGapSeconds?: number | null
+  totalFrames: number
+  resolvedFrames: number
+  unresolvedFrames: number
+}
+
+export type CalibrationArtifactInput = {
+  schemaVersion: 1
+  producerRunId?: string | null
+  producedAt?: string | null
+  calibrationInputFingerprint: string
+  dataFingerprint: string
+  artifact: ReconstructionArtifactReference
+  samplingFrameRate?: number | null
+  directCalibrationMaxGapSeconds?: number | null
+  totalFrames: number
+  resolvedFrames: number
+  unresolvedFrames: number
+  coordinateSpace?: string | null
+}
+
+/** review: unresolved frames remain; ready: 100% resolved; confirmed: operator accepted the gap. */
+export type CalibrationReviewStatus = 'review' | 'ready' | 'confirmed'
+
+export type CalibrationReviewSample = {
+  sampleIndex: number
+  sourceFrameIndex: number | null
+  sceneTime: number | null
+  solutionStatus: string
+  projectionSource: string | null
+  /** Present on entries from `frames`; the failing subset omits it (always false). */
+  resolved?: boolean
+  /** The operator removed this exact source frame from every analysis pipeline. */
+  excluded?: boolean
+  residualP95: number | null
+  rejectionReasons: string[]
+  acceptedByOperator: boolean
+  manual: boolean
+  /** Frame-local homography of the resolved calibration, for the inspection overlay. */
+  imageToPitch?: number[][] | null
+  frameWidth?: number | null
+  frameHeight?: number | null
+}
+
+export type CalibrationReview = {
+  status: CalibrationReviewStatus
+  inputFingerprint: string | null
+  calibrationInputFingerprint?: string | null
+  totalFrames: number
+  resolvedFrames: number
+  unresolvedFrames: number
+  resolvedRatio: number
+  /** Every sampled frame (resolved and unresolved), in order, for browsing. */
+  frames: CalibrationReviewSample[]
+  unresolvedSamples: CalibrationReviewSample[]
+  warnings: string[]
+  confirmedAt?: string | null
+  fallbackPolicy?: 'explicit-image-fallback'
+  fallbackSampleIndices?: number[]
+}
 
 export type ReconstructionPhase = {
   id: string

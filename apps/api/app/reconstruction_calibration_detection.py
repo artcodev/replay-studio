@@ -7,12 +7,14 @@ from typing import Callable
 
 import numpy as np
 
-from .calibration_worker import CalibrationWorkerError, calibrate_frames_with_worker
+from .calibration_worker import (
+    CalibrationWorkerBatchProgress,
+    CalibrationWorkerError,
+    calibrate_frames_with_worker,
+)
 from .config import get_settings
-from .field_keypoints import calibration_from_pose_result
 from .pitch_calibration_contract import PitchCalibration
 from .reconstruction_inputs import (
-    load_model,
     source_frame_index as parse_source_frame_index,
 )
 
@@ -25,93 +27,12 @@ def best_pitch_calibration(
     return max(
         calibrations.values(),
         key=lambda item: (
-            2
-            if item.method.startswith("pnlcalib")
-            else 1
-            if item.method == "roboflow-field-keypoints"
-            else 0,
             item.confidence,
             item.inlier_count,
             item.keypoint_count,
             -(item.reprojection_error if item.reprojection_error is not None else 999.0),
         ),
     )
-
-
-def positive_image_size(value) -> int | None:
-    if isinstance(value, (tuple, list)):
-        values = [positive_image_size(item) for item in value]
-        values = [item for item in values if item is not None]
-        return max(values) if values else None
-    try:
-        resolved = int(value)
-    except (TypeError, ValueError, OverflowError):
-        return None
-    return resolved if resolved > 0 else None
-
-
-def pitch_keypoint_inference_size(model, configured_size: int | None) -> int:
-    """Use an explicit override, otherwise honor the checkpoint training size."""
-
-    explicit = positive_image_size(configured_size)
-    if explicit is not None:
-        return explicit
-    metadata_sources = (
-        getattr(model, "overrides", None),
-        getattr(getattr(model, "model", None), "args", None),
-        getattr(getattr(model, "model", None), "yaml", None),
-    )
-    for metadata in metadata_sources:
-        if isinstance(metadata, dict):
-            native = positive_image_size(metadata.get("imgsz") or metadata.get("img_size"))
-        else:
-            native = positive_image_size(
-                getattr(metadata, "imgsz", None) or getattr(metadata, "img_size", None)
-            )
-        if native is not None:
-            return native
-    # This is also the native size of the bundled Roboflow Sports checkpoint.
-    return 640
-
-
-def local_frame_calibrations(
-    frames: list[tuple[Path, float]],
-    requested_indices: set[int] | None = None,
-    on_progress: Callable[[int, int, int], None] | None = None,
-) -> dict[int, PitchCalibration]:
-    settings = get_settings()
-    model_path = Path(settings.pitch_keypoint_model)
-    if not model_path.is_file():
-        return {}
-    selected = [
-        (path, parse_source_frame_index(path))
-        for path, _ in frames
-        if requested_indices is None
-        or parse_source_frame_index(path) in requested_indices
-    ]
-    if not selected:
-        return {}
-    model = load_model(str(model_path))
-    inference_size = pitch_keypoint_inference_size(
-        model,
-        settings.pitch_keypoint_image_size,
-    )
-    result: dict[int, PitchCalibration] = {}
-    for start in range(0, len(selected), 4):
-        batch = selected[start : start + 4]
-        predictions = model.predict(
-            [str(path) for path, _ in batch],
-            imgsz=inference_size,
-            device=settings.reconstruction_device,
-            verbose=False,
-        )
-        for prediction, (_, source_index) in zip(predictions, batch):
-            calibration = calibration_from_pose_result(prediction, source_index)
-            if calibration is not None:
-                result[source_index] = calibration
-        if on_progress is not None:
-            on_progress(min(len(selected), start + len(batch)), len(selected), len(result))
-    return result
 
 
 def select_calibration_anchor_frames(
@@ -163,69 +84,46 @@ def automatic_frame_calibrations(
     frames: list[tuple[Path, float]],
     on_progress: Callable[[str, int, int, float, int], None] | None = None,
     *,
+    on_worker_batch: Callable[[CalibrationWorkerBatchProgress], None] | None = None,
     worker_timeout: float | None = None,
+    direct_calibration_max_gap_seconds: float = 0.0,
 ) -> tuple[dict[int, PitchCalibration], list[str]]:
     settings = get_settings()
     anchor_frames = select_calibration_anchor_frames(
         frames,
-        float(getattr(settings, "calibration_anchor_max_gap_seconds", 1.0)),
+        direct_calibration_max_gap_seconds,
     )
     indexed = [(parse_source_frame_index(path), path) for path, _ in anchor_frames]
     warnings: list[str] = []
-    calibrations: dict[int, PitchCalibration] = {}
-    worker_configured = bool(settings.calibration_worker_url)
-    worker_failed = False
-    if worker_configured:
-        if on_progress is not None:
-            on_progress("pnlcalib", 0, len(indexed), 0.0, 0)
-        try:
-            calibrations.update(
-                calibrate_frames_with_worker(
-                    indexed,
-                    on_progress=(
-                        lambda completed, total, valid: on_progress(
-                            "pnlcalib",
-                            completed,
-                            total,
-                            0.9 * completed / max(1, total),
-                            valid,
-                        )
-                        if on_progress is not None
-                        else None
-                    ),
-                    timeout=worker_timeout,
-                )
-            )
-        except CalibrationWorkerError as exc:
-            worker_failed = True
-            warnings.append(str(exc))
-    missing = {index for index, _ in indexed} - set(calibrations)
-    if missing:
-        if on_progress is not None:
-            on_progress("local-keypoints", 0, len(missing), 0.0 if worker_failed else 0.9, len(calibrations))
-        local = local_frame_calibrations(
-            anchor_frames,
-            missing,
-            on_progress=(
-                lambda completed, total, valid: on_progress(
-                    "local-keypoints",
-                    completed,
-                    total,
-                    completed / max(1, total)
-                    if worker_failed or not worker_configured
-                    else 0.9 + 0.1 * completed / max(1, total),
-                    len(calibrations) + valid,
-                )
-                if on_progress is not None
-                else None
-            ),
+    if not settings.calibration_worker_url:
+        raise CalibrationWorkerError(
+            "PnLCalib calibration worker is required but is not configured"
         )
-        calibrations.update(local)
-        if worker_configured and local:
-            warnings.append(
-                f"Local semantic-keypoint fallback calibrated {len(local)} frames missed by PnLCalib."
-            )
     if on_progress is not None:
-        backend = "local-keypoints" if worker_failed or not worker_configured else "pnlcalib"
-        on_progress(backend, len(indexed), len(indexed), 1.0, len(calibrations))
+        on_progress("pnlcalib", 0, len(indexed), 0.0, 0)
+    calibrations = calibrate_frames_with_worker(
+        indexed,
+        on_progress=(
+            lambda completed, total, valid: on_progress(
+                "pnlcalib",
+                completed,
+                total,
+                completed / max(1, total),
+                valid,
+            )
+            if on_progress is not None
+            else None
+        ),
+        on_batch=on_worker_batch,
+        timeout=worker_timeout,
+    )
+    missing = len(indexed) - len(calibrations)
+    if missing:
+        warnings.append(
+            f"Initial PnLCalib pass returned no direct calibration for {missing} "
+            "frame(s); rejected frames will receive up to two fresh batch "
+            "retry rounds with frame-local QA before temporal recovery."
+        )
+    if on_progress is not None:
+        on_progress("pnlcalib", len(indexed), len(indexed), 1.0, len(calibrations))
     return calibrations, warnings

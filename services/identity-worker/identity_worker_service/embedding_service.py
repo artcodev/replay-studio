@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from time import perf_counter
 from typing import Any
 
 import numpy as np
@@ -48,6 +49,9 @@ class IdentityEmbeddingService:
         self.cache = cache
 
     def process(self, crop_bytes: list[bytes], manifest: str) -> dict[str, Any]:
+        request_started = perf_counter()
+        provider_inference_seconds = 0.0
+        provider_call_count = 0
         crop_items = parse_manifest(manifest, len(crop_bytes))
         provider_info = self.provider.info()
         responses: list[dict] = []
@@ -127,6 +131,8 @@ class IdentityEmbeddingService:
 
             if samples:
                 provider_inference_count += len(samples)
+                provider_call_count += 1
+                provider_started = perf_counter()
                 try:
                     embedded = self.provider.embed(samples)
                     if len(embedded) != len(samples):
@@ -151,6 +157,8 @@ class IdentityEmbeddingService:
                     raise IdentityInferenceError(
                         f"Identity provider failed: {exc}"
                     ) from exc
+                finally:
+                    provider_inference_seconds += perf_counter() - provider_started
                 for key, entry in provider_entries.items():
                     for response_index in groups[key].response_indices:
                         apply_cache_entry(
@@ -193,6 +201,11 @@ class IdentityEmbeddingService:
                 "deduplicatedObservationCount": in_request_deduplicated,
                 "concurrentDeduplicatedCount": concurrent_deduplicated,
                 "providerInferenceCount": provider_inference_count,
+                "providerCallCount": provider_call_count,
+                "providerInferenceSeconds": round(
+                    provider_inference_seconds, 6
+                ),
+                "requestSeconds": round(perf_counter() - request_started, 6),
                 "corruptCacheMissCount": corrupt_misses,
                 "expiredCacheMissCount": expired_misses,
                 "uniqueEvidenceFingerprintCount": len(unique_usable_fingerprints),

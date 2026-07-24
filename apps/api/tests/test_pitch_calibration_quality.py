@@ -1,11 +1,9 @@
-from time import monotonic
-from types import SimpleNamespace
-
 import cv2
 import numpy as np
 import pytest
+from types import SimpleNamespace
 
-import app.pitch_line_calibration as pitch_line_calibration_module
+import app.pitch_calibration_quality as calibration_quality
 from app.pitch_anchor_calibration import calibration_from_anchors
 from app.pitch_calibration_contract import PitchCalibration
 from app.pitch_calibration_quality import (
@@ -14,55 +12,6 @@ from app.pitch_calibration_quality import (
     semantic_line_evidence,
 )
 from app.pitch_geometry import projected_pitch_markings
-from app.pitch_line_calibration import calibrate_pitch
-
-
-def _patch_bounded_line_search(monkeypatch):
-    lines = [
-        SimpleNamespace(support=120, rho=10.0),
-        SimpleNamespace(support=110, rho=80.0),
-    ]
-    pair = (lines[0], lines[1])
-    quad = np.asarray(
-        [[10.0, 20.0], [10.0, 80.0], [80.0, 20.0], [80.0, 80.0]],
-        dtype=np.float32,
-    )
-    monkeypatch.setattr(
-        pitch_line_calibration_module,
-        "pitch_line_mask",
-        lambda image: np.zeros(image.shape[:2], dtype=np.uint8),
-    )
-    monkeypatch.setattr(
-        pitch_line_calibration_module,
-        "_orientation_families",
-        lambda _mask: (0.0, 90.0),
-    )
-    monkeypatch.setattr(
-        pitch_line_calibration_module,
-        "_candidate_lines",
-        lambda *_args: lines,
-    )
-    monkeypatch.setattr(
-        pitch_line_calibration_module,
-        "_candidate_pairs",
-        lambda *_args: [pair, pair, pair, pair],
-    )
-    monkeypatch.setattr(
-        pitch_line_calibration_module,
-        "_quad_points",
-        lambda *_args: quad.copy(),
-    )
-    monkeypatch.setattr(pitch_line_calibration_module, "_valid_quad", lambda *_args: True)
-    monkeypatch.setattr(
-        pitch_line_calibration_module,
-        "_plausible_camera",
-        lambda *_args: True,
-    )
-    monkeypatch.setattr(
-        pitch_line_calibration_module,
-        "_score_homography",
-        lambda *_args: (0.9, 4, 0.9, 1),
-    )
 
 
 def _synthetic_calibration() -> PitchCalibration:
@@ -128,6 +77,41 @@ def test_bidirectional_alignment_exposes_shifted_camera_fit():
     assert bad.residual_p95 > good.residual_p95
 
 
+def test_alignment_residuals_are_normalized_to_the_960x540_reference_grid(
+    monkeypatch,
+):
+    calibration = _synthetic_calibration()
+
+    def residuals(mask, _calibration):
+        scale = mask.shape[1] / 960
+        values = np.asarray([2.0, 3.0, 4.0]) * scale
+        return SimpleNamespace(
+            model_to_observed=values,
+            observed_to_model=values,
+            model_sample_count=3,
+            observed_sample_count=3,
+        )
+
+    monkeypatch.setattr(
+        calibration_quality,
+        "alignment_residuals_from_mask",
+        residuals,
+    )
+    reference = calibration_quality.calibration_alignment_metrics_from_mask(
+        np.zeros((540, 960), dtype=np.uint8), calibration
+    )
+    full_hd = calibration_quality.calibration_alignment_metrics_from_mask(
+        np.zeros((1080, 1920), dtype=np.uint8), calibration
+    )
+
+    assert reference is not None and full_hd is not None
+    assert full_hd.residual_p50 == pytest.approx(reference.residual_p50)
+    assert full_hd.residual_p95 == pytest.approx(reference.residual_p95)
+    assert full_hd.f1 == pytest.approx(reference.f1)
+    assert full_hd.as_dict()["residualUnit"] == "reference-pixel"
+    assert full_hd.as_dict()["referenceWidth"] == 960
+
+
 def test_semantic_line_evidence_reports_per_class_residual_and_skips_goal_frame():
     pitch_to_image = np.array(
         [[8.0, 0.0, 480.0], [0.0, 6.0, 270.0], [0.0, 0.0, 1.0]],
@@ -183,44 +167,3 @@ def test_manual_anchors_must_cover_a_stable_pitch_area():
 
     with pytest.raises(ValueError, match="stable area"):
         calibration_from_anchors(anchors, "center-circle")
-
-
-def test_bounded_line_search_reports_candidate_limit_separately(monkeypatch):
-    _patch_bounded_line_search(monkeypatch)
-    diagnostics = {}
-
-    calibration = calibrate_pitch(
-        np.zeros((100, 100, 3), dtype=np.uint8),
-        max_quad_candidates=1,
-        deadline=monotonic() + 10.0,
-        diagnostics=diagnostics,
-    )
-
-    assert calibration is not None
-    assert diagnostics["budgetExhausted"] is True
-    assert diagnostics["deadlineExceeded"] is False
-    assert diagnostics["candidateLimitReached"] is True
-    assert diagnostics["candidatePoolLimitReached"] is True
-    assert diagnostics["candidateEvaluationLimitReached"] is True
-    assert diagnostics["candidatePoolLimit"] == 12
-    assert diagnostics["quadCandidatesGenerated"] == 12
-    assert diagnostics["quadCandidatesEvaluated"] == 1
-
-
-def test_bounded_line_search_reports_deadline_separately(monkeypatch):
-    _patch_bounded_line_search(monkeypatch)
-    diagnostics = {}
-
-    calibration = calibrate_pitch(
-        np.zeros((100, 100, 3), dtype=np.uint8),
-        max_quad_candidates=4,
-        deadline=0.0,
-        diagnostics=diagnostics,
-    )
-
-    assert calibration is None
-    assert diagnostics["budgetExhausted"] is True
-    assert diagnostics["deadlineExceeded"] is True
-    assert diagnostics["candidateLimitReached"] is False
-    assert diagnostics["candidatePoolLimitReached"] is False
-    assert diagnostics["candidateEvaluationLimitReached"] is False

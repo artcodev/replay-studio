@@ -1,8 +1,6 @@
 from __future__ import annotations
 
-"""Materialize explicitly uncertain off-camera presence for a scene track."""
-
-from math import cos, sin
+"""Materialize uncertain positions only inside a track's observed lifetime."""
 
 import numpy as np
 
@@ -21,8 +19,8 @@ def _presence_keyframe(
         "x": round(x, 2),
         "z": round(z, 2),
         # Presence confidence is deliberately separate from detector evidence.
-        # The renderer keeps actors alive for the whole scene, while QA excludes
-        # these inferred samples via ``observed=False``.
+        # QA and rendering can distinguish this bridge from observed samples via
+        # ``observed=False``.
         "confidence": 0.18,
         "observed": False,
         "presenceState": state,
@@ -47,40 +45,22 @@ def _bounded_pitch_position(x: float, z: float, pitch: dict) -> tuple[float, flo
     )
 
 
-def _roaming_presence_position(
-    anchor: dict,
-    elapsed: float,
-    seed: int,
-    pitch: dict,
-    *,
-    reverse: bool = False,
-) -> tuple[float, float]:
-    """Return a deterministic, deliberately small latent-position movement."""
-
-    direction = -1.0 if reverse else 1.0
-    phase = (seed % 17) * 0.37
-    amplitude = min(0.65, max(0.0, elapsed) * 0.10)
-    x = float(anchor["x"]) + direction * amplitude * sin(elapsed * 0.83 + phase)
-    z = float(anchor["z"]) + amplitude * 0.72 * cos(elapsed * 0.67 + phase)
-    return _bounded_pitch_position(x, z, pitch)
-
-
 def materialize_continuous_presence(
     keyframes: list[dict],
     duration: float,
     pitch: dict,
-    seed: int,
+    _seed: int,
 ) -> tuple[list[dict], dict]:
-    """Extend latent actor presence from 0% through 100% of the scene.
+    """Keep observed evidence and bridge only long internal detection gaps.
 
-    Detector-backed points remain the only observed evidence. Long internal
-    gaps are low-confidence interpolations; the tails roam within a small,
-    deterministic neighbourhood of the nearest observed position.
+    There is no evidence that an actor exists before its first or after its
+    last observation. Those tails must remain absent instead of being rendered
+    as a positional guess for the whole scene.
     """
 
     if not keyframes:
         return [], {
-            "policy": "continuous-latent",
+            "policy": "observed-window-with-latent-gaps",
             "coverage": 0.0,
             "observationCount": 0,
             "inferredKeyframeCount": 0,
@@ -107,35 +87,6 @@ def materialize_continuous_presence(
     fill_step = max(0.25, min(0.75, cadence * 2.0))
     gap_threshold = max(0.6, cadence * 2.5)
     inferred: list[dict] = []
-
-    first = observed[0]
-    first_time = max(0.0, float(first["t"]))
-    if first_time > 1e-6:
-        times = [0.0]
-        cursor = fill_step
-        while cursor < first_time - 1e-6:
-            times.append(cursor)
-            cursor += fill_step
-        base_uncertainty = float(first.get("positionUncertaintyMetres") or 1.0)
-        for time in times:
-            elapsed = first_time - time
-            x, z = _roaming_presence_position(
-                first,
-                elapsed,
-                seed,
-                pitch,
-                reverse=True,
-            )
-            inferred.append(
-                _presence_keyframe(
-                    first,
-                    time,
-                    x,
-                    z,
-                    "inferred-before-first",
-                    min(18.0, base_uncertainty + 1.5 + elapsed * 1.8),
-                )
-            )
 
     for left, right in zip(observed, observed[1:]):
         left_time = float(left["t"])
@@ -165,30 +116,6 @@ def materialize_continuous_presence(
             )
             cursor += fill_step
 
-    last = observed[-1]
-    last_time = min(duration, float(last["t"]))
-    if last_time < duration - 1e-6:
-        times: list[float] = []
-        cursor = last_time + fill_step
-        while cursor < duration - 1e-6:
-            times.append(cursor)
-            cursor += fill_step
-        times.append(duration)
-        base_uncertainty = float(last.get("positionUncertaintyMetres") or 1.0)
-        for time in times:
-            elapsed = time - last_time
-            x, z = _roaming_presence_position(last, elapsed, seed, pitch)
-            inferred.append(
-                _presence_keyframe(
-                    last,
-                    time,
-                    x,
-                    z,
-                    "inferred-after-last",
-                    min(18.0, base_uncertainty + 1.5 + elapsed * 1.8),
-                )
-            )
-
     combined = sorted([*observed, *inferred], key=lambda item: float(item["t"]))
     # Prefer observed evidence when floating-point rounding produces the same
     # timestamp as an inferred sample.
@@ -206,25 +133,19 @@ def materialize_continuous_presence(
     observed_start = float(observed[0]["t"])
     observed_end = float(observed[-1]["t"])
     inferred_count = sum(item.get("observed") is False for item in deduplicated)
-    coverage = (
-        1.0
-        if deduplicated
-        and float(deduplicated[0]["t"]) <= 1e-6
-        and float(deduplicated[-1]["t"]) >= duration - 1e-6
-        else 0.0
+    observed_span_ratio = (
+        max(0.0, observed_end - observed_start) / duration
+        if duration > 1e-6
+        else 1.0
     )
     return deduplicated, {
-        "policy": "continuous-latent",
-        "coverage": coverage,
+        "policy": "observed-window-with-latent-gaps",
+        "coverage": round(observed_span_ratio, 3),
         "observationCount": len(observed),
         "inferredKeyframeCount": inferred_count,
         "observedStart": round(observed_start, 3),
         "observedEnd": round(observed_end, 3),
-        "observedSpanRatio": (
-            round(max(0.0, observed_end - observed_start) / duration, 3)
-            if duration > 1e-6
-            else 1.0
-        ),
+        "observedSpanRatio": round(observed_span_ratio, 3),
         "sampleCadenceSeconds": round(cadence, 3),
     }
 

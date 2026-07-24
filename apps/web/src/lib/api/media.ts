@@ -44,4 +44,12 @@ export const mediaClient = {
     projectPath(projectId, '/compositions'),
     { method: 'POST', body: JSON.stringify({ segment_ids: segmentIds }) },
   ),
+  regenerateAnalysisFrames: (projectId: string, assetId: string) => request<{
+    runId: string
+    assetId: string
+    kind: 'analysis-frame-generation'
+    status: string
+  }>(projectVideoPath(projectId, assetId, '/analysis-frames/regenerate'), {
+    method: 'POST',
+  }),
 }

@@ -1,4 +1,3 @@
-# syntax=docker/dockerfile:1
 FROM python:3.10-slim
 
 ARG SOCCERNET_COMMIT=1c958345067218297d221e45e1a6405f975f83e0

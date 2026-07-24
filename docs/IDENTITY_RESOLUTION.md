@@ -351,9 +351,12 @@ artifacts are safe misses and are never published as primary cache entries.
 All identity/roster mutations are blocked while a reconstruction is queued or
 processing. Accepted correction saves/deletes, roster Bind/Unbind/Clear and match
 binding changes publish their updated inputs together with the next queued run
-under compare-and-swap. The generic whole-scene PUT cannot alter reconstruction
-inputs or runtime run fields and rejects stale clients. This prevents a late
-save or worker from resurrecting an older correction graph.
+under compare-and-swap. There is no generic whole-scene PUT: every editor write
+is a dedicated command that carries only its own domain and is applied onto the
+currently stored scene, so a late save cannot resurrect an older correction
+graph and cannot revert an unrelated field. The document revision therefore
+guards programmatic writes only, instead of arbitrating between the editor and
+the reconstruction runner.
 
 Queued and interrupted processing jobs use a process-independent database lease.
 The scene run ID, run revision, input fingerprint and full-document revision are

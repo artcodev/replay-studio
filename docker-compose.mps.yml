@@ -1,0 +1,58 @@
+services:
+  calibration-worker:
+    # Keep the CPU implementation available for an explicit comparison, but
+    # never create it as part of the normal MPS stack.
+    profiles: ["docker-cpu-workers"]
+
+  identity-worker:
+    # Docker Desktop cannot expose Apple Metal to a Linux container. The
+    # native host process is the only active PRTReID provider in this profile.
+    profiles: ["docker-cpu-workers"]
+
+  web:
+    # The Apple Silicon development stack serves the UI from native Vite on
+    # port 5188. Keep nginx available only as an explicit production preview.
+    profiles: ["docker-web"]
+
+  api:
+    environment:
+      CALIBRATION_WORKER_URL: http://host.docker.internal:8094
+      IDENTITY_WORKER_URL: http://host.docker.internal:8095
+      PERSON_DETECTION_WORKER_URL: http://host.docker.internal:8096
+    # The base CPU stack owns Docker worker dependencies. The MPS profile
+    # deliberately depends only on the services that still run in Docker.
+    depends_on: !override
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+      jersey-ocr-worker:
+        condition: service_started
+
+  reconstruction-runner:
+    environment:
+      CALIBRATION_WORKER_URL: http://host.docker.internal:8094
+      IDENTITY_WORKER_URL: http://host.docker.internal:8095
+      PERSON_DETECTION_WORKER_URL: http://host.docker.internal:8096
+    depends_on: !override
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+      jersey-ocr-worker:
+        condition: service_started
+
+  pipeline-runner:
+    environment:
+      CALIBRATION_WORKER_URL: http://host.docker.internal:8094
+      IDENTITY_WORKER_URL: http://host.docker.internal:8095
+      PERSON_DETECTION_WORKER_URL: http://host.docker.internal:8096
+    depends_on: !override
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+      jersey-ocr-worker:
+        condition: service_started

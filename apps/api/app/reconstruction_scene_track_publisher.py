@@ -28,7 +28,9 @@ def _trajectory_diagnostics() -> dict:
         "discardedProjectedObservationCount": 0,
         "preFilterSpeedSampleCount": 0,
         "preFilterSpeedViolationCount": 0,
+        "preFilterRawSpeedViolationCount": 0,
         "preFilterMaximumSpeedMetresPerSecond": None,
+        "preFilterMaximumAdjustedSpeedMetresPerSecond": None,
         "splitTrajectoryCount": 0,
         "discardedTrajectoryFragmentCount": 0,
         "acceptedIdentityImageObservationCount": 0,
@@ -52,6 +54,9 @@ def _record_trajectory_quality(diagnostics: dict, trajectory: TrackTrajectory) -
     diagnostics["preFilterSpeedViolationCount"] += quality[
         "impossibleSpeedSegmentCount"
     ]
+    diagnostics["preFilterRawSpeedViolationCount"] += quality[
+        "rawImpossibleSpeedSegmentCount"
+    ]
     if quality["fragmentCount"] > 1:
         diagnostics["splitTrajectoryCount"] += 1
         diagnostics["discardedTrajectoryFragmentCount"] += quality[
@@ -61,6 +66,21 @@ def _record_trajectory_quality(diagnostics: dict, trajectory: TrackTrajectory) -
         diagnostics["preFilterMaximumSpeedMetresPerSecond"] = max(
             float(diagnostics["preFilterMaximumSpeedMetresPerSecond"] or 0.0),
             trajectory.maximum_raw_speed,
+        )
+    adjusted_maximum = quality.get(
+        "maximumUncertaintyAdjustedSpeedMetresPerSecond"
+    )
+    if adjusted_maximum is not None:
+        diagnostics[
+            "preFilterMaximumAdjustedSpeedMetresPerSecond"
+        ] = max(
+            float(
+                diagnostics[
+                    "preFilterMaximumAdjustedSpeedMetresPerSecond"
+                ]
+                or 0.0
+            ),
+            float(adjusted_maximum),
         )
 
 
@@ -92,6 +112,13 @@ def _publish_trajectory_diagnostics(target: dict, values: dict) -> None:
             float(maximum),
             3,
         )
+    adjusted_maximum = values[
+        "preFilterMaximumAdjustedSpeedMetresPerSecond"
+    ]
+    if adjusted_maximum is not None:
+        values[
+            "preFilterMaximumAdjustedSpeedMetresPerSecond"
+        ] = round(float(adjusted_maximum), 3)
     accepted = int(values["acceptedIdentityImageObservationCount"])
     published = int(values["publishedIdentityObservationCount"])
     metric_accepted = int(values["metricAcceptedIdentityObservationCount"])
@@ -267,4 +294,122 @@ def publish_scene_tracks(
     return result
 
 
-__all__ = ["publish_scene_tracks"]
+def _provisional_track_document(
+    track: TrackState,
+    *,
+    coordinate_mode: str,
+    trajectory: TrackTrajectory,
+    materialized: TrackObservationMaterialization,
+    duration: float,
+    pitch: dict,
+    team_hint: str | None,
+    colors: dict[str, str],
+) -> dict:
+    keyframes, presence = materialize_continuous_trajectory(
+        trajectory,
+        duration,
+        pitch,
+        track.id,
+    )
+    role = annotation_role(track.manual_kind) or track.role
+    color = (
+        "#f1c84c"
+        if role == "referee"
+        else "#a78bfa"
+        if role == "other"
+        else colors.get(team_hint, "#8b93a7")
+        if team_hint
+        else "#8b93a7"
+    )
+    label = track.manual_label or (
+        f"{team_hint.title()} person" if team_hint else "Unassigned person"
+    )
+    return {
+        "id": f"provisional-{track.canonical_person_id or track.id}",
+        "label": label,
+        "teamId": team_hint or "unknown",
+        "color": color,
+        "number": 0,
+        "externalPlayerId": track.manual_external_player_id,
+        "source": "provisional",
+        # Identity confidence and positional evidence are independent. An
+        # unresolved person remains solid on detector-backed frames and is
+        # dimmed only inside an explicitly inferred observation gap.
+        "provisional": True,
+        "coordinateMode": coordinate_mode,
+        **({"role": role} if role else {}),
+        "trajectoryQa": {**trajectory.quality, **materialized.quality},
+        "presence": presence,
+        "observations": materialized.observations,
+        "keyframes": keyframes,
+        **(
+            {
+                "canonicalPersonId": track.canonical_person_id,
+                "sourceTrackletIds": sorted(
+                    track.source_tracklet_ids or {track.local_tracklet_id}
+                ),
+            }
+            if track.canonical_person_id
+            else {}
+        ),
+    }
+
+
+def publish_provisional_canonical_tracks(
+    tracks: list[TrackState],
+    published_tracks: list[dict],
+    mapping: dict[int, str],
+    colors: dict[str, str],
+    frame_size: tuple[int, int],
+    scene: dict,
+    calibration: PitchCalibration | None = None,
+    coordinate_mode: str | None = None,
+) -> list[dict]:
+    """Render canonical people that lack a confident roster/team assignment.
+
+    Provisional identity must not be presented as provisional position. These
+    tracks use the same metric trajectory and observation window as rostered
+    tracks, but remain outside team roster counts until their identity is
+    resolved.
+    """
+
+    resolved_mode = resolve_track_coordinate_mode(calibration, coordinate_mode)
+    if resolved_mode == "unavailable":
+        return []
+    published_ids = {
+        str(track.get("canonicalPersonId"))
+        for track in published_tracks
+        if track.get("canonicalPersonId")
+    }
+    pitch = scene["payload"]["pitch"]
+    duration = float(scene["duration"])
+    source_start = float(
+        scene.get("payload", {}).get("videoAsset", {}).get("sourceStart") or 0.0
+    )
+    result: list[dict] = []
+    for track in tracks:
+        if track.identity_status == "excluded":
+            continue
+        canonical_id = track.canonical_person_id
+        if canonical_id and str(canonical_id) in published_ids:
+            continue
+        trajectory = project_track_trajectory(track, frame_size, pitch, resolved_mode)
+        if trajectory is None or trajectory.retained_count == 0:
+            continue
+        materialized = materialize_track_observations(track, trajectory, source_start)
+        result.append(
+            _provisional_track_document(
+                track,
+                coordinate_mode=resolved_mode,
+                trajectory=trajectory,
+                materialized=materialized,
+                duration=duration,
+                pitch=pitch,
+                team_hint=mapping.get(track.id),
+                colors=colors,
+            )
+        )
+    return result
+
+
+__all__ = ["publish_scene_tracks", "publish_provisional_canonical_tracks"]

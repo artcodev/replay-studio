@@ -15,28 +15,6 @@ function uniqueRows<T>(rows: T[], key: (row: T) => string): T[] {
   })
 }
 
-function compactSceneWrite(scene: SceneDocument): SceneDocument {
-  const compact = structuredClone(scene)
-  if (compact.payload.videoAsset) {
-    delete (compact.payload.videoAsset as Partial<typeof compact.payload.videoAsset>).mediaUrl
-    delete (compact.payload.videoAsset as Partial<typeof compact.payload.videoAsset>).posterUrl
-  }
-  compact.payload.tracks.forEach((track) => {
-    delete (track as Partial<typeof track>).keyframes
-    delete track.observations
-  })
-  compact.payload.canonicalPeople?.forEach((person) => delete person.observations)
-  delete (compact.payload.ball as Partial<typeof compact.payload.ball>).keyframes
-  delete compact.payload.ball.automaticKeyframes
-  delete compact.payload.ball.manualKeyframes
-  const reconstruction = compact.payload.videoAsset?.reconstruction
-  if (reconstruction?.calibration) {
-    delete (reconstruction.calibration as Partial<typeof reconstruction.calibration>).frameEvidence
-  }
-  if (reconstruction?.ballDetection) delete reconstruction.ballDetection.frames
-  return compact
-}
-
 async function hydrateScene(projectId: string, scene: SceneDocument): Promise<SceneDocument> {
   const video = scene.payload?.videoAsset
   if (video?.id) {
@@ -149,12 +127,90 @@ export const sceneClient = {
     projectId,
     projectScenePath(projectId, sceneId),
   ),
-  save: (projectId: string, scene: SceneDocument) => sceneRequest(
+  exactAnalysisFrameUrl: (
+    projectId: string,
+    sceneId: string,
+    generationKey: string,
+    sourceFrameIndex: number,
+  ) => projectScenePath(
     projectId,
-    projectScenePath(projectId, scene.id),
+    sceneId,
+    `/analysis-frame-generations/${encodeURIComponent(generationKey)}/frames/${sourceFrameIndex}`,
+  ),
+  setFrameExcluded: (
+    projectId: string,
+    sceneId: string,
+    sourceFrameIndex: number,
+    excluded: boolean,
+  ) => sceneRequest(
+    projectId,
+    projectScenePath(
+      projectId,
+      sceneId,
+      `/frame-exclusions/${sourceFrameIndex}`,
+    ),
+    { method: 'PUT', body: JSON.stringify({ excluded }) },
+  ),
+  // Every editor write is a dedicated command carrying only its own domain.
+  // No client round-trips a scene document, so the revision fence never
+  // arbitrates between the UI and the reconstruction runner.
+  saveTitle: (projectId: string, sceneId: string, title: string) => sceneRequest(
+    projectId,
+    projectScenePath(projectId, sceneId, '/title'),
+    { method: 'PUT', body: JSON.stringify({ title }) },
+  ),
+  saveEventBindings: (
+    projectId: string,
+    sceneId: string,
+    bindings: SceneDocument['payload']['eventBindings'],
+  ) => sceneRequest(
+    projectId,
+    projectScenePath(projectId, sceneId, '/event-bindings'),
+    { method: 'PUT', body: JSON.stringify({ bindings }) },
+  ),
+  saveTrackMetadata: (
+    projectId: string,
+    sceneId: string,
+    trackId: string,
+    metadata: { label?: string; number?: number },
+  ) => sceneRequest(
+    projectId,
+    projectScenePath(projectId, sceneId, `/tracks/${encodeURIComponent(trackId)}/metadata`),
+    { method: 'PUT', body: JSON.stringify(metadata) },
+  ),
+  saveTrackTrajectory: (
+    projectId: string,
+    sceneId: string,
+    trackId: string,
+    keyframes: Array<{ t: number; x: number; z: number }>,
+  ) => sceneRequest(
+    projectId,
+    projectScenePath(projectId, sceneId, `/tracks/${encodeURIComponent(trackId)}/trajectory`),
+    { method: 'PUT', body: JSON.stringify({ keyframes }) },
+  ),
+  // Event grouping goes through its own endpoint and carries only the
+  // layout — never a whole scene document. The server applies it onto the
+  // current stored scene, so an editor holding an older revision still
+  // saves instead of dead-ending on the document revision fence.
+  saveSegmentLayout: (projectId: string, scene: SceneDocument) => sceneRequest(
+    projectId,
+    projectScenePath(projectId, scene.id, '/segment-layout'),
     {
       method: 'PUT',
-      body: JSON.stringify(compactSceneWrite(scene)),
+      body: JSON.stringify({
+        status: scene.payload?.videoAsset?.segmentLayout?.status ?? 'edited',
+        segments: (scene.payload?.videoAsset?.segments ?? [])
+          .filter((segment) => segment.layout)
+          .map((segment) => ({
+            id: segment.id,
+            group: segment.layout!.group,
+            variant: segment.layout!.variant,
+            label: segment.layout!.label,
+            role: segment.layout!.role,
+            confidence: segment.layout!.confidence,
+            motionCost: segment.layout!.motionCost,
+          })),
+      }),
     },
   ),
 }

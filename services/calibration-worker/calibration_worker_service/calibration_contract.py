@@ -74,6 +74,7 @@ class FrameCalibration:
     matched_curves: int
     completed_curve_count: int
     reprojection_error: float
+    reprojection_p95: float
     ground_error_p50_metres: float
     ground_error_p95_metres: float
     pitch_side: str | None
@@ -100,6 +101,7 @@ class FrameCalibration:
             "matchedCurves": self.matched_curves,
             "completedCurveCount": self.completed_curve_count,
             "reprojectionError": self.reprojection_error,
+            "reprojectionP95": self.reprojection_p95,
             "groundErrorP50Metres": self.ground_error_p50_metres,
             "groundErrorP95Metres": self.ground_error_p95_metres,
             "pitchSide": self.pitch_side,
@@ -189,6 +191,9 @@ class CalibrationReadiness:
     cache_max_entries: int
     cache_ttl_seconds: float
     cache_entry_count: int
+    architecture: str = "unknown"
+    torch_version: str = "unknown"
+    torch_thread_count: int = 0
 
     def to_wire(self) -> dict:
         return {
@@ -200,11 +205,16 @@ class CalibrationReadiness:
             "cacheMaxEntries": self.cache_max_entries,
             "cacheTtlSeconds": self.cache_ttl_seconds,
             "cacheEntryCount": self.cache_entry_count,
+            "architecture": self.architecture,
+            "torchVersion": self.torch_version,
+            "torchThreadCount": self.torch_thread_count,
         }
 
 
 class CalibrationEngine(Protocol):
     def calibrate(self, frames: list[DecodedFrame]) -> CalibrationBatchResult: ...
+
+    def recalibrate(self, frames: list[DecodedFrame]) -> CalibrationBatchResult: ...
 
     def readiness(self) -> CalibrationReadiness: ...
 

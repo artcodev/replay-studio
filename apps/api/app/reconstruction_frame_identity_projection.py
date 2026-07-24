@@ -129,7 +129,11 @@ def _stored_observation_document(
         position = interpolate_scene_keyframes(
             track.get("keyframes") or [], frame_time
         )
-    position = position or {"x": 0.0, "z": 0.0}
+    if position is None:
+        # No accepted metric, no published keyframes: inventing a pitch
+        # point (the old {0,0} placeholder put these people at the centre
+        # circle) is worse than an explicit missing position.
+        position_source = "unprojectable"
     annotation_kind = (
         item.annotation_kind
         if item is not None and item.annotation_kind
@@ -154,10 +158,14 @@ def _stored_observation_document(
         or observation.get("id"),
         "confidence": round(float(observation.get("confidence") or 0.0), 3),
         "bbox": deepcopy(observation["bbox"]),
-        "pitch": {
-            "x": round(float(position["x"]), 2),
-            "z": round(float(position["z"]), 2),
-        },
+        "pitch": (
+            {
+                "x": round(float(position["x"]), 2),
+                "z": round(float(position["z"]), 2),
+            }
+            if position is not None
+            else None
+        ),
         "jerseyColor": (
             cluster_color(item.feature)
             if item is not None
@@ -197,13 +205,15 @@ def _fresh_detection_document(
     index: int,
     item: Detection,
     bbox: dict,
-    position: tuple[float, float],
+    position: tuple[float, float] | None,
+    raw_position: tuple[float, float] | None,
     correction: dict | None,
     forced_match: dict | None,
     calibration: PitchCalibration | None,
 ) -> dict:
     metric_accepted = bool(
-        calibration is not None
+        position is not None
+        and calibration is not None
         and calibration.confidence >= METRIC_CALIBRATION_THRESHOLD
     )
     matched = forced_match
@@ -212,7 +222,11 @@ def _fresh_detection_document(
         "observationId": None,
         "confidence": round(float(item.confidence), 3),
         "bbox": bbox,
-        "pitch": {"x": round(position[0], 2), "z": round(position[1], 2)},
+        "pitch": (
+            {"x": round(position[0], 2), "z": round(position[1], 2)}
+            if position is not None
+            else None
+        ),
         "jerseyColor": cluster_color(item.feature),
         "annotationId": item.annotation_id,
         "kind": item.annotation_kind,
@@ -235,9 +249,17 @@ def _fresh_detection_document(
         "matchSource": "manual-identity" if matched else None,
         "metricStatus": "accepted" if metric_accepted else "unprojected",
         "metricReason": (
-            None if metric_accepted else "metric-projection-unavailable"
+            None
+            if metric_accepted
+            else "metric-projection-outside-pitch"
+            if raw_position is not None and calibration is not None
+            else "metric-projection-unavailable"
         ),
-        "rawPitch": None,
+        "rawPitch": (
+            {"x": round(raw_position[0], 2), "z": round(raw_position[1], 2)}
+            if raw_position is not None and not metric_accepted
+            else None
+        ),
         "projectionSource": (
             calibration.method
             if metric_accepted and calibration is not None
@@ -253,7 +275,8 @@ def project_frame_people(
     scene: dict,
     *,
     people: list[Detection],
-    projected_people: list[tuple[float, float]],
+    projected_people: list[tuple[float, float] | None],
+    raw_projected_people: list[tuple[float, float] | None],
     frame_index: int,
     frame_time: float,
     calibration: PitchCalibration | None,
@@ -320,7 +343,10 @@ def project_frame_people(
                 frame_time=frame_time,
             )
         )
-    for index, (item, position) in enumerate(zip(people, projected_people)):
+    raw_positions = raw_projected_people or [None] * len(projected_people)
+    for index, (item, position, raw_position) in enumerate(
+        zip(people, projected_people, raw_positions)
+    ):
         if index in consumed:
             continue
         correction = annotations_by_id.get(str(item.annotation_id or ""))
@@ -335,6 +361,7 @@ def project_frame_people(
                 item=item,
                 bbox=detection_boxes[index],
                 position=position,
+                raw_position=raw_position,
                 correction=correction,
                 forced_match=forced,
                 calibration=calibration,

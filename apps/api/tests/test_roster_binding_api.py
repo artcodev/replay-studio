@@ -31,6 +31,15 @@ from app.reconstruction_identity_roster_binding_planning import (
     plan_canonical_roster_binding as _plan_canonical_roster_binding,
 )
 from app.reconstruction_queue import queue_reconstruction
+from app.reconstruction_calibration_fingerprint import calibration_input_fingerprint
+from app.reconstruction_calibration_snapshot import calibration_data_fingerprint
+from app.artifact_store import reconstruction_artifact_store
+from app.reconstruction_artifact_codec import materialized_artifacts
+from app.reconstruction_artifact_manifest import (
+    artifact_references,
+    merge_artifact_manifest,
+)
+from app.reconstruction_calibration_artifacts import publish_calibration_frames_artifact
 from app.reconstruction_run_repository import ReconstructionRunRepository
 from app.reconstruction_track_state import TrackState
 from app.reconstruction_identity_merging import (
@@ -82,7 +91,7 @@ def set_canonical_roster_binding(*args, **kwargs):
 
 
 def _scene(*, status: str = "ready") -> dict:
-    return {
+    scene = {
         "id": "roster-binding-scene",
         "title": "Roster binding",
         "version": 1,
@@ -90,6 +99,7 @@ def _scene(*, status: str = "ready") -> dict:
         "payload": {
             "videoAsset": {
                 "id": "asset-1",
+                "fps": 10.0,
                 "selectedSegmentId": "segment-1",
                 "sourceStart": 20.0,
                 "sourceEnd": 24.0,
@@ -149,6 +159,54 @@ def _scene(*, status: str = "ready") -> dict:
             "tracks": [],
         },
     }
+    reconstruction = scene["payload"]["videoAsset"]["reconstruction"]
+    reconstruction["stage"] = "reconstruction"
+    reconstruction["trackingCoordinatePolicy"] = "metric-required"
+    reconstruction["calibrationInputFingerprint"] = calibration_input_fingerprint(
+        scene
+    )
+    reconstruction["calibration"] = {
+        "schemaVersion": 2,
+        "summary": {},
+        "manualFrameAnchors": [],
+        "frameEvidence": [],
+    }
+    reconstruction["pitchCalibration"] = {"status": "ready"}
+    reconstruction["pitchOrientation"] = {}
+    data_fingerprint = calibration_data_fingerprint(reconstruction)
+    published_calibration = publish_calibration_frames_artifact(
+        scene,
+        reconstruction,
+        artifact_references(reconstruction),
+        materialized_artifacts(reconstruction),
+        store=reconstruction_artifact_store(),
+    )
+    calibration_artifact = published_calibration.reference
+    reconstruction["artifactManifest"] = merge_artifact_manifest(
+        reconstruction.get("artifactManifest"),
+        calibrationFrames=calibration_artifact,
+    )
+    assert published_calibration.encoding is not None
+    reconstruction["calibration"] = (
+        published_calibration.encoding.compact_calibration
+    )
+    reconstruction["ballDetection"] = (
+        published_calibration.encoding.compact_ball_detection
+    )
+    reconstruction["calibrationProvenance"] = {
+        "schemaVersion": 1,
+        "runId": "calibration-run",
+        "producedAt": "2026-07-21T12:00:00+00:00",
+        "calibrationInputFingerprint": reconstruction[
+            "calibrationInputFingerprint"
+        ],
+        "dataFingerprint": data_fingerprint,
+        "artifact": calibration_artifact,
+        "totalFrames": 0,
+        "resolvedFrames": 0,
+        "unresolvedFrames": 0,
+    }
+    return scene
 
 
 async def _async_request(method: str, path: str, **kwargs):
@@ -357,7 +415,10 @@ def test_roster_binding_queue_supersedes_an_old_worker_atomically(
         "player-home-8"
     )
     monkeypatch.setattr("app.reconstruction_queue.reconstruction_runs", isolated_store.runs)
-    monkeypatch.setattr("app.reconstruction_queue.frame_paths", lambda *_: [])
+    monkeypatch.setattr(
+        "app.reconstruction_queue.frame_paths",
+        lambda *_args, **_kwargs: [],
+    )
     queued = queue_reconstruction(
         edited,
         match_snapshot=None,

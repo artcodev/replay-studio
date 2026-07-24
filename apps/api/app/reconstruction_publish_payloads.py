@@ -16,6 +16,43 @@ from .reconstruction_detection_contract import (
 from .reconstruction_identity_phase import IdentityPhaseResult
 
 
+def identity_runtime_quality(
+    frame: FrameAnalysisResult,
+    identity: IdentityPhaseResult,
+    *,
+    jersey_ocr_profile: str,
+) -> dict[str, Any]:
+    reid_status = str(
+        frame.identity_worker_diagnostics.get("status") or "unknown"
+    )
+    jersey_status = str(
+        identity.jersey_ocr_diagnostics.get("status") or "unknown"
+    )
+    reasons: list[str] = []
+    if reid_status not in {"ready", "no-observations"}:
+        reasons.append(f"reid-{reid_status}")
+    if (
+        jersey_ocr_profile != "off"
+        and jersey_status
+        not in {
+            "ready",
+            "no-observations",
+            "no-crops",
+            "no-readable-crops",
+        }
+    ):
+        reasons.append(f"jersey-ocr-{jersey_status}")
+    return {
+        "status": "degraded" if reasons else "ready",
+        "reidStatus": reid_status,
+        "jerseyOcrStatus": jersey_status,
+        "jerseyOcrProfile": jersey_ocr_profile,
+        "reasons": reasons,
+        "automaticCrossGapIdentityAvailable": reid_status == "ready",
+        "jerseyNumberEvidenceAvailable": jersey_status == "ready",
+    }
+
+
 def build_ball_detection_metadata(
     frame: FrameAnalysisResult,
     ball: BallTrajectoryPhaseResult,
@@ -135,13 +172,24 @@ def build_pitch_orientation(
     result: CalibrationPhaseResult,
 ) -> dict[str, Any]:
     existing = (video.get("reconstruction") or {}).get("pitchOrientation") or {}
+    existing_source = str(existing.get("visiblePitchSideSource") or "")
     detected_side = result.quality["summary"].get("visiblePitchSide")
     attacking_goal = existing.get("attackingGoal")
     if attacking_goal not in {"left", "right"}:
         attacking_goal = "unknown"
+    # A manually chosen pitch side is authoritative user input and part of the
+    # reconstruction input fingerprint. Never clobber it with the detected side —
+    # doing so changes the fingerprint mid-run and the terminal publish's
+    # compare-and-swap would reject the (correct) result as stale.
+    if existing_source.startswith("manual"):
+        visible_side = existing.get("visiblePitchSide") or "unknown"
+        visible_side_source = existing_source
+    else:
+        visible_side = detected_side or "unknown"
+        visible_side_source = "calibration" if detected_side else "unknown"
     return {
-        "visiblePitchSide": detected_side or "unknown",
-        "visiblePitchSideSource": "calibration" if detected_side else "unknown",
+        "visiblePitchSide": visible_side,
+        "visiblePitchSideSource": visible_side_source,
         "visiblePitchSideAgreement": result.quality["summary"].get(
             "sideAgreement"
         ),
@@ -249,6 +297,7 @@ def publication_diagnostics(
     *,
     ball_mode: str,
     compact_identity: Mapping[str, Any],
+    jersey_ocr_profile: str = "automatic",
 ) -> dict[str, Any]:
     tracking = ball.diagnostics
     accepted = calibration.accepted_frame_calibrations
@@ -270,6 +319,11 @@ def publication_diagnostics(
         "stableTrackCount": identity.stable_track_count,
         "acceptedTrackCount": len(identity.tracks),
         "identity": dict(compact_identity),
+        "identityRuntime": identity_runtime_quality(
+            frame,
+            identity,
+            jersey_ocr_profile=jersey_ocr_profile,
+        ),
         "jerseyOcr": identity.jersey_ocr_diagnostics,
         "personDetectionCache": deepcopy(frame.person_detection_cache_diagnostics),
         "calibrationBackend": calibration_value.method if calibration_value else None,
@@ -316,3 +370,15 @@ def publication_diagnostics(
             else None
         ),
     }
+
+
+__all__ = (
+    "build_ball_detection_metadata",
+    "build_calibration_contract",
+    "build_calibration_metadata",
+    "build_pitch_orientation",
+    "coordinate_space",
+    "identity_runtime_quality",
+    "publication_diagnostics",
+    "publication_warnings",
+)

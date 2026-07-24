@@ -1,0 +1,15 @@
+fastapi==0.115.14
+uvicorn[standard]==0.34.3
+python-multipart==0.0.20
+numpy==1.26.4
+Pillow==11.3.0
+opencv-python-headless==4.11.0.86
+scikit-image==0.24.0
+albumentations==1.3.1
+# PRTReID still calls matplotlib.cm.get_cmap, removed in matplotlib 3.11.
+matplotlib==3.10.9
+# Regular macOS arm64 wheels contain the Metal/MPS backend.
+torch==2.2.2
+torchvision==0.17.2
+prtreid @ git+https://github.com/VlSomers/prtreid@30617a75967e84d5d516959c4b84cbeea6f56493
+torchreid @ git+https://github.com/VlSomers/bpbreid@02570d5c893977685de7a547a58c0aa87fa4788c

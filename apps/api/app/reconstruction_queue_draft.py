@@ -8,6 +8,10 @@ from dataclasses import dataclass
 from typing import Any
 
 from .reconstruction_errors import ReconstructionError
+from .reconstruction_coordinate_policy import (
+    METRIC_REQUIRED,
+    TRACKING_COORDINATE_POLICIES,
+)
 from .reconstruction_progress import queued_progress
 from .scene_document import reconstruction_input_fingerprint
 
@@ -22,8 +26,17 @@ class ReconstructionQueueInputs:
     frame_count: int
     run_id: str
     match_snapshot_ref: Mapping[str, Any] | None
+    sampling_frame_rate: float
+    direct_calibration_max_gap_seconds: float = 0.0
     ball_detection_profile: str = "automatic"
     jersey_ocr_profile: str = "automatic"
+    contact_point_profile: str = "bbox-bottom"
+    mode: str = "full"
+    tracking_coordinate_policy: str = METRIC_REQUIRED
+    calibration_fallback_consent: Mapping[str, Any] | None = None
+    calibration_input_fingerprint: str | None = None
+    calibration_artifact_input: Mapping[str, Any] | None = None
+    calibration_trigger: str | None = None
 
 
 def validate_reconstruction_queue_scene(scene: Mapping[str, Any]) -> None:
@@ -79,6 +92,45 @@ def prepare_reconstruction_queue_draft(
             )
     if inputs.jersey_ocr_profile not in {"automatic", "off"}:
         raise ReconstructionError("Unknown jersey OCR profile")
+    if inputs.contact_point_profile not in {"bbox-bottom", "pose-feet"}:
+        raise ReconstructionError("Unknown contact point profile")
+    if inputs.sampling_frame_rate <= 0.0:
+        raise ReconstructionError("Analysis sampling FPS must be positive")
+    if not 0.0 <= inputs.direct_calibration_max_gap_seconds <= 5.0:
+        raise ReconstructionError(
+            "Direct calibration sampling gap must be between 0 and 5 seconds"
+        )
+    if inputs.mode not in {"calibrate", "full"}:
+        raise ReconstructionError("Unknown reconstruction mode")
+    if inputs.tracking_coordinate_policy not in TRACKING_COORDINATE_POLICIES:
+        raise ReconstructionError("Unknown tracking coordinate policy")
+    if (
+        inputs.tracking_coordinate_policy != METRIC_REQUIRED
+        and not isinstance(inputs.calibration_fallback_consent, Mapping)
+    ):
+        raise ReconstructionError(
+            "Image fallback requires explicit calibration consent"
+        )
+    if inputs.mode == "full" and not isinstance(
+        inputs.calibration_artifact_input, Mapping
+    ):
+        raise ReconstructionError(
+            "Full reconstruction requires a pinned calibration artifact"
+        )
+    if inputs.mode == "calibrate" and inputs.calibration_artifact_input is not None:
+        raise ReconstructionError(
+            "Calibration runs cannot consume a reconstruction calibration input"
+        )
+    if inputs.calibration_trigger not in {
+        None,
+        "full-request",
+        "manual-draft-finalize",
+    }:
+        raise ReconstructionError("Unknown calibration trigger")
+    if inputs.mode != "calibrate" and inputs.calibration_trigger is not None:
+        raise ReconstructionError(
+            "Only a calibration process may carry a calibration trigger"
+        )
 
     draft = deepcopy(scene)
     payload = draft.setdefault("payload", {})
@@ -107,9 +159,48 @@ def prepare_reconstruction_queue_draft(
         "ballDetectionInput": deepcopy(dict(inputs.ball_detection_input)),
         "ballDetectionProfile": inputs.ball_detection_profile,
         "jerseyOcrProfile": inputs.jersey_ocr_profile,
+        "contactPointProfile": inputs.contact_point_profile,
+        "samplingFrameRate": inputs.sampling_frame_rate,
+        "directCalibrationMaxGapSeconds": (
+            inputs.direct_calibration_max_gap_seconds
+        ),
+        "mode": inputs.mode,
+        **(
+            {"calibrationTrigger": inputs.calibration_trigger}
+            if inputs.calibration_trigger is not None
+            else {}
+        ),
+        "trackingCoordinatePolicy": inputs.tracking_coordinate_policy,
+        **(
+            {"calibrationInputFingerprint": inputs.calibration_input_fingerprint}
+            if inputs.calibration_input_fingerprint
+            else {}
+        ),
+        # A calibrate run stops at the inspection gate; a full run continues past
+        # it. Published calibration evidence is replaced atomically only after a
+        # successful run. Keeping the previous gate while a new run computes
+        # makes failures inspectable without making that gate current: its
+        # calibrationInputFingerprint is compared with the newly queued input.
+        # A full run consumes the pinned artifact behind that gate, so its
+        # review/timeline remains valid operator evidence as well.
+        "stage": "calibration" if inputs.mode == "calibrate" else "reconstruction",
         "identityCorrectionDiagnostics": [],
         "diagnostics": previous_diagnostics,
     }
+    if inputs.calibration_trigger is None:
+        reconstruction.pop("calibrationTrigger", None)
+    if inputs.calibration_fallback_consent is None:
+        reconstruction.pop("calibrationFallbackConsent", None)
+    else:
+        reconstruction["calibrationFallbackConsent"] = deepcopy(
+            dict(inputs.calibration_fallback_consent)
+        )
+    if inputs.calibration_artifact_input is None:
+        reconstruction.pop("calibrationArtifactInput", None)
+    else:
+        reconstruction["calibrationArtifactInput"] = deepcopy(
+            dict(inputs.calibration_artifact_input)
+        )
     if inputs.match_snapshot_ref is None:
         reconstruction.pop("matchSnapshotRef", None)
     else:
@@ -136,7 +227,7 @@ def prepare_reconstruction_queue_draft(
             "ballSamples": previous_result["ballSamples"],
             "warnings": [],
             "previousResult": previous_result,
-            "progress": queued_progress(inputs.frame_count),
+            "progress": queued_progress(inputs.frame_count, mode=inputs.mode),
         }
     )
     return draft

@@ -164,6 +164,29 @@ class CalibrationProjector:
             projected[valid, :2] / projected[valid, 2:3] - world_points[valid],
             axis=1,
         )
+        try:
+            pitch_to_image = np.linalg.inv(
+                np.asarray(result["homography"], dtype=np.float64)
+            )
+            world_homogeneous = np.column_stack(
+                [world_points, np.ones(len(world_points), dtype=np.float64)]
+            )
+            reprojected_image = world_homogeneous @ pitch_to_image.T
+            image_valid = np.abs(reprojected_image[:, 2]) > 1e-8
+            image_error = np.full(
+                len(reprojected_image), np.inf, dtype=np.float64
+            )
+            image_error[image_valid] = np.linalg.norm(
+                reprojected_image[image_valid, :2]
+                / reprojected_image[image_valid, 2:3]
+                - image_points[image_valid, :2],
+                axis=1,
+            )
+            finite_image_error = image_error[np.isfinite(image_error)]
+        except np.linalg.LinAlgError:
+            finite_image_error = np.asarray([], dtype=np.float64)
+        if not len(finite_image_error):
+            return None
         inlier_count = int((world_error <= 1.5).sum())
         if inlier_count < 6 or inlier_count / detected_count < 0.65:
             return None
@@ -212,6 +235,9 @@ class CalibrationProjector:
                 key in completed_keypoints for key in range(31, 58)
             ),
             reprojection_error=round(error, 5),
+            reprojection_p95=round(
+                float(np.percentile(finite_image_error, 95)), 5
+            ),
             ground_error_p50_metres=round(float(np.median(finite_world_error)), 5),
             ground_error_p95_metres=round(
                 float(np.percentile(finite_world_error, 95)),

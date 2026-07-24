@@ -8,11 +8,14 @@ from sqlalchemy import create_engine, event, select
 from sqlalchemy.orm import sessionmaker
 
 from app.database import Base, PipelineJobRow, VideoAssetRow
+from app.analysis_frame_generation import PreparedAnalysisFrameGeneration
+from app.analysis_frame_generation_pipeline import AnalysisFrameGenerationPipelineService
 from app.model_comparison_pipeline_service import ModelComparisonPipelineService
 from app.multi_pass_pipeline_service import MultiPassPipelineService
 from app.pipeline_domain import PipelineJob, PipelineJobConflict
 from app.pipeline_store import PipelineStore
 from app.pipeline_terminal_service import PipelineTerminalService
+from app.reconstruction_calibration_fingerprint import calibration_input_fingerprint
 from app.project_models import (
     AnalysisRunRow,
     ProjectRow,
@@ -641,8 +644,156 @@ def test_video_generation_pointer_graph_and_terminal_state_publish_together(tmp_
         ).scene_id == child["id"]
 
 
+def test_analysis_frame_generation_publishes_pointer_and_invalidates_old_pixels(
+    tmp_path,
+):
+    clock = MutableClock()
+    store, _other, engine = _stores(tmp_path, clock)
+    sessions = sessionmaker(bind=engine, expire_on_commit=False)
+    scenes = SceneRepository(sessions)
+    service = AnalysisFrameGenerationPipelineService(
+        store._session_factory,
+        clock=clock,
+    )
+    scene = make_video_scene(
+        scene_id="source-scene",
+        title="Legacy pixels",
+        duration=3.0,
+        video_asset={
+            "id": "asset-source",
+            "filename": "source.mp4",
+            "generationKey": "generation-legacy",
+            "analysisFps": 10.0,
+            "frameCount": 30,
+            "selectedSegmentId": "shot-1",
+            "reconstruction": {
+                "status": "ready",
+                "model": "yolo26m.pt",
+                "pitchCalibrationOverrides": [{"sceneTime": 0.0}],
+                "artifactManifest": {"artifacts": {"calibrationFrames": {}}},
+            },
+        },
+    )
+    scene["payload"]["tracks"] = [{"id": "old-track", "keyframes": []}]
+    scenes.put(scene)
+    with sessions.begin() as session:
+        session.add_all(
+            (
+                VideoAssetRow(
+                    id="asset-source",
+                    filename="source.mp4",
+                    original_name="source.mp4",
+                    content_type="video/mp4",
+                    status="ready",
+                    stage="Ready",
+                    progress=100,
+                    frame_count=30,
+                    generation_key="generation-legacy",
+                    scene_id="source-scene",
+                ),
+                ProjectVideoAssetRow(
+                    project_id="project-1",
+                    video_asset_id="asset-source",
+                    role="source",
+                ),
+                ProjectSceneRow(
+                    project_id="project-1",
+                    scene_id="source-scene",
+                    role="segment",
+                ),
+                SegmentRow(
+                    id="segment-source",
+                    project_id="project-1",
+                    video_asset_id="asset-source",
+                    scene_id="source-scene",
+                    source_segment_id="shot-1",
+                    label="Shot 1",
+                    start_seconds=0.0,
+                    end_seconds=3.0,
+                    ordinal=0,
+                    payload={},
+                ),
+            )
+        )
+
+    job = service.enqueue(
+        job_id="analysis-frames-run",
+        project_id="project-1",
+        asset_id="asset-source",
+    )
+    assert job.status == "queued"
+    claim = store.claim(job.id, "runner", ttl_seconds=10)
+    assert claim is not None and claim.lease_token
+    generation = tmp_path / "generation-source"
+    (generation / "frames").mkdir(parents=True)
+    for name in ("proxy.mp4", "poster.jpg", "manifest.json"):
+        (generation / name).write_bytes(b"ready")
+    for index in range(1, 4):
+        (generation / "frames" / f"frame_{index:05d}.jpg").write_bytes(b"jpeg")
+    prepared = PreparedAnalysisFrameGeneration(
+        asset_id="asset-source",
+        generation_key="generation-source",
+        generation_directory=generation,
+        frame_count=3,
+        source_fps=1.0,
+        analysis_fps=1.0,
+        analysis_frame_input={
+            "schemaVersion": 1,
+            "source": "uploaded-video",
+            "coordinateSpace": "source-video-pixels",
+            "width": 1920,
+            "height": 1080,
+            "resize": "none",
+            "format": "jpeg",
+            "jpegQscale": 1,
+            "chromaSampling": "4:4:4",
+        },
+    )
+
+    assert service.publish(job.id, claim.lease_token, prepared)
+    published = scenes.get("source-scene")
+    video = published["payload"]["videoAsset"]
+    assert video["generationKey"] == "generation-source"
+    assert video["fps"] == 1.0
+    assert video["analysisFps"] == 1.0
+    assert video["analysisFrameInput"]["width"] == 1920
+    assert video["reconstruction"] == {"model": "yolo26m.pt"}
+    assert published["payload"]["tracks"] == []
+    with sessions() as session:
+        asset = session.get(VideoAssetRow, "asset-source")
+        assert asset.generation_key == "generation-source"
+        assert asset.fps == 1.0
+        first_run = session.get(AnalysisRunRow, job.id)
+        assert first_run.status == "succeeded"
+        assert first_run.source_run_id == job.id
+        assert first_run.diagnostics == {
+            "videoAssetId": "asset-source",
+            "inputGenerationKey": "generation-legacy",
+        }
+
+    # Regeneration is an explicit repeatable command.  Keep the completed
+    # telemetry row as history while replacing only the single runnable queue
+    # slot for the asset.
+    repeated = service.enqueue(
+        job_id="analysis-frames-run-2",
+        project_id="project-1",
+        asset_id="asset-source",
+    )
+    assert repeated.status == "queued"
+    with sessions() as session:
+        assert session.get(AnalysisRunRow, job.id).status == "succeeded"
+        repeated_run = session.get(AnalysisRunRow, repeated.id)
+        assert repeated_run is not None
+        assert repeated_run.source_run_id == repeated.id
+        assert repeated_run.input_fingerprint == "generation-source"
+        assert repeated_run.diagnostics == {
+            "videoAssetId": "asset-source",
+            "inputGenerationKey": "generation-source",
+        }
+
+
 def _model_comparison_scene(scene_id: str) -> dict:
-    return make_video_scene(
+    scene = make_video_scene(
         scene_id=scene_id,
         title="Detection benchmark",
         duration=5.0,
@@ -653,9 +804,58 @@ def _model_comparison_scene(scene_id: str) -> dict:
             "selectedSegmentId": "shot-1",
             "sourceStart": 0.0,
             "sourceEnd": 5.0,
-            "reconstruction": {"status": "ready", "model": "yolo26m.pt"},
+            "reconstruction": {
+                "status": "ready",
+                "model": "yolo26m.pt",
+                "trackingCoordinatePolicy": "metric-required",
+                "pitchCalibration": {
+                    "status": "ready",
+                    "imageToPitch": [
+                        [0.1, 0.0, -48.0],
+                        [0.0, 0.1, -27.0],
+                        [0.0, 0.0, 1.0],
+                    ],
+                },
+            },
         },
     )
+    scene["payload"]["videoAsset"]["reconstruction"][
+        "calibrationInputFingerprint"
+    ] = calibration_input_fingerprint(scene)
+    return scene
+
+
+def test_model_comparison_requires_current_metric_calibration(tmp_path):
+    clock = MutableClock()
+    store, _other, engine = _stores(tmp_path, clock)
+    sessions = sessionmaker(bind=engine, expire_on_commit=False)
+    scenes = SceneRepository(sessions)
+    model_comparison_pipeline = ModelComparisonPipelineService(
+        store._session_factory,
+        clock=clock,
+    )
+    scene = _model_comparison_scene("comparison-uncalibrated")
+    reconstruction = scene["payload"]["videoAsset"]["reconstruction"]
+    reconstruction.pop("calibrationInputFingerprint")
+    reconstruction.pop("trackingCoordinatePolicy")
+    scenes.put(scene)
+    with sessions.begin() as session:
+        session.add(
+            ProjectSceneRow(
+                project_id="project-1",
+                scene_id="comparison-uncalibrated",
+                role="segment",
+            )
+        )
+
+    with pytest.raises(PipelineJobConflict, match="Run pitch calibration"):
+        model_comparison_pipeline.enqueue(
+            job_id="comparison-uncalibrated-run",
+            project_id="project-1",
+            scene_id="comparison-uncalibrated",
+            baseline_model="yolo26n.pt",
+            candidate_model="yolo26m.pt",
+        )
 
 
 def test_model_comparison_is_durable_deduplicated_and_published_atomically(tmp_path):

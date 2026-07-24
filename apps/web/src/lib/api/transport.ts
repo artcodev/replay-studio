@@ -1,3 +1,14 @@
+export class ApiRequestError extends Error {
+  constructor(message: string, readonly status: number) {
+    super(message)
+    this.name = 'ApiRequestError'
+  }
+}
+
+export function isConflictError(cause: unknown): boolean {
+  return cause instanceof ApiRequestError && cause.status === 409
+}
+
 export async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(path, {
     ...init,
@@ -5,7 +16,11 @@ export async function request<T>(path: string, init?: RequestInit): Promise<T> {
   })
   if (!response.ok) {
     const body = await response.json().catch(() => ({}))
-    throw new Error(requestErrorMessage(body, response.status))
+    const message = requestErrorMessage(body, response.status)
+    // A bare "409 (Conflict)" in the console hides which fence refused the
+    // write. Always print the server's own reason next to the request.
+    console.error(`${init?.method ?? 'GET'} ${path} → ${response.status}: ${message}`)
+    throw new ApiRequestError(message, response.status)
   }
   return response.json() as Promise<T>
 }

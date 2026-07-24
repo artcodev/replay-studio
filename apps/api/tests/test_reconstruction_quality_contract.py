@@ -117,7 +117,7 @@ def test_metric_tracks_skip_observations_without_calibration(monkeypatch):
     )
 
 
-def test_continuous_presence_spans_scene_without_faking_observations():
+def test_presence_is_bounded_by_observed_lifetime():
     keyframes, presence = _materialize_continuous_presence(
         [
             {"t": 1.0, "x": 8.0, "z": 4.0, "confidence": 0.9},
@@ -128,16 +128,15 @@ def test_continuous_presence_spans_scene_without_faking_observations():
         7,
     )
 
-    assert keyframes[0]["t"] == 0.0
-    assert keyframes[-1]["t"] == 3.0
-    assert keyframes[0]["presenceState"] == "inferred-before-first"
-    assert keyframes[-1]["presenceState"] == "inferred-after-last"
-    assert keyframes[0]["observed"] is False
-    assert keyframes[-1]["observed"] is False
+    assert keyframes[0]["t"] == 1.0
+    assert keyframes[-1]["t"] == 1.2
+    assert keyframes[0]["presenceState"] == "observed"
+    assert keyframes[-1]["presenceState"] == "observed"
     assert sum(frame["observed"] is True for frame in keyframes) == 2
-    assert presence["coverage"] == 1.0
+    assert presence["policy"] == "observed-window-with-latent-gaps"
+    assert presence["coverage"] == 0.067
     assert presence["observationCount"] == 2
-    assert presence["inferredKeyframeCount"] == len(keyframes) - 2
+    assert presence["inferredKeyframeCount"] == 0
 
 
 def test_continuous_presence_marks_long_internal_gap_as_inferred():

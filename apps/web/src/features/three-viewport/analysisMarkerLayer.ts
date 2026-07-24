@@ -21,6 +21,9 @@ export class AnalysisMarkerLayer {
     if (!analysis) return
 
     analysis.people.forEach((person) => {
+      // Off-pitch people (bench, boards) have no honest pitch position; a
+      // marker for them used to land on the centre circle.
+      if (!person.pitch) return
       const marker = new THREE.Mesh(
         new THREE.RingGeometry(0.72, 1.02, 32),
         new THREE.MeshBasicMaterial({

@@ -49,8 +49,8 @@ def resolve_ball_phase(
                 f"Accepted {player_track_count} player tracks; ball world "
                 "trajectory requires metric calibration."
             ),
-            91,
-            97,
+            86,
+            96,
             completed=2,
             total=2,
             eta_padding=2.0,
@@ -97,8 +97,8 @@ def resolve_ball_phase(
         5,
         "3D trajectories ready",
         f"Accepted {player_track_count} player tracks and {len(ball)} ball samples.",
-        91,
-        97,
+        86,
+        96,
         completed=2,
         total=2,
         eta_padding=2.0,

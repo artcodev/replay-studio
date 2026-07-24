@@ -3,6 +3,7 @@ import type { ComponentPublicInstance } from 'vue'
 import { annotationIdentityAction } from '../../lib/identityCorrections'
 import { frameMetricBadge } from '../../lib/videoTrackSelection'
 import type { FrameAnalysis, FrameAnnotation } from '../../types/analysis'
+import type { VideoOverlayOptions } from '../../lib/videoOverlayOptions'
 
 type FramePerson = FrameAnalysis['people'][number]
 
@@ -14,6 +15,7 @@ defineProps<{
   canonicalId: (person: FramePerson) => string | null
   personLabel: (person: FramePerson) => string
   selectionDescription: (person: FramePerson) => string
+  overlayOptions: VideoOverlayOptions
 }>()
 
 const emit = defineEmits<{
@@ -46,7 +48,7 @@ function bindOverlay(element: Element | ComponentPublicInstance | null) {
     @click="emit('selectAtPoint', $event)"
   >
     <g
-      v-for="person in analysis.people"
+      v-for="person in overlayOptions.playerBoxes ? analysis.people : []"
       :key="person.id"
       class="frame-person-box"
       :class="{ matched: canonicalId(person) || person.matchedTrackId, selected: person.id === selectedPersonId, manual: person.annotationId, confirmed: person.previewState === 'confirmed', merged: person.previewState === 'merged', split: person.previewState === 'split' }"
@@ -67,6 +69,7 @@ function bindOverlay(element: Element | ComponentPublicInstance | null) {
         @keydown.space.prevent.stop="emit('selectPerson', person)"
       />
       <rect
+        v-if="overlayOptions.teamSwatches"
         class="jersey-swatch"
         :x="person.bbox.x"
         :y="Math.max(1, person.bbox.y - 16)"
@@ -74,21 +77,21 @@ function bindOverlay(element: Element | ComponentPublicInstance | null) {
         height="12"
         :fill="person.jerseyColor"
       />
-      <text :x="person.bbox.x + 16" :y="Math.max(11, person.bbox.y - 6)">
+      <text v-if="overlayOptions.identityLabels" :x="person.bbox.x + 16" :y="Math.max(11, person.bbox.y - 6)">
         {{ personLabel(person) }} · {{ person.previewState === 'merged' ? `MERGED → ${person.mergeTargetId}` : person.previewState === 'split' ? `SPLIT [${person.rangeStart?.toFixed(2)}, ${person.rangeEnd?.toFixed(2)})` : person.previewState === 'confirmed' ? 'CONFIRMED' : `${Math.round(person.confidence * 100)}%` }}
       </text>
       <text
-        v-if="person.id === selectedPersonId"
+        v-if="person.id === selectedPersonId && overlayOptions.positionLabels"
         class="pitch-position"
         :class="{ uncertain: frameMetricBadge(person) === 'UNCERTAIN' }"
         :x="person.bbox.x"
         :y="person.bbox.y + person.bbox.height + 12"
       >
-        {{ frameMetricBadge(person) === 'UNCERTAIN' ? '3D position uncertain' : `x ${person.pitch.x.toFixed(1)} · z ${person.pitch.z.toFixed(1)}` }}
+        {{ frameMetricBadge(person) === 'UNCERTAIN' ? '3D position uncertain' : person.pitch ? `x ${person.pitch.x.toFixed(1)} · z ${person.pitch.z.toFixed(1)}` : 'no 3D position (off-pitch or dropped)' }}
       </text>
     </g>
     <g
-      v-for="annotation in analysis.annotations.filter((item) => annotationIdentityAction(item) === 'exclude')"
+      v-for="annotation in overlayOptions.manualMarks ? analysis.annotations.filter((item) => annotationIdentityAction(item) === 'exclude') : []"
       :key="annotation.id"
       class="frame-ignore-box"
       @pointerdown.stop
@@ -99,7 +102,7 @@ function bindOverlay(element: Element | ComponentPublicInstance | null) {
       <text :x="annotation.bbox.x" :y="Math.max(14, annotation.bbox.y - 7)">EXCLUDED</text>
     </g>
     <g
-      v-for="annotation in analysis.annotations.filter((item) => annotationIdentityAction(item) === 'split')"
+      v-for="annotation in overlayOptions.manualMarks ? analysis.annotations.filter((item) => annotationIdentityAction(item) === 'split') : []"
       :key="annotation.id"
       class="frame-split-box"
       @pointerdown.stop
@@ -125,7 +128,7 @@ function bindOverlay(element: Element | ComponentPublicInstance | null) {
       :height="draft.bbox.height"
     />
     <g
-      v-for="ball in analysis.ballCandidates"
+      v-for="ball in overlayOptions.ballBoxes ? analysis.ballCandidates : []"
       :key="ball.id"
       class="frame-ball-candidate"
       :class="{ primary: ball.primary }"

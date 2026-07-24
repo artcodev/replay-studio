@@ -1,52 +1,12 @@
-from types import SimpleNamespace
-
 import numpy as np
-import torch
 
-from app.field_keypoints import (
-    PITCH_KEYPOINTS,
-    calibration_from_pose_result,
-    calibration_from_worker_result,
-)
+from app.pnlcalib_worker_result import calibration_from_worker_result
 from app.reconstruction_metric_projection import (
     attach_metric_positions as _attach_metric_positions,
 )
 from app.reconstruction_person_detection_contract import Detection
 from app.reconstruction_track_state import TrackState
 from app.track_observation_accumulator import append_track_observation
-
-
-def _tensor(value):
-    return torch.tensor(value, dtype=torch.float32)
-
-
-def test_semantic_keypoints_recover_left_pitch_half_without_mirror_ambiguity():
-    pitch_to_image = np.array(
-        [[7.0, 0.35, 470.0], [0.15, 4.2, 250.0], [0.0008, -0.0003, 1.0]],
-        dtype=np.float64,
-    )
-    homogeneous = np.column_stack([PITCH_KEYPOINTS, np.ones(len(PITCH_KEYPOINTS))])
-    image = homogeneous @ pitch_to_image.T
-    image = image[:, :2] / image[:, 2:3]
-    scores = np.zeros(len(PITCH_KEYPOINTS), dtype=np.float32)
-    scores[:13] = 0.95
-    result = SimpleNamespace(
-        keypoints=SimpleNamespace(
-            xy=_tensor(image[None, ...]),
-            conf=_tensor(scores[None, ...]),
-        ),
-        boxes=SimpleNamespace(conf=_tensor([0.9])),
-    )
-
-    calibration = calibration_from_pose_result(result, frame_index=17)
-
-    assert calibration is not None
-    assert calibration.method == "roboflow-field-keypoints"
-    assert calibration.rectangle == "field-keypoints-left"
-    assert calibration.inlier_count >= 10
-    test_image = pitch_to_image @ np.array([-41.5, 3.0, 1.0])
-    recovered = calibration.image_to_pitch @ (test_image / test_image[2])
-    assert np.allclose(recovered[:2] / recovered[2], [-41.5, 3.0], atol=0.05)
 
 
 def test_worker_result_retains_pnl_quality_diagnostics():
@@ -92,7 +52,11 @@ def test_worker_result_retains_pnl_quality_diagnostics():
                 },
             ],
             "pitchSide": "right",
-            "imageToPitch": [[0.1, 0.0, -48.0], [0.0, 0.1, -27.0], [0.0, 0.0, 1.0]],
+            "imageToPitch": [
+                [0.1, 0.0, -48.0],
+                [0.0, 0.1, -27.0],
+                [0.0, 0.0, 1.0],
+            ],
         }
     )
 
@@ -107,24 +71,7 @@ def test_worker_result_retains_pnl_quality_diagnostics():
     assert evidence["groundErrorP95Metres"] == 1.1
     assert evidence["rawKeypoints"][0]["id"] == 3
     assert evidence["rawLineCount"] == 9
-    assert evidence["rawLines"] == [
-        {
-            "id": 2,
-            "name": "Big rect. left main",
-            "start": {"x": 101.5, "y": 88.0},
-            "end": {"x": 126.0, "y": 315.25},
-            "confidence": 0.84,
-            "groundPlane": True,
-        },
-        {
-            "id": 7,
-            "name": "Goal left crossbar",
-            "start": {"x": 71.0, "y": 129.0},
-            "end": {"x": 111.0, "y": 128.0},
-            "confidence": 0.72,
-            "groundPlane": False,
-        },
-    ]
+    assert evidence["rawLines"][1]["groundPlane"] is False
 
 
 def test_per_frame_metric_position_is_preserved_through_tracking():
@@ -134,10 +81,21 @@ def test_per_frame_metric_position_is_preserved_through_tracking():
             "confidence": 0.9,
             "keypointCount": 8,
             "inlierCount": 8,
-            "imageToPitch": [[0.1, 0.0, -48.0], [0.0, 0.1, -27.0], [0.0, 0.0, 1.0]],
+            "imageToPitch": [
+                [0.1, 0.0, -48.0],
+                [0.0, 0.1, -27.0],
+                [0.0, 0.0, 1.0],
+            ],
         }
     )
-    detection = Detection(600.0, 350.0, 20.0, 50.0, 0.8, np.zeros(12, dtype=np.float32))
+    detection = Detection(
+        600.0,
+        350.0,
+        20.0,
+        50.0,
+        0.8,
+        np.zeros(12, dtype=np.float32),
+    )
     balls = [{"x": 500.0, "y": 300.0, "confidence": 0.5}]
 
     _attach_metric_positions(

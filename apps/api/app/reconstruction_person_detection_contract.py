@@ -26,6 +26,11 @@ class Detection:
     position_uncertainty_metres: float | None = None
     association_cost: float | None = None
     association_margin: float | None = None
+    association_diagnostics: dict | None = None
+    tracking_decision: str | None = None
+    metric_projection_reason: str | None = None
+    raw_pitch_x: float | None = None
+    raw_pitch_z: float | None = None
     # The tracker later moves x/y into stabilized camera coordinates. Preserve
     # the detector-space foot point and frame for published observations.
     source_frame_index: int | None = None
@@ -40,6 +45,12 @@ class Detection:
     crop_sha256: str | None = None
     crop_quality: dict | None = None
     crop_rejection_reasons: tuple[str, ...] = ()
+    # Optional pose-derived ground contact point in frozen detector space.
+    # When absent, metric projection uses the bbox bottom-centre (x, y).
+    contact_image_x: float | None = None
+    contact_image_y: float | None = None
+    contact_source: str | None = None
+    contact_score: float | None = None
     reid_evidence_fingerprint: str | None = None
     reid_role: str | None = None
     reid_role_confidence: float | None = None
@@ -53,4 +64,3 @@ class Detection:
     # A roster unbind anchors canonical remapping but is not positive identity
     # evidence merely because it is stored as a confirm-shaped correction.
     annotation_is_identity_evidence: bool = True
-

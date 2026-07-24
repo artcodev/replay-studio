@@ -229,3 +229,31 @@ def test_scene_without_run_fingerprint_has_no_implicit_input_state() -> None:
 
     Base.metadata.drop_all(engine)
     engine.dispose()
+
+
+def test_current_calibration_inputs_do_not_claim_a_current_reconstruction():
+    scene = make_video_scene(
+        scene_id="calibration-only-state",
+        title="Calibration",
+        duration=1.0,
+        video_asset={
+            "id": "asset-calibration-only",
+            "filename": "source.mp4",
+            "fps": 25.0,
+            "analysisFps": 25.0,
+            "reconstruction": {
+                "status": "ready",
+                "stage": "calibration",
+                "model": "yolo26m.pt",
+            },
+        },
+    )
+    reconstruction = scene["payload"]["videoAsset"]["reconstruction"]
+    reconstruction["inputFingerprint"] = reconstruction_input_fingerprint(
+        scene
+    )
+
+    annotate_reconstruction_input_state(scene, None)
+
+    assert reconstruction["inputState"] == "current"
+    assert reconstruction["resultState"] == "calibration-only"

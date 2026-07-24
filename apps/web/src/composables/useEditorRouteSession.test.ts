@@ -150,7 +150,11 @@ describe('editor route session scene ownership', () => {
         return document
       }),
       refresh: vi.fn(),
-      save: vi.fn(),
+      saveTitle: vi.fn(),
+      saveEventBindings: vi.fn(),
+      saveTrackMetadata: vi.fn(),
+      saveTrackTrajectory: vi.fn(),
+      saveSegmentLayout: vi.fn(),
       cancelPendingLoad: vi.fn(),
     } satisfies ReturnType<typeof useSceneSession>
     const workspace = {
@@ -271,7 +275,11 @@ describe('editor route session scene ownership', () => {
         return document
       }),
       refresh: vi.fn(),
-      save: vi.fn(),
+      saveTitle: vi.fn(),
+      saveEventBindings: vi.fn(),
+      saveTrackMetadata: vi.fn(),
+      saveTrackTrajectory: vi.fn(),
+      saveSegmentLayout: vi.fn(),
       cancelPendingLoad: vi.fn(),
     } satisfies ReturnType<typeof useSceneSession>
     const workspace = {

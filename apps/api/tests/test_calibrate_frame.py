@@ -5,10 +5,15 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-import app.reconstruction_calibration_detection as calibration_detection
 from app.pitch_calibration_contract import CalibrationAlignmentMetrics, PitchCalibration
-from app.reconstruction import _reconstruct_scene_in_memory
-from app.reconstruction_calibration_apply import apply_scene_pitch_calibration
+from app.reconstruction import (
+    _calibrate_scene_in_memory,
+    _reconstruct_scene_in_memory,
+)
+from app.reconstruction_calibration_edit_command import (
+    build_manual_calibration_override,
+)
+from app.reconstruction_calibration_snapshot import calibration_artifact_input
 from app.reconstruction_calibration_overrides import (
     manual_pitch_calibration_overrides as _manual_pitch_calibration_overrides,
 )
@@ -33,6 +38,8 @@ def _scene() -> dict:
             "ball": {"keyframes": []},
             "videoAsset": {
                 "id": "asset-1",
+                "fps": 10.0,
+                "analysisFps": 10.0,
                 "sourceStart": 10.0,
                 "selectedSegmentId": "segment-1",
                 "reconstruction": {"status": "ready", "qualityVerdict": "review"},
@@ -100,8 +107,8 @@ def _patch_frame(monkeypatch, image: np.ndarray, frame_index: int = 123) -> Path
         lambda _: [(path, 0.0)],
     )
     monkeypatch.setattr(
-        "app.reconstruction_calibration_proposal.calibration_frame_context",
-        lambda *_: (0, 0.0, image, np.eye(3, dtype=np.float64)),
+        "app.reconstruction_calibration_proposal.sampled_frame_context",
+        lambda *_: (0, 0.0, image),
     )
     monkeypatch.setattr(
         "app.reconstruction_calibration_draft.calibration_alignment_metrics",
@@ -132,12 +139,6 @@ def test_auto_calibration_is_ephemeral_and_never_bumps_the_scene_revision(
         automatic,
     )
     monkeypatch.setattr(
-        "app.reconstruction_calibration_proposal.calibrate_pitch",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(
-            AssertionError("line fallback must not run after an accepted keypoint fit")
-        ),
-    )
-    monkeypatch.setattr(
         "app.scene_repository.scenes.put",
         lambda value: (_ for _ in ()).throw(
             AssertionError("a calibration preview must not persist the scene")
@@ -164,7 +165,7 @@ def test_auto_calibration_is_ephemeral_and_never_bumps_the_scene_revision(
     assert scene == before
 
 
-def test_auto_calibration_line_fallback_is_downscaled_bounded_and_lifted(monkeypatch):
+def test_auto_calibration_without_pnl_solution_opens_explicit_manual_seed(monkeypatch):
     scene = _scene()
     image = np.zeros((540, 960, 3), dtype=np.uint8)
     _patch_frame(monkeypatch, image)
@@ -172,117 +173,73 @@ def test_auto_calibration_line_fallback_is_downscaled_bounded_and_lifted(monkeyp
         "app.reconstruction_calibration_proposal.automatic_frame_calibrations",
         lambda *_args, **_kwargs: ({}, []),
     )
-    call = {}
-
-    def line_fallback(input_image, **kwargs):
-        call.update({"shape": input_image.shape, **kwargs})
-        kwargs["diagnostics"].update(
-            {
-                "budgetExhausted": True,
-                "deadlineExceeded": False,
-                "candidateLimitReached": True,
-            }
-        )
-        return PitchCalibration(
-            image_to_pitch=np.eye(3, dtype=np.float64),
-            confidence=0.9,
-            supported_lines=4,
-            mean_line_score=0.8,
-            rectangle="penalty-area-right",
-            matched_curves=1,
-            method="pitch-lines-ransac",
-        )
-
     monkeypatch.setattr(
-        "app.reconstruction_calibration_proposal.calibrate_pitch", line_fallback
+        "app.reconstruction_pnlcalib_retry.recalibrate_frames_with_worker",
+        lambda *_args, **_kwargs: {},
     )
-
     draft = propose_scene_pitch_calibration(scene, 0.0)
 
-    assert call["shape"][1] == 640
-    assert call["max_quad_candidates"] == 240
-    assert call["deadline"] is not None
-    assert draft["backend"] == "pitch-lines-ransac"
-    assert draft["status"] == "accepted"
-    assert np.isclose(abs(draft["imageToPitch"][0][0]), 2 / 3)
-    assert draft["evidence"]["backendDiagnostics"]["budgetExhausted"] is True
-    assert any("candidate search limit" in warning for warning in draft["warnings"])
-    assert not any("five-second deadline" in warning for warning in draft["warnings"])
+    assert draft["source"] == "manual-seed"
+    assert draft["backend"] is None
+    assert len(draft["attempts"]) == 3
+    assert all(item["status"] == "missing" for item in draft["attempts"])
+    assert any("No automatic fallback was used" in warning for warning in draft["warnings"])
 
 
-def test_rejected_line_fallback_does_not_mask_semantic_keypoints(monkeypatch):
+def test_rejected_pnl_candidate_gets_two_fresh_attempts_without_fallback(monkeypatch):
     scene = _scene()
     image = np.zeros((540, 960, 3), dtype=np.uint8)
     _patch_frame(monkeypatch, image)
-    semantic = PitchCalibration(
+    pnl = PitchCalibration(
         **{
             **_keypoint_calibration().__dict__,
             "confidence": 0.70,
-            "method": "roboflow-field-keypoints",
+            "method": "pnlcalib-points-lines",
         }
-    )
-    line = PitchCalibration(
-        image_to_pitch=np.eye(3, dtype=np.float64),
-        confidence=0.74,
-        supported_lines=4,
-        mean_line_score=0.9,
-        rectangle="penalty-area-right",
-        matched_curves=1,
-        method="pitch-lines-ransac",
     )
     monkeypatch.setattr(
         "app.reconstruction_calibration_proposal.automatic_frame_calibrations",
-        lambda *_args, **_kwargs: ({123: semantic}, []),
+        lambda *_args, **_kwargs: ({123: pnl}, []),
     )
     monkeypatch.setattr(
-        "app.reconstruction_calibration_proposal.calibrate_pitch",
-        lambda *_args, **_kwargs: line,
+        "app.reconstruction_pnlcalib_retry.recalibrate_frames_with_worker",
+        lambda *_args, **_kwargs: ({123: pnl}),
     )
 
     draft = propose_scene_pitch_calibration(scene, 0.0)
 
     assert draft["status"] == "rejected"
-    assert draft["backend"] == "roboflow-field-keypoints"
+    assert draft["backend"] == "pnlcalib-points-lines"
     assert [item["backend"] for item in draft["attempts"]] == [
-        "roboflow-field-keypoints",
-        "pitch-lines-ransac",
+        "pnlcalib-points-lines",
+        "pnlcalib-points-lines",
+        "pnlcalib-points-lines",
     ]
 
 
-def test_local_keypoint_inference_uses_checkpoint_native_size(monkeypatch, tmp_path):
-    model_path = tmp_path / "pitch.pt"
-    model_path.write_bytes(b"checkpoint")
-    frame_path = tmp_path / "frame_00123.jpg"
-    frame_path.write_bytes(b"frame")
-    calls = []
-
-    class FakePoseModel:
-        overrides = {"imgsz": 640}
-
-        def predict(self, sources, **kwargs):
-            calls.append((sources, kwargs))
-            return [object()]
-
-    settings = SimpleNamespace(
-        pitch_keypoint_model=str(model_path),
-        pitch_keypoint_image_size=None,
-        reconstruction_device="cpu",
+def test_rejected_pnl_candidate_can_pass_on_a_fresh_retry(monkeypatch):
+    scene = _scene()
+    image = np.zeros((540, 960, 3), dtype=np.uint8)
+    _patch_frame(monkeypatch, image)
+    rejected = PitchCalibration(
+        **{**_keypoint_calibration().__dict__, "confidence": 0.70}
+    )
+    accepted = _keypoint_calibration()
+    monkeypatch.setattr(
+        "app.reconstruction_calibration_proposal.automatic_frame_calibrations",
+        lambda *_args, **_kwargs: ({123: rejected}, []),
     )
     monkeypatch.setattr(
-        "app.reconstruction_calibration_detection.get_settings", lambda: settings
-    )
-    monkeypatch.setattr(
-        "app.reconstruction_calibration_detection.load_model", lambda *_: FakePoseModel()
-    )
-    monkeypatch.setattr(
-        "app.reconstruction_calibration_detection.calibration_from_pose_result",
-        lambda _prediction, source_index: _keypoint_calibration(source_index),
+        "app.reconstruction_pnlcalib_retry.recalibrate_frames_with_worker",
+        lambda *_args, **_kwargs: ({123: accepted}),
     )
 
-    result = calibration_detection.local_frame_calibrations([(frame_path, 0.0)])
+    draft = propose_scene_pitch_calibration(scene, 0.0)
 
-    assert result[123].frame_index == 123
-    assert calls[0][1]["imgsz"] == 640
+    assert draft["status"] == "accepted"
+    assert len(draft["attempts"]) == 2
+    assert draft["attempts"][1]["selected"] is True
+    assert any("attempt 2/3" in warning for warning in draft["warnings"])
 
 
 def test_apply_calibration_upserts_authoritative_manual_frame_collection(monkeypatch):
@@ -324,26 +281,21 @@ def test_apply_calibration_upserts_authoritative_manual_frame_collection(monkeyp
         (Path("/tmp/frame_00105.jpg"), 0.4),
     ]
     monkeypatch.setattr(
-        "app.reconstruction_calibration_apply.preview_scene_pitch_calibration",
+        "app.reconstruction_calibration_edit_command.preview_scene_pitch_calibration",
         lambda *_: draft,
     )
     monkeypatch.setattr(
-        "app.reconstruction_calibration_apply.frame_paths", lambda _: frames
+        "app.reconstruction_calibration_edit_command.frame_paths", lambda _: frames
     )
     monkeypatch.setattr(
-        "app.reconstruction_calibration_apply.calibration_frame_context",
+        "app.reconstruction_calibration_edit_command.calibration_frame_context",
         lambda *_: (1, 0.2, np.zeros((540, 960, 3), dtype=np.uint8), np.eye(3)),
     )
     monkeypatch.setattr(
-        "app.reconstruction_calibration_apply.scenes.put",
+        "app.reconstruction_calibration_edit_command.scenes.put",
         lambda value: value,
     )
-    monkeypatch.setattr(
-        "app.reconstruction_calibration_apply.queue_reconstruction",
-        lambda value, **_kwargs: value,
-    )
-
-    apply_scene_pitch_calibration(scene, 0.2, "center-circle", anchors)
+    build_manual_calibration_override(scene, 0.2, "center-circle", anchors)
     first_new = reconstruction["pitchCalibrationOverrides"][-1]
 
     assert [item["sourceFrameIndex"] for item in reconstruction["pitchCalibrationOverrides"]] == [
@@ -356,7 +308,7 @@ def test_apply_calibration_upserts_authoritative_manual_frame_collection(monkeyp
 
     draft["sceneTime"] = 0.4
     draft["frameIndex"] = 3
-    apply_scene_pitch_calibration(scene, 0.4, "center-circle", anchors)
+    build_manual_calibration_override(scene, 0.4, "center-circle", anchors)
 
     assert [item["sourceFrameIndex"] for item in reconstruction["pitchCalibrationOverrides"]] == [
         101,
@@ -365,13 +317,121 @@ def test_apply_calibration_upserts_authoritative_manual_frame_collection(monkeyp
     ]
 
     draft["confidence"] = 0.96
-    apply_scene_pitch_calibration(scene, 0.4, "center-circle", anchors)
+    build_manual_calibration_override(scene, 0.4, "center-circle", anchors)
 
     assert len(reconstruction["pitchCalibrationOverrides"]) == 3
     assert reconstruction["pitchCalibrationOverrides"][-1]["confidence"] == 0.96
 
 
-def test_rebuild_still_runs_automatic_calibration_when_manual_anchors_exist(monkeypatch):
+def test_build_manual_correction_does_not_queue_or_change_stage(monkeypatch):
+    anchors = [
+        {
+            "id": str(index),
+            "label": str(index),
+            "image": {"x": float(index), "y": float(index)},
+            "pitch": {"x": float(index), "z": float(index)},
+        }
+        for index in range(4)
+    ]
+    draft = {
+        "sceneTime": 0.2,
+        "frameIndex": 2,
+        "confidence": 0.91,
+        "alignmentError": 3.2,
+        "alignmentMetrics": _alignment().as_dict(),
+        "horizon": None,
+        "quality": "good",
+        "preset": "center-circle",
+        "anchors": anchors,
+        "imageToPitch": [[0.1, 0.0, -48.0], [0.0, 0.1, -27.0], [0.0, 0.0, 1.0]],
+    }
+    monkeypatch.setattr(
+        "app.reconstruction_calibration_edit_command.preview_scene_pitch_calibration",
+        lambda *_: draft,
+    )
+    monkeypatch.setattr(
+        "app.reconstruction_calibration_edit_command.frame_paths",
+        lambda _: [(Path("/tmp/frame_00103.jpg"), 0.2)],
+    )
+    monkeypatch.setattr(
+        "app.reconstruction_calibration_edit_command.calibration_frame_context",
+        lambda *_: (1, 0.2, np.zeros((540, 960, 3), dtype=np.uint8), np.eye(3)),
+    )
+    gated = _scene()
+    gated["payload"]["videoAsset"]["reconstruction"]["stage"] = "calibration"
+    original_run = gated["payload"]["videoAsset"]["reconstruction"].get("runId")
+    build_manual_calibration_override(gated, 0.2, "center-circle", anchors)
+
+    reconstruction = gated["payload"]["videoAsset"]["reconstruction"]
+    assert reconstruction["stage"] == "calibration"
+    assert reconstruction.get("runId") == original_run
+    assert len(reconstruction["pitchCalibrationOverrides"]) == 1
+
+
+def test_poor_manual_alignment_requires_explicit_operator_consent(monkeypatch):
+    anchors = [
+        {
+            "id": str(index),
+            "label": str(index),
+            "image": {"x": float(index), "y": float(index)},
+            "pitch": {"x": float(index), "z": float(index)},
+        }
+        for index in range(4)
+    ]
+    draft = {
+        "sceneTime": 0.2,
+        "frameIndex": 1,
+        "confidence": 0.55,
+        "alignmentError": 12.0,
+        "alignmentMetrics": {
+            **_alignment().as_dict(),
+            "recall": 0.15,
+            "f1": 0.25,
+        },
+        "horizon": None,
+        "quality": "poor",
+        "preset": "center-circle",
+        "anchors": anchors,
+        "imageToPitch": [
+            [0.1, 0.0, -48.0],
+            [0.0, 0.1, -27.0],
+            [0.0, 0.0, 1.0],
+        ],
+    }
+    monkeypatch.setattr(
+        "app.reconstruction_calibration_edit_command.preview_scene_pitch_calibration",
+        lambda *_: draft,
+    )
+    monkeypatch.setattr(
+        "app.reconstruction_calibration_edit_command.frame_paths",
+        lambda _: [(Path("/tmp/frame_00103.jpg"), 0.2)],
+    )
+    scene = _scene()
+
+    with pytest.raises(ReconstructionError, match="explicitly save it"):
+        build_manual_calibration_override(
+            scene,
+            0.2,
+            "center-circle",
+            anchors,
+            camera_transform=np.eye(3),
+        )
+
+    override, _ = build_manual_calibration_override(
+        scene,
+        0.2,
+        "center-circle",
+        anchors,
+        camera_transform=np.eye(3),
+        accept_quality_warning=True,
+    )
+
+    assert override["status"] == "review"
+    assert override["validationStatus"] == "poor"
+    assert override["qualityWarningAccepted"] is True
+
+
+def test_full_reconstruction_never_runs_automatic_calibration(monkeypatch):
     scene = _scene()
     scene["payload"]["videoAsset"]["reconstruction"]["pitchCalibrationOverrides"] = [{
         "method": "manual-pitch-anchors",
@@ -403,12 +463,31 @@ def test_rebuild_still_runs_automatic_calibration_when_manual_anchors_exist(monk
     )
     monkeypatch.setattr(
         "app.reconstruction_sampled_detection_preparation.load_model",
-        lambda *_: (_ for _ in ()).throw(ReconstructionError("stop after calibration")),
+        lambda *_: pytest.fail("detector must not load without calibration input"),
     )
-    with pytest.raises(ReconstructionError, match="stop after calibration"):
+    with pytest.raises(ReconstructionError, match="Calibration output is missing"):
         _reconstruct_scene_in_memory(scene)
 
-    assert automatic_calls == [[(frame, 0.0)]]
+    assert automatic_calls == []
+
+
+def test_full_process_entry_rejects_a_calibration_job_before_work_starts(
+    monkeypatch,
+):
+    scene = _scene()
+    scene["payload"]["videoAsset"]["reconstruction"]["mode"] = "calibrate"
+    monkeypatch.setattr(
+        "app.reconstruction._calibrate_only_phase",
+        lambda *_args, **_kwargs: pytest.fail(
+            "the full process must not reach calibration"
+        ),
+    )
+
+    with pytest.raises(
+        ReconstructionError,
+        match="full process cannot execute a calibrate job",
+    ):
+        _reconstruct_scene_in_memory(scene)
 
 
 def test_skip_profile_run_never_calls_the_ball_detector_and_keeps_manual_ball(
@@ -453,16 +532,25 @@ def test_skip_profile_run_never_calls_the_ball_detector_and_keeps_manual_ball(
         "app.reconstruction_sampled_calibration.automatic_frame_calibrations",
         lambda *_args, **_kwargs: ({123: _keypoint_calibration()}, []),
     )
+    monkeypatch.setattr("app.reconstruction_calibration_only_phase.cv2.imread", lambda *_: image)
     monkeypatch.setattr(
         "app.reconstruction_sampled_detection_preparation.load_model",
         lambda *_: object(),
     )
-    monkeypatch.setattr(
-        "app.ultralytics_person_inference.predict_frame",
-        lambda *_: SimpleNamespace(orig_img=image),
+    person_prediction = SimpleNamespace(
+        image_bgr=image,
+        names={},
+        diagnostics={},
     )
     monkeypatch.setattr(
-        "app.ultralytics_person_inference.parse_person_detections",
+        "app.reconstruction_sampled_detection_preparation.build_person_detection_provider",
+        lambda *_: SimpleNamespace(
+            predict=lambda _path: person_prediction,
+            info=lambda: {},
+        ),
+    )
+    monkeypatch.setattr(
+        "app.person_base_detection_cache.parse_person_prediction",
         lambda *_: ([], []),
     )
     monkeypatch.setattr(
@@ -489,6 +577,24 @@ def test_skip_profile_run_never_calls_the_ball_detector_and_keeps_manual_ball(
     from app.reconstruction_run_log import ReconstructionRunLog
     from app.scene_document import reconstruction_input_fingerprint
 
+    reconstruction = scene["payload"]["videoAsset"]["reconstruction"]
+    reconstruction["mode"] = "calibrate"
+    reconstruction["runId"] = "calibration-run-a"
+    _calibrate_scene_in_memory(scene, artifact_store=artifact_store)
+    hydrate_scene_reconstruction(scene, store=artifact_store)
+    reconstruction = scene["payload"]["videoAsset"]["reconstruction"]
+    reconstruction["calibrationArtifactInput"] = calibration_artifact_input(
+        reconstruction
+    )
+    reconstruction["mode"] = "full"
+    reconstruction["stage"] = "reconstruction"
+    reconstruction["trackingCoordinatePolicy"] = "metric-required"
+    monkeypatch.setattr(
+        "app.reconstruction_sampled_calibration.automatic_frame_calibrations",
+        lambda *_args, **_kwargs: pytest.fail(
+            "full reconstruction must not call calibration inference"
+        ),
+    )
     fingerprint_before = reconstruction_input_fingerprint(scene)
     run_log = ReconstructionRunLog(
         tmp_path / "analysis-runs", scene_id="shot-calibrate-frame", run_id="run-a"
@@ -511,11 +617,42 @@ def test_skip_profile_run_never_calls_the_ball_detector_and_keeps_manual_ball(
         item["phase"] for item in journal if item["event"] == "phase-finished"
     ]
     assert finished_phases == [
-        "detection-calibration",
+        "detection",
         "identity",
         "ball",
         "publish",
     ]
+    run_inputs = next(item for item in journal if item["event"] == "run-inputs")
+    assert run_inputs["reconstructionMode"] == "full"
+    assert run_inputs["calibrationAuthority"] == "consumer-only"
+    assert run_inputs["calibrationComputation"] == "forbidden"
+    assert run_inputs["calibrationArtifactInput"]["producerRunId"] == (
+        reconstruction["calibrationProvenance"]["runId"]
+    )
+    used = next(
+        item for item in journal if item["event"] == "calibration-input-used"
+    )
+    assert used["dataFingerprint"] == reconstruction[
+        "calibrationProvenance"
+    ]["dataFingerprint"]
+    assert used["artifactSha256"]
+    assert used["usedFor"] == [
+        "person-metric-projection",
+        "tracking-association",
+        "ball-world-projection",
+        "3d-trajectory-publication",
+    ]
+    assert used["sampleUsage"][0]["sourceFrameIndex"] == 123
+    assert used["sampleUsage"][0]["imageToPitchFingerprint"].startswith(
+        "sha256:"
+    )
+    assert used["sampleUsage"][0]["cameraTransformFingerprint"].startswith(
+        "sha256:"
+    )
+    assert any(
+        item["event"] == "calibration-tracking-impact" for item in journal
+    )
+    assert any(item["event"] == "calibration-ball-impact" for item in journal)
     assert any(item["event"] == "progress" for item in journal)
 
     reconstruction = rebuilt["payload"]["videoAsset"]["reconstruction"]
@@ -523,6 +660,9 @@ def test_skip_profile_run_never_calls_the_ball_detector_and_keeps_manual_ball(
     assert reconstruction["ballDetectionProfile"] == "skip-manual-authoritative"
     assert reconstruction["ballDetection"]["status"] == "skipped"
     assert reconstruction["diagnostics"]["ballTracking"]["skippedByProfile"] is True
+    assert reconstruction["diagnostics"]["calibrationUsage"][
+        "dataFingerprint"
+    ] == used["dataFingerprint"]
     hydrate_scene_reconstruction(
         rebuilt,
         names=("ballTrajectory",),
@@ -533,16 +673,17 @@ def test_skip_profile_run_never_calls_the_ball_detector_and_keeps_manual_ball(
     assert [
         {key: item[key] for key in ("t", "x", "z")} for item in ball["keyframes"]
     ] == manual_keyframes
-    # The stale automatic channel is preserved untouched, never overwritten
-    # with an empty recompute that did not happen.
-    assert ball["automaticKeyframes"] == previous_automatic
+    # Publishing a newer calibration invalidates the previous automatic
+    # trajectory. The skip profile preserves the manual source of truth, but
+    # must not resurrect automatic samples computed from an older camera.
+    assert ball["automaticKeyframes"] == []
     assert any(
         "skipped by the analysis profile" in warning
         for warning in reconstruction["warnings"]
     )
 
 
-def test_rebuild_uses_accepted_auto_when_same_sample_manual_is_rejected(
+def test_calibration_process_uses_operator_override_on_the_same_sample(
     monkeypatch, tmp_path
 ):
     scene = _scene()
@@ -552,8 +693,7 @@ def test_rebuild_uses_accepted_auto_when_same_sample_manual_is_rejected(
         "sceneTime": 0.0,
         "sampleIndex": 0,
         "sourceFrameIndex": 123,
-        # Deliberately below the metric gate. This observation must remain
-        # auditable, but must not hide a healthy automatic observation.
+        # This is an explicit operator correction for this exact frame.
         "confidence": 0.25,
         "supportedLines": 4,
         "preset": "center-circle",
@@ -575,18 +715,7 @@ def test_rebuild_uses_accepted_auto_when_same_sample_manual_is_rejected(
         "app.reconstruction_sampled_calibration.automatic_frame_calibrations",
         lambda *_args, **_kwargs: ({123: automatic}, []),
     )
-    monkeypatch.setattr(
-        "app.reconstruction_sampled_detection_preparation.load_model",
-        lambda *_: object(),
-    )
-    monkeypatch.setattr(
-        "app.ultralytics_person_inference.predict_frame",
-        lambda *_: SimpleNamespace(orig_img=image),
-    )
-    monkeypatch.setattr(
-        "app.ultralytics_person_inference.parse_person_detections",
-        lambda *_: ([], []),
-    )
+    monkeypatch.setattr("app.reconstruction_calibration_only_phase.cv2.imread", lambda *_: image)
     monkeypatch.setattr(
         "app.reconstruction_frame_calibration_quality.calibration_alignment_metrics",
         lambda *_: _alignment(),
@@ -626,16 +755,17 @@ def test_rebuild_uses_accepted_auto_when_same_sample_manual_is_rejected(
     )
 
     artifact_store = FilesystemArtifactStore(tmp_path / "artifacts")
-    rebuilt = _reconstruct_scene_in_memory(
+    scene["payload"]["videoAsset"]["reconstruction"]["mode"] = "calibrate"
+    rebuilt = _calibrate_scene_in_memory(
         scene,
         artifact_store=artifact_store,
     )
 
-    assert captured_direct[0].method == "pnlcalib-points-lines"
+    assert captured_direct[0].method == "manual-pitch-anchors"
     reconstruction = rebuilt["payload"]["videoAsset"]["reconstruction"]
     assert reconstruction["artifactManifest"]["schemaVersion"] == 1
     assert "calibrationFrames" not in reconstruction
-    assert "identityResolver" not in reconstruction["diagnostics"]
+    assert "identityResolver" not in (reconstruction.get("diagnostics") or {})
     hydrate_scene_reconstruction(
         rebuilt,
         names=("calibrationFrames",),
@@ -643,24 +773,31 @@ def test_rebuild_uses_accepted_auto_when_same_sample_manual_is_rejected(
     )
     evidence = reconstruction["calibration"]["frameEvidence"][0]
     assert evidence["status"] == "accepted"
-    assert evidence["projectionSource"] == "direct"
-    assert evidence["backend"] == "pnlcalib-points-lines"
+    assert evidence["projectionSource"] == "manual-direct"
+    assert evidence["backend"] == "manual-pitch-anchors"
     assert evidence["automaticObservation"]["status"] == "accepted"
-    assert evidence["manualObservation"]["status"] == "rejected"
+    # The automatic candidate stays inspectable, but the saved operator edit
+    # is the only selected observation for this frame.
+    assert evidence["manualObservation"]["status"] == "accepted"
     assert [item["kind"] for item in evidence["observations"]] == [
         "manual",
         "automatic",
     ]
     assert "directAttempts" not in evidence
-    assert "confidence-below-metric-threshold" in evidence["manualObservation"][
+    assert "confidence-below-metric-threshold" not in evidence["manualObservation"][
         "rejectionReasons"
     ]
+    assert evidence["observationChoice"] == {
+        "selectedKind": "manual",
+        "reason": "operator-frame-override",
+        "automaticCandidateStatus": "accepted",
+    }
     assert reconstruction["calibration"]["manualFrameAnchors"] == [
         {
             "id": "manual-frame-123",
             "sampleIndex": 0,
             "sourceFrameIndex": 123,
             "sceneTime": 0.0,
-            "status": "rejected",
+            "status": "accepted",
         }
     ]

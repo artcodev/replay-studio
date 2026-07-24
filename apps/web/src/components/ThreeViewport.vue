@@ -4,6 +4,7 @@ import type { FrameAnalysis } from '../types/analysis'
 import type { SceneDocument } from '../types/scene'
 import type { PlayerActionPlaybackState } from '../lib/playerActions'
 import { renderQualityProfile, type RenderQuality } from '../lib/renderQuality'
+import type { InferredPositionRenderMode } from '../lib/threeViewOptions'
 import { AnalysisMarkerLayer } from '../features/three-viewport/analysisMarkerLayer'
 import { BallLayer } from '../features/three-viewport/ballLayer'
 import { PitchLayer } from '../features/three-viewport/pitchLayer'
@@ -39,6 +40,7 @@ const props = withDefaults(defineProps<{
   activePlayerAction?: PlayerActionPlaybackState | null
   frameAnalysis: FrameAnalysis | null
   renderQuality?: RenderQuality
+  inferredPositions?: InferredPositionRenderMode
 }>(), {
   showModels: true,
   showBall: true,
@@ -50,6 +52,7 @@ const props = withDefaults(defineProps<{
   ballEditMode: false,
   selectedBallKeyframeTime: null,
   renderQuality: 'basic',
+  inferredPositions: 'transparent',
 })
 
 const emit = defineEmits<{
@@ -102,7 +105,12 @@ function rebuildAllPaths() {
 function updateObjects() {
   const tracks = props.scene.payload.tracks
   const ballFrames = props.scene.payload.ball.keyframes
-  playerLayer?.update(tracks, props.currentTime, props.scene.duration)
+  playerLayer?.update(
+    tracks,
+    props.currentTime,
+    props.scene.duration,
+    props.inferredPositions,
+  )
   selectedPathLayer?.update(selectedPathSource.value, props.showPathTracking, props.currentTime)
   ballLayer?.update(
     ballFrames,

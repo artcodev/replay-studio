@@ -28,6 +28,7 @@ from .identity_worker_contract import (
 )
 from .identity_worker_model_contract import (
     project_model_contract,
+    project_runtime_contract,
     validate_readiness_payload,
 )
 from .identity_worker_transport import (
@@ -81,6 +82,8 @@ def identity_worker_readiness(*, timeout: float = 2.0) -> dict:
         "evidenceFingerprintVersion": value["evidenceFingerprintVersion"],
         "modelLoadSeconds": value.get("modelLoadSeconds"),
         "soccerNetCommit": value.get("soccerNetCommit"),
+        "torchVersion": value.get("torchVersion"),
+        "mpsFallbackEnabled": value.get("mpsFallbackEnabled", False),
     }
 
 
@@ -203,6 +206,11 @@ def _merge_diagnostics(target: dict, values: dict) -> None:
     for field, value in values.items():
         if field == "cache":
             target[field] = value
+        elif field.endswith("Seconds"):
+            target[field] = round(
+                float(target.get(field, 0.0)) + float(value),
+                6,
+            )
         else:
             target[field] = int(target.get(field, 0)) + int(value)
 
@@ -369,6 +377,10 @@ def embed_identity_frames(
                 payload,
                 sent_ids,
             )
+            if "workerRuntime" not in result.diagnostics:
+                result.diagnostics["workerRuntime"] = project_runtime_contract(
+                    payload
+                )
             if accepted_model_contract is None:
                 accepted_model_contract = batch_contract
                 result.diagnostics["modelContract"] = dict(batch_contract)

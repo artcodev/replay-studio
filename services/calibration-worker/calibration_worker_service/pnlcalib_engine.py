@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import OrderedDict
+import platform
 from threading import Lock
 from time import monotonic, perf_counter
 
@@ -48,6 +49,19 @@ class PnLCalibEngine:
         return self._model_load_seconds
 
     def calibrate(self, frames: list[DecodedFrame]) -> CalibrationBatchResult:
+        return self._calibrate(frames, read_cache=True)
+
+    def recalibrate(self, frames: list[DecodedFrame]) -> CalibrationBatchResult:
+        """Run fresh inference and replace cached results for these frames."""
+
+        return self._calibrate(frames, read_cache=False)
+
+    def _calibrate(
+        self,
+        frames: list[DecodedFrame],
+        *,
+        read_cache: bool,
+    ) -> CalibrationBatchResult:
         engine_started = perf_counter()
         timings = InferenceTimings()
         lock_started = perf_counter()
@@ -59,8 +73,8 @@ class PnLCalibEngine:
             now = monotonic()
             for index, frame in enumerate(frames):
                 key = self._cache.key(self._model_version, frame.content_sha256)
-                lookup = self._cache.get(key, now)
-                if lookup.hit:
+                lookup = self._cache.get(key, now) if read_cache else None
+                if lookup is not None and lookup.hit:
                     cache_hit_count += 1
                     resolved[index] = (
                         lookup.result.for_frame(frame.frame_index)
@@ -126,4 +140,7 @@ class PnLCalibEngine:
             cache_max_entries=self._cache.max_entries,
             cache_ttl_seconds=self._cache.ttl_seconds,
             cache_entry_count=len(self._cache),
+            architecture=platform.machine(),
+            torch_version=str(torch.__version__),
+            torch_thread_count=int(torch.get_num_threads()),
         )

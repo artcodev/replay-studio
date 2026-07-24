@@ -33,7 +33,25 @@ function projectedEvidencePoint(point: CalibrationEvidencePoint) {
 }
 
 function calibrationPointResidual(point: CalibrationEvidencePoint) {
-  return point.residualVector?.magnitude ?? point.residualPx ?? null
+  return point.residualVector?.magnitude
+    ?? point.imageResidualPixels
+    ?? point.residualPx
+    ?? null
+}
+
+function calibrationPointLabel(point: CalibrationEvidencePoint, index: number) {
+  return point.label || `KP ${point.id ?? index + 1}`
+}
+
+function calibrationPointDetail(point: CalibrationEvidencePoint) {
+  const detail: string[] = []
+  const imageResidual = calibrationPointResidual(point)
+  if (imageResidual !== null) detail.push(`${imageResidual.toFixed(1)}px`)
+  if (point.groundResidualMetres != null) {
+    detail.push(`${point.groundResidualMetres.toFixed(2)}m ground`)
+  }
+  if (point.pitch) detail.push(`pitch ${point.pitch.x.toFixed(2)}, ${point.pitch.z.toFixed(2)}`)
+  return detail.join(' · ')
 }
 
 function rawLinePoints(line: CalibrationFrameDiagnostics['lines'][number]) {
@@ -99,7 +117,7 @@ function rawLinePoints(line: CalibrationFrameDiagnostics['lines'][number]) {
         r="4"
       />
       <text :x="point.image.x + 9" :y="point.image.y - 8">
-        {{ point.label || `KP ${index + 1}` }}<template v-if="calibrationPointResidual(point) !== null"> · {{ calibrationPointResidual(point)!.toFixed(1) }}px</template>
+        {{ calibrationPointLabel(point, index) }}<template v-if="calibrationPointDetail(point)"> · {{ calibrationPointDetail(point) }}</template>
       </text>
     </g>
     <g
@@ -143,9 +161,11 @@ function rawLinePoints(line: CalibrationFrameDiagnostics['lines'][number]) {
       class="calibration-qa-keypoint"
       :class="{ inlier: point.inlier, outlier: point.inlier === false }"
     >
+      <title>{{ calibrationPointLabel(point, index) }}<template v-if="calibrationPointDetail(point)"> · {{ calibrationPointDetail(point) }}</template></title>
       <circle :cx="point.image.x" :cy="point.image.y" r="6" />
       <line v-if="projectedEvidencePoint(point)" :x1="point.image.x" :y1="point.image.y" :x2="projectedEvidencePoint(point)!.x" :y2="projectedEvidencePoint(point)!.y" />
       <circle v-if="projectedEvidencePoint(point)" class="projected" :cx="projectedEvidencePoint(point)!.x" :cy="projectedEvidencePoint(point)!.y" r="4" />
+      <text :x="point.image.x + 8" :y="point.image.y - 7">{{ calibrationPointLabel(point, index) }}</text>
     </g>
     <g class="calibration-qa-axis">
       <line x1="24" :y1="qaFrameSize.height - 28" x2="96" :y2="qaFrameSize.height - 28" />

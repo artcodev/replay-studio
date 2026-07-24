@@ -3,23 +3,26 @@ import type { Track } from '../types/tracking'
 import { shouldRenderActor, shouldRenderBall, shouldRenderPlayerVisual } from './actorVisibility'
 
 describe('shouldRenderActor', () => {
-  it('keeps an actor renderable for a low-confidence inferred keyframe', () => {
+  it('renders an actor only inside its evidence-supported time window', () => {
     const track: Pick<Track, 'keyframes'> = {
       keyframes: [{
-        t: 0,
+        t: 0.5,
         x: 12,
         z: -8,
-        confidence: 0,
-        observed: false,
-        presenceState: 'inferred-before-first',
+        confidence: 0.9,
+        observed: true,
+        presenceState: 'observed',
       }],
     }
 
-    expect(shouldRenderActor(track)).toBe(true)
+    expect(shouldRenderActor(track, 0)).toBe(false)
+    expect(shouldRenderActor(track, 0.46)).toBe(true)
+    expect(shouldRenderActor(track, 0.5)).toBe(true)
+    expect(shouldRenderActor(track, 0.56)).toBe(false)
   })
 
   it('does not render an actor that has no position keyframes', () => {
-    expect(shouldRenderActor({ keyframes: [] })).toBe(false)
+    expect(shouldRenderActor({ keyframes: [] }, 0)).toBe(false)
   })
 
   it('keeps labels independent from player model visibility', () => {

@@ -25,10 +25,8 @@ from .reconstruction_identity_phase import IdentityPhaseResult
 from .reconstruction_progress import ReconstructionProgress
 from .reconstruction_publish_payloads import (
     build_ball_detection_metadata,
-    build_calibration_contract,
-    build_calibration_metadata,
-    build_pitch_orientation,
     coordinate_space,
+    identity_runtime_quality,
     publication_diagnostics,
     publication_warnings,
 )
@@ -45,8 +43,10 @@ def publish_reconstruction_phase(
     ball_backend: str,
     ball_detection_input: Mapping,
     ball_detection_profile: str = "automatic",
+    jersey_ocr_profile: str = "automatic",
     progress: ReconstructionProgress,
     artifact_store: ArtifactStore,
+    calibration_usage: Mapping,
 ) -> dict:
     tracks = identity_result.tracks
     canonical_people = identity_result.canonical_people
@@ -93,14 +93,20 @@ def publish_reconstruction_phase(
         if canonical_people
         else "frames-ready"
     )
-    calibration_metadata = build_calibration_metadata(calibration_result)
-    calibration_contract = build_calibration_contract(calibration_result)
-    pitch_orientation = build_pitch_orientation(video, calibration_result)
     artifact_manifest, compact_identity_diagnostics = publish_identity_diagnostics(
         canonical_identity_diagnostics,
         store=artifact_store,
     )
     working_reconstruction = video.get("reconstruction") or {}
+    calibration_metadata = deepcopy(
+        working_reconstruction.get("pitchCalibration") or {}
+    )
+    calibration_contract = deepcopy(
+        working_reconstruction.get("calibration") or {}
+    )
+    pitch_orientation = deepcopy(
+        working_reconstruction.get("pitchOrientation") or {}
+    )
     working_reconstruction["artifactManifest"] = artifact_manifest
     working_reconstruction["diagnostics"] = {
         **(working_reconstruction.get("diagnostics") or {}),
@@ -110,6 +116,16 @@ def publish_reconstruction_phase(
         "personDetectionCache": deepcopy(person_detection_cache_diagnostics),
         "ballTracking": ball_tracking_diagnostics,
         "ballTrajectoryMode": ball_payload["mode"],
+        "calibrationUsage": deepcopy(dict(calibration_usage)),
+        **(
+            {
+                "contactPoint": deepcopy(
+                    calibration_result.contact_point_diagnostics
+                )
+            }
+            if calibration_result.contact_point_diagnostics is not None
+            else {}
+        ),
     }
     working_reconstruction["ballDetection"] = ball_detection_metadata
     working_reconstruction["calibration"] = calibration_contract
@@ -117,11 +133,38 @@ def publish_reconstruction_phase(
     quality = evaluate_reconstruction_quality(scene, frame_evidence)
     quality["processingStatus"] = "completed"
     quality["calibrationQuality"] = calibration_quality
+    identity_runtime = identity_runtime_quality(
+        frame_result,
+        identity_result,
+        jersey_ocr_profile=jersey_ocr_profile,
+    )
+    quality["identityRuntime"] = identity_runtime
     verdict_rank = {"pass": 0, "review": 1, "reject": 2}
     quality["verdict"] = max(
         (quality["verdict"], calibration_quality["verdict"]),
         key=lambda value: verdict_rank[value],
     )
+    if identity_runtime["status"] == "degraded":
+        quality["verdict"] = max(
+            (quality["verdict"], "review"),
+            key=lambda value: verdict_rank[value],
+        )
+        quality.setdefault("summary", {})[
+            "identityRuntimeReview"
+        ] = list(identity_runtime["reasons"])
+        quality.setdefault("gates", []).append(
+            {
+                "id": "identity-runtime",
+                "label": "Identity inference dependencies",
+                "status": "review",
+                "required": True,
+                "value": None,
+                "unit": "status",
+                "evidence": "runtime-readiness-and-batch-result",
+                "thresholds": {"pass": "all-enabled-dependencies-ready"},
+                "note": ", ".join(identity_runtime["reasons"]),
+            }
+        )
     publish_dense_reconstruction_artifacts(scene, store=artifact_store)
     compact_reconstruction = video["reconstruction"]
     compact_calibration_contract = compact_reconstruction["calibration"]
@@ -131,7 +174,7 @@ def publish_reconstruction_phase(
         6,
         "Saving reconstruction",
         "Writing tracks, calibration diagnostics, and orientation metadata.",
-        97,
+        96,
         100,
         completed=0,
         total=1,
@@ -140,6 +183,8 @@ def publish_reconstruction_phase(
     set_reconstruction_status_in_memory(
         scene,
         "ready",
+        stage="reconstruction",
+        resultState="current",
         processingStatus="completed",
         qualityVerdict=quality["verdict"],
         quality=quality,
@@ -183,6 +228,45 @@ def publish_reconstruction_phase(
             ball_result,
             ball_mode=ball_payload["mode"],
             compact_identity=compact_identity_diagnostics,
-        ),
+            jersey_ocr_profile=jersey_ocr_profile,
+        )
+        | {
+            "calibrationUsage": deepcopy(dict(calibration_usage)),
+            **(
+                {
+                    "contactPoint": deepcopy(
+                        calibration_result.contact_point_diagnostics
+                    )
+                }
+                if calibration_result.contact_point_diagnostics is not None
+                else {}
+            ),
+        },
     )
+    completed_reconstruction = video["reconstruction"]
+    calibration_artifact = (
+        (completed_reconstruction.get("calibrationArtifactInput") or {}).get(
+            "artifact"
+        )
+        or {}
+    )
+    completed_reconstruction["reconstructionProvenance"] = {
+        "schemaVersion": 1,
+        "producerRunId": completed_reconstruction.get("runId"),
+        "inputFingerprint": completed_reconstruction.get("inputFingerprint"),
+        "producedAt": completed_reconstruction.get("completedAt"),
+        "calibrationProducerRunId": (
+            completed_reconstruction.get("calibrationArtifactInput") or {}
+        ).get("producerRunId"),
+        "calibrationDataFingerprint": (
+            completed_reconstruction.get("calibrationArtifactInput") or {}
+        ).get("dataFingerprint"),
+        "calibrationArtifactSha256": calibration_artifact.get("sha256"),
+        "identityTimelineArtifactSha256": (
+            (
+                completed_reconstruction.get("artifactManifest") or {}
+            ).get("artifacts")
+            or {}
+        ).get("identityTimeline", {}).get("sha256"),
+    }
     return scene

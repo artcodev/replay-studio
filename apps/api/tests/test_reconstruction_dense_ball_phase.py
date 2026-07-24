@@ -5,7 +5,7 @@ from types import SimpleNamespace
 import pytest
 
 from app.reconstruction_dense_ball_phase import detect_dense_ball_phase
-from app.reconstruction_temporal_calibration_phase import TemporalCalibrationResult
+from app.temporal_calibration_contract import TemporalCalibrationResult
 
 
 class RecordingProgress:

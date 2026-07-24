@@ -99,6 +99,12 @@ def append_track_observation(
             if detection.association_margin is not None
             else None
         )
+    if detection.association_diagnostics is not None:
+        point["associationDiagnostics"] = dict(
+            detection.association_diagnostics
+        )
+    if detection.tracking_decision is not None:
+        point["trackingDecision"] = detection.tracking_decision
     track.points.append(point)
     if track.feature_sum is None:
         track.feature_sum = detection.feature.copy()

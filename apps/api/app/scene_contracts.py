@@ -18,6 +18,55 @@ class SceneDocument(TransportContract):
     payload: dict[str, Any]
 
 
+class SceneTitleRequest(TransportContract):
+    title: str = Field(min_length=1, max_length=200)
+
+
+class SceneEventBinding(TransportContract):
+    sceneTime: float = Field(ge=0)
+    externalEventId: str
+    label: str
+    type: str
+
+
+class SceneEventBindingsRequest(TransportContract):
+    bindings: list[SceneEventBinding]
+
+
+class SceneFrameExclusionRequest(TransportContract):
+    excluded: bool
+
+
+class TrackMetadataRequest(TransportContract):
+    label: str | None = None
+    number: int | None = None
+
+
+class TrackTrajectoryKeyframe(TransportContract):
+    t: float = Field(ge=0)
+    x: float
+    z: float
+
+
+class TrackTrajectoryRequest(TransportContract):
+    keyframes: list[TrackTrajectoryKeyframe]
+
+
+class SegmentLayoutEntry(TransportContract):
+    id: str
+    group: int = Field(ge=1)
+    variant: str
+    label: str
+    role: Literal["original", "replay", "continuation"]
+    confidence: float | None = None
+    motionCost: float | None = None
+
+
+class SegmentLayoutRequest(TransportContract):
+    segments: list[SegmentLayoutEntry]
+    status: Literal["proposed", "edited", "confirmed"] = "edited"
+
+
 class SceneSummary(TransportContract):
     id: str
     title: str

@@ -8,7 +8,9 @@ from app.pitch_anchor_calibration import calibration_from_anchors
 from app.pitch_calibration_contract import PitchCalibration
 from app.pitch_calibration_orientation import canonicalize_penalty_side
 from app.pitch_geometry import projected_pitch_markings
-from app.reconstruction_calibration_apply import apply_scene_pitch_calibration
+from app.reconstruction_calibration_edit_command import (
+    build_manual_calibration_override,
+)
 from app.reconstruction_pitch_side_command import set_scene_pitch_side
 from app.reconstruction_errors import IdentityCorrectionError, ReconstructionError
 from app.reconstruction_person_detection_contract import Detection
@@ -24,6 +26,7 @@ from app.reconstruction_calibration_detection import (
 )
 from app.reconstruction_metric_projection import (
     calibration_person_support as _calibration_person_support,
+    project_metric_point_with_diagnostics as _project_metric_point_with_diagnostics,
 )
 from app.reconstruction_identity_correction_service import (
     apply_track_identity_corrections as _apply_track_identity_corrections,
@@ -137,8 +140,8 @@ def test_metric_projection_outlier_falls_back_instead_of_piling_on_pitch_corner(
     assert _project(480, 270, 960, 540, pitch, calibration) == (0.0, 0.0)
 
 
-def test_pnlcalib_is_representative_even_when_local_fallback_reports_higher_confidence():
-    pnl = PitchCalibration(
+def test_best_direct_calibration_uses_quality_without_backend_fallback_ranking():
+    lower_quality = PitchCalibration(
         np.eye(3),
         0.76,
         8,
@@ -146,16 +149,16 @@ def test_pnlcalib_is_representative_even_when_local_fallback_reports_higher_conf
         "field-keypoints-right",
         method="pnlcalib-points-lines",
     )
-    local = PitchCalibration(
+    higher_quality = PitchCalibration(
         np.eye(3),
         0.92,
         9,
         0.9,
-        "field-keypoints-left",
-        method="roboflow-field-keypoints",
+        "field-keypoints-right",
+        method="pnlcalib-points-lines",
     )
 
-    assert _best_pitch_calibration({1: local, 2: pnl}) is pnl
+    assert _best_pitch_calibration({1: lower_quality, 2: higher_quality}) is higher_quality
 
 
 def test_calibration_support_rejects_people_projected_outside_pitch():
@@ -172,6 +175,27 @@ def test_calibration_support_rejects_people_projected_outside_pitch():
     ]
 
     assert _calibration_person_support(people, calibration, {"length": 105, "width": 68}) == (0, 6)
+
+
+def test_metric_projection_explains_the_unclamped_rejected_position():
+    calibration = PitchCalibration(
+        np.array([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]),
+        0.9,
+        8,
+        0.9,
+        "penalty-area-right",
+    )
+
+    position, diagnostics = _project_metric_point_with_diagnostics(
+        61.78,
+        -0.32,
+        calibration,
+        {"length": 105, "width": 68},
+    )
+
+    assert position is None
+    assert diagnostics["reason"] == "outside-pitch-length"
+    assert diagnostics["rawPitch"] == {"x": 61.78, "z": -0.32}
 
 
 def test_project_uses_visible_half_when_metric_fit_is_weak():
@@ -342,26 +366,23 @@ def test_apply_pitch_calibration_saves_stabilized_override(monkeypatch):
         for index in range(4)
     ]
     monkeypatch.setattr(
-        "app.reconstruction_calibration_apply.preview_scene_pitch_calibration",
+        "app.reconstruction_calibration_edit_command.preview_scene_pitch_calibration",
         lambda *args: draft,
     )
     monkeypatch.setattr(
-        "app.reconstruction_calibration_apply.calibration_frame_context",
+        "app.reconstruction_calibration_edit_command.calibration_frame_context",
         lambda *args: (3, 0.6, np.zeros((540, 960, 3), dtype=np.uint8), np.eye(3)),
     )
     monkeypatch.setattr(
-        "app.reconstruction_calibration_apply.frame_paths", lambda *args: []
+        "app.reconstruction_calibration_edit_command.frame_paths", lambda *args: []
     )
     monkeypatch.setattr(
-        "app.reconstruction_calibration_apply.scenes.put",
+        "app.reconstruction_calibration_edit_command.scenes.put",
         lambda value: value,
     )
-    monkeypatch.setattr(
-        "app.reconstruction_calibration_apply.queue_reconstruction",
-        lambda value, **_kwargs: value,
-    )
 
-    applied = apply_scene_pitch_calibration(scene, 0.6, "center-circle", anchors)
+    build_manual_calibration_override(scene, 0.6, "center-circle", anchors)
+    applied = scene
 
     override = applied["payload"]["videoAsset"]["reconstruction"]["pitchCalibrationOverrides"][0]
     assert override["method"] == "manual-pitch-anchors"

@@ -27,14 +27,18 @@ services:
       retries: 10
 
   calibration-worker:
-    # The pinned SoccerNet/OpenMMLab stack has reliable x86_64 wheels only.
-    # Docker Desktop runs these through Rosetta on Apple Silicon.
-    platform: ${ML_WORKER_PLATFORM:-linux/amd64}
+    # PnLCalib is pure PyTorch here and its pinned runtime has both amd64 and
+    # arm64 CPU wheels.  Do not force this compute-heavy service through
+    # Rosetta on Apple Silicon; Docker builds for the host architecture.
     build: ./services/calibration-worker
     restart: unless-stopped
     environment:
       PNLCALIB_DEVICE: cpu
-      PNLCALIB_BATCH_SIZE: 2
+      # The pinned points+lines runtime exits the native process when both
+      # networks receive a two-frame CPU tensor. HTTP requests may still carry
+      # several frames; the worker executes them sequentially inside the
+      # request so one bad native batch cannot disconnect the calibration run.
+      PNLCALIB_BATCH_SIZE: ${PNLCALIB_BATCH_SIZE:-1}
       PNLCALIB_PRELOAD: 1
       PNLCALIB_CACHE_MAX_ENTRIES: 512
       PNLCALIB_CACHE_TTL_SECONDS: 3600
@@ -154,18 +158,19 @@ services:
       SPORTSDB_BASE_URL: ${SPORTSDB_BASE_URL:-https://www.thesportsdb.com/api/v1/json}
       CORS_ORIGINS: http://localhost:5188,http://localhost:8080
       MEDIA_ROOT: /data/media
+      # Run logs and frame-analysis dumps must survive container recreation.
+      ANALYSIS_RUN_LOG_DIRECTORY: /data/media/logs/analysis-runs
       CALIBRATION_WORKER_URL: http://calibration-worker:8090
       CALIBRATION_WORKER_TIMEOUT: 900
-      CALIBRATION_WORKER_BATCH_SIZE: 2
-      CALIBRATION_ANCHOR_MAX_GAP_SECONDS: ${CALIBRATION_ANCHOR_MAX_GAP_SECONDS:-1.0}
+      CALIBRATION_WORKER_BATCH_SIZE: ${CALIBRATION_WORKER_BATCH_SIZE:-2}
       IDENTITY_WORKER_URL: http://identity-worker:8091
       IDENTITY_WORKER_TIMEOUT: 900
       IDENTITY_WORKER_BATCH_SIZE: 4
       JERSEY_OCR_WORKER_URL: http://jersey-ocr-worker:8093
       JERSEY_OCR_WORKER_TIMEOUT: 900
       JERSEY_OCR_WORKER_BATCH_SIZE: 32
-      RECONSTRUCTION_FRAME_RATE: 10
       RECONSTRUCTION_MODEL: yolo26m.pt
+      FOOTBALL_DETECTOR_WEIGHTS: ${FOOTBALL_DETECTOR_WEIGHTS:-}
       RECONSTRUCTION_LEASE_TTL_SECONDS: 180
       RECONSTRUCTION_LEASE_HEARTBEAT_SECONDS: 15
       RECONSTRUCTION_RECOVERY_POLL_SECONDS: 5
@@ -224,18 +229,19 @@ services:
     environment:
       DATABASE_URL: postgresql+psycopg://replay:replay@postgres:5432/replay_studio
       MEDIA_ROOT: /data/media
+      # Run logs and frame-analysis dumps must survive container recreation.
+      ANALYSIS_RUN_LOG_DIRECTORY: /data/media/logs/analysis-runs
       CALIBRATION_WORKER_URL: http://calibration-worker:8090
       CALIBRATION_WORKER_TIMEOUT: 900
-      CALIBRATION_WORKER_BATCH_SIZE: 2
-      CALIBRATION_ANCHOR_MAX_GAP_SECONDS: ${CALIBRATION_ANCHOR_MAX_GAP_SECONDS:-1.0}
+      CALIBRATION_WORKER_BATCH_SIZE: ${CALIBRATION_WORKER_BATCH_SIZE:-2}
       IDENTITY_WORKER_URL: http://identity-worker:8091
       IDENTITY_WORKER_TIMEOUT: 900
       IDENTITY_WORKER_BATCH_SIZE: 4
       JERSEY_OCR_WORKER_URL: http://jersey-ocr-worker:8093
       JERSEY_OCR_WORKER_TIMEOUT: 900
       JERSEY_OCR_WORKER_BATCH_SIZE: 32
-      RECONSTRUCTION_FRAME_RATE: 10
       RECONSTRUCTION_MODEL: yolo26m.pt
+      FOOTBALL_DETECTOR_WEIGHTS: ${FOOTBALL_DETECTOR_WEIGHTS:-}
       RECONSTRUCTION_LEASE_TTL_SECONDS: 180
       RECONSTRUCTION_LEASE_HEARTBEAT_SECONDS: 15
       RECONSTRUCTION_RECOVERY_POLL_SECONDS: 5
@@ -283,18 +289,19 @@ services:
     environment:
       DATABASE_URL: postgresql+psycopg://replay:replay@postgres:5432/replay_studio
       MEDIA_ROOT: /data/media
+      # Run logs and frame-analysis dumps must survive container recreation.
+      ANALYSIS_RUN_LOG_DIRECTORY: /data/media/logs/analysis-runs
       CALIBRATION_WORKER_URL: http://calibration-worker:8090
       CALIBRATION_WORKER_TIMEOUT: 900
-      CALIBRATION_WORKER_BATCH_SIZE: 2
-      CALIBRATION_ANCHOR_MAX_GAP_SECONDS: ${CALIBRATION_ANCHOR_MAX_GAP_SECONDS:-1.0}
+      CALIBRATION_WORKER_BATCH_SIZE: ${CALIBRATION_WORKER_BATCH_SIZE:-2}
       IDENTITY_WORKER_URL: http://identity-worker:8091
       IDENTITY_WORKER_TIMEOUT: 900
       IDENTITY_WORKER_BATCH_SIZE: 4
       JERSEY_OCR_WORKER_URL: http://jersey-ocr-worker:8093
       JERSEY_OCR_WORKER_TIMEOUT: 900
       JERSEY_OCR_WORKER_BATCH_SIZE: 32
-      RECONSTRUCTION_FRAME_RATE: 10
       RECONSTRUCTION_MODEL: yolo26m.pt
+      FOOTBALL_DETECTOR_WEIGHTS: ${FOOTBALL_DETECTOR_WEIGHTS:-}
       PIPELINE_LEASE_TTL_SECONDS: 120
       PIPELINE_LEASE_HEARTBEAT_SECONDS: 10
       PIPELINE_RECOVERY_POLL_SECONDS: 2

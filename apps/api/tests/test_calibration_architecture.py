@@ -34,7 +34,8 @@ def test_calibration_capabilities_have_no_aggregate_facade() -> None:
 
     route_imports = _imports("scene_calibration_routes.py")
     assert {
-        "reconstruction_calibration_apply",
+        "reconstruction_calibration_edit_command",
+        "reconstruction_calibration_finalize_command",
         "reconstruction_calibration_manual_preview",
         "reconstruction_calibration_proposal",
         "reconstruction_pitch_side_command",
@@ -55,18 +56,23 @@ def test_calibration_drafts_and_manual_previews_do_not_persist_scenes() -> None:
             }
         ), module
 
-    # Proposal orchestration is a read-only diagnostic draft; only the
-    # explicit apply command may persist a calibration edit (TD-CAL-01).
+    # Proposal orchestration is a read-only diagnostic draft.
     proposal_imports = _imports("reconstruction_calibration_proposal.py")
     assert "scene_repository" not in proposal_imports
     assert "reconstruction_calibration_preview" not in proposal_imports
 
 
-def test_calibration_apply_is_the_manual_override_rebuild_boundary() -> None:
-    apply_imports = _imports("reconstruction_calibration_apply.py")
-    assert {"scene_repository", "reconstruction_queue"}.issubset(apply_imports)
-    assert "apply_scene_pitch_calibration" in _functions(
-        "reconstruction_calibration_apply.py"
+def test_calibration_draft_save_and_finalization_are_separate_boundaries() -> None:
+    save_imports = _imports("reconstruction_calibration_edit_command.py")
+    finalize_imports = _imports("reconstruction_calibration_finalize_command.py")
+    assert "scene_repository" in save_imports
+    assert "reconstruction_queue" not in save_imports
+    assert "reconstruction_queue" in finalize_imports
+    assert "save_scene_pitch_calibration_draft" in _functions(
+        "reconstruction_calibration_edit_command.py"
+    )
+    assert "finalize_scene_pitch_calibration_drafts" in _functions(
+        "reconstruction_calibration_finalize_command.py"
     )
 
 
@@ -76,7 +82,7 @@ def test_pitch_side_command_is_independent_of_preview_and_workers() -> None:
     assert imports.isdisjoint(
         {
             "calibration_worker",
-            "reconstruction_calibration_apply",
+            "reconstruction_calibration_edit_command",
             "reconstruction_calibration_preview",
             "reconstruction_calibration_proposal",
             "reconstruction_queue",
@@ -164,7 +170,7 @@ def test_pitch_calibration_has_capability_owners_instead_of_an_aggregate() -> No
     assert _functions("pitch_anchor_calibration.py") == {
         "calibration_from_anchors"
     }
-    assert "calibrate_pitch" in _functions("pitch_line_calibration.py")
+    assert not (APP / "pitch_line_calibration.py").exists()
     assert _functions("pitch_calibration_visualization.py") == {
         "calibration_overlay"
     }
@@ -192,9 +198,8 @@ def test_pitch_visualization_does_not_own_orchestrate_fitting() -> None:
         {
             "pitch_anchor_calibration",
             "pitch_image_evidence",
-            "pitch_line_calibration",
         }
     )
     assert _imports("pitch_calibration_quality.py").isdisjoint(
-        {"pitch_anchor_calibration", "pitch_line_calibration"}
+        {"pitch_anchor_calibration"}
     )

@@ -68,6 +68,7 @@ function bindViewport(viewport: Element | ComponentPublicInstance | null) {
       :show-labels="options.labels"
       :show-ball="options.ball"
       :show-analysis-markers="options.analysisMarkers"
+      :inferred-positions="options.inferredPositions"
       :render-quality="renderQuality"
       :frame-analysis="frameAnalysis"
       :active-player-action="activePlayerAction"

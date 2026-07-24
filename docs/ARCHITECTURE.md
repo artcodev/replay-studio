@@ -193,6 +193,35 @@ It never renames or overwrites canonical files inside a database transaction.
 An interrupted worker therefore leaves only an unreferenced generation suitable
 for later garbage collection.
 
+Analysis frames use the uploaded video's pixel grid and carry a versioned
+`analysisFrameInput` contract. A Scene without that source-resolution contract
+fails closed before calibration or reconstruction. Upgrading an older derived
+frame set is an explicit `analysis-frame-generation` pipeline job: it writes a
+complete immutable generation, then atomically switches the VideoAsset and all
+normalized root/segment Scenes that reference it. Publication invalidates
+pixel-coordinate calibration, detections, tracks, identities and automatic ball
+evidence; it preserves timeline/domain inputs and a manual metric ball path.
+The upgrade never starts calibration — calibration remains a separate gated
+process owned by the operator.
+
+The published generation materializes frames at the source stream's nominal
+cadence (`r_frame_rate`, for example 30000/1001 or 60000/1001). There is no
+global ingest cap and no reconstruction-runner FPS environment override. The
+calibration workspace defaults to that native cadence and may explicitly pin a
+lower scene-specific cadence. That selection is stored on the queued job,
+included in calibration/reconstruction fingerprints, and logged with source,
+materialized and selected FPS. Reduced sampling is timestamp-driven; an
+integer stride is forbidden because ratios such as 25 -> 10 otherwise produce
+12.5 FPS. A generation materialized below the selected cadence fails closed and
+must be regenerated from the uploaded source.
+
+Direct calibration sampling is a second, independent scene input. Its default
+maximum gap is zero: PnLCalib runs on every frame selected by the scene FPS.
+Positive sparse gaps are an explicit operator performance tradeoff, never an
+API/runner environment setting. The selected gap is persisted, fingerprinted,
+and logged; changing it invalidates the calibration gate and requires a new
+Calibration run before Reconstruction may consume the artifact.
+
 ## Reconstruction artifact boundary
 
 `SceneRow.payload` is the compact control/read model. It owns identity labels,

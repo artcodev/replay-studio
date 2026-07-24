@@ -17,13 +17,17 @@ class Settings(BaseSettings):
     media_root: str = "./data/media"
     max_video_bytes: int = 262_144_000
     max_video_duration: float = 60.0
-    analysis_frame_rate: float = 10.0
-    # Ten observations per second is the minimum useful cadence for linking
-    # crossing football players. Five FPS produced 400 ms association gaps and
-    # systematically fragmented short replay tracks.
-    reconstruction_frame_rate: float = 10.0
+    # Player/calibration frames are always materialized at the source video's
+    # nominal cadence. A reduced cadence is selected explicitly per scene and
+    # fingerprinted into the calibration/reconstruction job; there is no
+    # process-global hidden FPS cap.
     reconstruction_model: str = "yolo26m.pt"
     reconstruction_device: str = "cpu"
+    # When configured, sampled person detection is delegated to one strict
+    # binary-media worker. A configured but unavailable worker fails closed;
+    # there is no silent switch back to the in-process CPU detector.
+    person_detection_worker_url: str | None = None
+    person_detection_worker_timeout: float = 120.0
     # A database-backed fencing lease prevents two runner processes from owning
     # the same reconstruction. Heartbeats live outside the scene JSON so they
     # do not invalidate the worker's document revision. Recovery discovers
@@ -68,8 +72,8 @@ class Settings(BaseSettings):
     ball_detection_roi_padding: int = 320
     ball_detection_nms_iou: float = 0.10
     ball_detection_max_candidates: int = 12
-    # Dense source-rate sampling is cached per scene range. Player detection
-    # and calibration remain on their existing 10 FPS cadence.
+    # Dense ball decoding has its own explicit detector contract. Player and
+    # calibration sampling is selected per scene, independently of this cap.
     ball_analysis_frame_rate: float = 25.0
     ball_wasb_worker_url: str | None = "http://127.0.0.1:8092/v1/detections"
     ball_wasb_timeout: float = 120.0
@@ -101,20 +105,24 @@ class Settings(BaseSettings):
     # inference) is bounded: after this many claims of the same run the job
     # is terminally invalidated with its last error instead of looping.
     reconstruction_max_attempts: int = 5
-    # Accuracy-first local default. Docker Compose overrides this with the
-    # service-network hostname; set an empty value explicitly to opt into the
-    # smaller local keypoint fallback.
+    # PnLCalib is the only automatic calibration backend. Docker Compose
+    # overrides this with the service-network hostname; an empty value makes
+    # automatic Calibration fail closed.
     calibration_worker_url: str | None = "http://127.0.0.1:8090"
     calibration_worker_timeout: float = 900.0
     # A single editor preview should tolerate a cold CPU PnLCalib worker, but it
     # must not inherit the 15-minute background-job timeout.
     calibration_frame_worker_timeout: float = 60.0
-    calibration_worker_batch_size: int = 2
-    # Full-shot reconstruction directly calibrates sparse camera anchors and
-    # lets the temporal solver recover the in-between samples. A one-second
-    # ceiling keeps every sampled frame within the solver's two-second window
-    # without paying the cold PnLCalib cost on every 10 FPS frame.
-    calibration_anchor_max_gap_seconds: float = 1.0
+    calibration_worker_batch_size: int = 6
+    # A direct candidate that is missing or rejected by frame-local QA gets up
+    # to two fresh attempts. A retry round batches every pending frame in one
+    # API operation (the worker may chunk by its safe inference batch size),
+    # while acceptance and attempt audit remain strictly frame-local.
+    calibration_pnlcalib_retry_count: int = 2
+    # Direct-anchor sampling is a persisted per-scene calibration input. It is
+    # intentionally not configurable through process-global settings: every
+    # frame is the product default and sparse execution requires an explicit
+    # operator choice in the calibration workspace.
     # PnLCalib anchor results are memoized on disk by exact frame bytes and
     # the worker's model identity, so warm rebuilds skip re-uploading and
     # re-inferring anchors that the worker already solved (or already
@@ -140,6 +148,32 @@ class Settings(BaseSettings):
     person_crop_minimum_width: int = 16
     person_crop_minimum_height: int = 30
     person_crop_minimum_sharpness: float = 12.0
+    # A direct calibration anchor whose line-residual tail (p95) is an
+    # outlier against the best quartile of accepted anchors is demoted: its
+    # frames re-solve temporally from healthier neighbours. Manual anchors
+    # are never demoted; ratio<=0 disables the gate.
+    calibration_anchor_p95_demotion_enabled: bool = True
+    calibration_anchor_p95_demotion_floor: float = 6.5
+    calibration_anchor_p95_demotion_ratio: float = 1.6
+    # Explicit location of the owner-supplied football.pt person detector;
+    # when unset, the repository root and ./models/ are searched (the api
+    # image bakes ./models in, mirroring the dedicated ball weights).
+    football_detector_weights: str | None = None
+    # The "pose-feet" contact-point profile projects RTMPose feet evidence
+    # from stored person crops instead of the bbox bottom-centre. The ONNX
+    # checkpoint is fetched lazily by rtmlib on first use; a missing runtime
+    # degrades to bbox with explicit per-observation diagnostics.
+    pose_contact_model_url: str = (
+        "https://download.openmmlab.com/mmpose/v1/projects/rtmposev1/onnx_sdk/"
+        "rtmpose-m_simcc-body7_pt-body7-halpe26_700e-256x192-4d3e73dd_20230605.zip"
+    )
+    pose_contact_model_input_size: tuple[int, int] = (192, 256)
+    pose_contact_device: str = "cpu"
+    pose_contact_min_crop_height: int = 48
+    pose_contact_min_keypoint_score: float = 0.35
+    # A pose-derived contact point deviating from the bbox bottom-centre by
+    # more than this fraction of the bbox size is treated as a broken pose.
+    pose_contact_max_bbox_deviation_ratio: float = 0.35
     # A crop whose bbox is overlapped by another detection above this IoU
     # contains two players: its embedding is noise for the tracker's ReID
     # gate and is skipped explicitly (0 disables the filter).
@@ -156,14 +190,6 @@ class Settings(BaseSettings):
     jersey_ocr_worker_batch_size: int = 32
     jersey_ocr_worker_batch_retry_count: int = 1
     jersey_ocr_cache_enabled: bool = True
-    pitch_keypoint_model: str = str(
-        Path(__file__).resolve().parent.parent / "models" / "football-pitch-detection.pt"
-    )
-    # None selects the native image size stored in the Ultralytics checkpoint.
-    # The bundled Roboflow model was trained at 640; forcing the 960px source
-    # width causes it to drop otherwise visible penalty/goal-area landmarks.
-    pitch_keypoint_image_size: int | None = None
-
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
     @property

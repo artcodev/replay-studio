@@ -25,6 +25,31 @@ HRNET_WEIGHTS_MD5 = "58ea12b0420aa3adaa2f74114c9f9721"
 SOCCERNET_COMMIT = "1c958345067218297d221e45e1a6405f975f83e0"
 
 
+def resolve_torch_device(torch_module, requested: str):
+    """Validate the requested accelerator instead of silently using CPU."""
+
+    normalized = requested.strip().lower()
+    if normalized.startswith("cuda") and not torch_module.cuda.is_available():
+        raise ProviderUnavailable(
+            f"REID_DEVICE={requested} was requested but CUDA is unavailable"
+        )
+    if normalized == "mps":
+        backend = getattr(getattr(torch_module, "backends", None), "mps", None)
+        if (
+            backend is None
+            or not backend.is_built()
+            or not backend.is_available()
+        ):
+            raise ProviderUnavailable(
+                "REID_DEVICE=mps was requested but Metal/MPS is unavailable"
+            )
+    if normalized != "cpu" and normalized != "mps" and not normalized.startswith(
+        "cuda"
+    ):
+        raise ProviderUnavailable(f"Unsupported REID_DEVICE={requested}")
+    return torch_module.device(normalized)
+
+
 class PRTReIDProvider:
     """SoccerNet PRTReID/BPBreID feature extractor."""
 
@@ -91,11 +116,7 @@ class PRTReIDProvider:
             except Exception as exc:  # pragma: no cover - exercised in the image
                 raise ProviderUnavailable(f"PRTReID runtime is unavailable: {exc}") from exc
 
-            if self.device_name.startswith("cuda") and not torch.cuda.is_available():
-                raise ProviderUnavailable(
-                    f"REID_DEVICE={self.device_name} was requested but CUDA is unavailable"
-                )
-            device = torch.device(self.device_name)
+            device = resolve_torch_device(torch, self.device_name)
             runtime_directory = TemporaryDirectory(prefix="replay-studio-prtreid-")
             try:
                 register_soccernet_inference_dataset(prtreid)
@@ -144,6 +165,13 @@ class PRTReIDProvider:
             "hrnetCheckpointSha256": self._hrnet_checkpoint_sha256,
             "modelLoadSeconds": self._model_load_seconds,
             "soccerNetCommit": self.soccernet_commit,
+            "torchVersion": (
+                str(self._torch.__version__) if self._torch is not None else None
+            ),
+            "mpsFallbackEnabled": (
+                os.environ.get("PYTORCH_ENABLE_MPS_FALLBACK", "0")
+                not in {"0", "false", "False", ""}
+            ),
         }
 
     def embed(self, samples: Sequence[EmbeddingSample]) -> list[ProviderEmbedding]:

@@ -11,14 +11,15 @@ from .reconstruction_detection_contract import (
 from .reconstruction_sampled_detection_preparation import SampledDetectionRuntime
 from .reconstruction_sampled_frame_contract import (
     SampledCalibrationInputs,
-    SampledFrameAnalysis,
+    SampledCalibrationAnalysis,
+    SampledDetectionAnalysis,
 )
-from .reconstruction_temporal_calibration_phase import TemporalCalibrationResult
+from .temporal_calibration_contract import TemporalCalibrationResult
 
 
 def project_frame_analysis_result(
     frames: list[tuple[Path, float]],
-    sampled: SampledFrameAnalysis,
+    sampled: SampledDetectionAnalysis,
     runtime: SampledDetectionRuntime,
     dense_ball: DenseBallDetectionResult,
     identity_diagnostics: dict,
@@ -28,7 +29,7 @@ def project_frame_analysis_result(
         frames=frames,
         person_frames=sampled.person_frames,
         ball_frames=dense_ball.frames,
-        frame_size=sampled.calibration.frame_size,
+        frame_size=sampled.frame_sizes[max(sampled.frame_sizes, default=0)],
         person_counts=sampled.person_counts,
         ball_counts=dense_ball.counts,
         person_detection_cache_diagnostics=runtime.person_cache_diagnostics,
@@ -41,13 +42,12 @@ def project_frame_analysis_result(
 
 
 def project_calibration_phase_result(
-    sampled: SampledFrameAnalysis,
+    calibration: SampledCalibrationAnalysis,
     inputs: SampledCalibrationInputs,
     temporal: TemporalCalibrationResult,
     dense_ball: DenseBallDetectionResult,
     selection: CalibrationSelectionResult,
 ) -> CalibrationPhaseResult:
-    calibration = sampled.calibration
     return CalibrationPhaseResult(
         calibration=selection.calibration,
         quality=selection.quality,
@@ -67,4 +67,5 @@ def project_calibration_phase_result(
         metric_person_sample_count=temporal.metric_person_sample_count,
         metric_ball_sample_count=dense_ball.metric_sample_count,
         warnings=selection.warnings,
+        contact_point_diagnostics=temporal.contact_point_diagnostics,
     )

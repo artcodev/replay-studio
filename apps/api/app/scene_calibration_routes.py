@@ -2,18 +2,29 @@ from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException
 
+from .calibration_worker import CalibrationWorkerError
 from .project_match_repository import project_matches
-from .reconstruction_calibration_apply import apply_scene_pitch_calibration
+from .reconstruction_calibration_borrow import borrow_scene_pitch_calibration
+from .reconstruction_calibration_edit_command import (
+    save_scene_pitch_calibration_draft,
+)
+from .reconstruction_calibration_finalize_command import (
+    finalize_scene_pitch_calibration_drafts,
+)
 from .reconstruction_calibration_manual_preview import (
     preview_scene_pitch_calibration,
 )
 from .reconstruction_calibration_proposal import propose_scene_pitch_calibration
+from .scene_calibration_review_command import confirm_calibration_review
+from .scene_calibration_reset_command import reset_scene_calibration
 from .reconstruction_errors import ReconstructionError, StaleReconstructionRun
 from .reconstruction_pitch_side_command import set_scene_pitch_side
 from . import project_resource_access
 from .calibration_contracts import (
     PitchCalibrationDraftRequest,
+    PitchCalibrationBorrowRequest,
     PitchCalibrationPreviewRequest,
+    PitchCalibrationSaveDraftRequest,
     PitchSideRequest,
 )
 from .scene_contracts import SceneDocument
@@ -48,6 +59,14 @@ def auto_pitch_calibration(
     _require_scene_time(scene, request.scene_time)
     try:
         return propose_scene_pitch_calibration(scene, request.scene_time, request.preset)
+    except CalibrationWorkerError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "PnLCalib is required for automatic calibration and is unavailable: "
+                f"{exc}"
+            ),
+        ) from exc
     except (ReconstructionError, ValueError) as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
@@ -72,14 +91,34 @@ def preview_pitch_calibration(
 
 
 @router.post(
-    "/{scene_id}/pitch-calibration/apply",
-    response_model=SceneDocument,
-    status_code=202,
+    "/{scene_id}/pitch-calibration/borrow",
 )
-def apply_pitch_calibration(
+def borrow_pitch_calibration(
     project_id: str,
     scene_id: str,
-    request: PitchCalibrationPreviewRequest,
+    request: PitchCalibrationBorrowRequest,
+) -> dict:
+    scene = _calibration_scene(project_id, scene_id)
+    _require_scene_time(scene, request.scene_time)
+    try:
+        return borrow_scene_pitch_calibration(
+            scene,
+            request.scene_time,
+            request.source,
+            request.preset,
+        )
+    except (ReconstructionError, ValueError) as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.post(
+    "/{scene_id}/pitch-calibration/drafts",
+    response_model=SceneDocument,
+)
+def save_pitch_calibration_draft(
+    project_id: str,
+    scene_id: str,
+    request: PitchCalibrationSaveDraftRequest,
 ) -> dict:
     scene = _calibration_scene(project_id, scene_id)
     _require_scene_time(scene, request.scene_time)
@@ -89,12 +128,13 @@ def apply_pitch_calibration(
     if reconstruction.get("status") in {"queued", "processing"}:
         raise HTTPException(status_code=409, detail="Reconstruction is already running")
     try:
-        return apply_scene_pitch_calibration(
+        return save_scene_pitch_calibration_draft(
             scene,
             request.scene_time,
             request.preset,
             [anchor.model_dump() for anchor in request.anchors],
-            match_snapshot=project_matches.current_snapshot(project_id),
+            draft_source=request.source,
+            accept_quality_warning=request.accept_quality_warning,
         )
     except StaleReconstructionRun as exc:
         raise HTTPException(
@@ -108,6 +148,33 @@ def apply_pitch_calibration(
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
+@router.post(
+    "/{scene_id}/pitch-calibration/finalize",
+    response_model=SceneDocument,
+    status_code=202,
+)
+def finalize_pitch_calibration_drafts(
+    project_id: str,
+    scene_id: str,
+) -> dict:
+    scene = _calibration_scene(project_id, scene_id)
+    try:
+        return finalize_scene_pitch_calibration_drafts(
+            scene,
+            match_snapshot=project_matches.current_snapshot(project_id),
+        )
+    except StaleReconstructionRun as exc:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "The scene changed while calibration finalization was queued; "
+                "reload the timeline and retry."
+            ),
+        ) from exc
+    except ReconstructionError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
 @router.post("/{scene_id}/pitch-side", response_model=SceneDocument)
 def change_scene_pitch_side(
     project_id: str,
@@ -117,5 +184,35 @@ def change_scene_pitch_side(
     scene = _calibration_scene(project_id, scene_id)
     try:
         return set_scene_pitch_side(scene, request.side)
+    except ReconstructionError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@router.post(
+    "/{scene_id}/pitch-calibration/confirm-review",
+    response_model=SceneDocument,
+)
+def confirm_pitch_calibration_review(
+    project_id: str,
+    scene_id: str,
+) -> dict:
+    scene = _calibration_scene(project_id, scene_id)
+    try:
+        return confirm_calibration_review(scene)
+    except ReconstructionError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@router.post(
+    "/{scene_id}/pitch-calibration/reset",
+    response_model=SceneDocument,
+)
+def reset_pitch_calibration(
+    project_id: str,
+    scene_id: str,
+) -> dict:
+    scene = _calibration_scene(project_id, scene_id)
+    try:
+        return reset_scene_calibration(scene)
     except ReconstructionError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc

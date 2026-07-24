@@ -10,15 +10,12 @@ defineProps<{
   segmentCount: number
   saveState: string
   projectLoading: boolean
-  saveDisabled: boolean
-  saving: boolean
 }>()
 
 const emit = defineEmits<{
   'update:sceneTitle': [value: string]
   'open-import': []
   'return-projects': []
-  save: []
 }>()
 
 function updateTitle(event: Event) {
@@ -52,9 +49,6 @@ function updateTitle(event: Event) {
         <span class="save-state">{{ saveState }}</span>
         <button class="button ghost" @click="emit('return-projects')">← Projects</button>
         <button class="button import-button" :disabled="!project" @click="emit('open-import')">＋ Import clip</button>
-        <button class="button primary" :disabled="saveDisabled" @click="emit('save')">
-          {{ saving ? 'Saving' : 'Save moment' }}
-        </button>
       </template>
     </div>
   </header>

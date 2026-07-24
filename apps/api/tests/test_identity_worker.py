@@ -166,6 +166,8 @@ def test_readiness_requires_loaded_normalized_model(monkeypatch):
         "modelVersion": "model-v1",
         "modelLoadSeconds": 4.2,
         "soccerNetCommit": "reference-commit",
+        "torchVersion": None,
+        "mpsFallbackEnabled": False,
     }
 
 

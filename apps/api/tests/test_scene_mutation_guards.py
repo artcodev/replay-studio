@@ -16,6 +16,9 @@ from app.scene_document import reconstruction_input_fingerprint
 from app.scene_repository import SceneRepository
 
 
+SCENE_PATH = "/api/projects/project-test/scenes/mutation-guard-scene"
+
+
 def _scene(*, status: str = "ready") -> dict:
     scene = {
         "id": "mutation-guard-scene",
@@ -43,7 +46,8 @@ def _scene(*, status: str = "ready") -> dict:
                 {"id": "away", "name": "Old Away", "color": "#00f"},
             ],
             "canonicalPeople": [],
-            "tracks": [],
+            "eventBindings": [],
+            "tracks": [{"id": "auto-home-02", "label": "Home track 02", "number": 2}],
             "ball": {"keyframes": []},
         },
     }
@@ -83,56 +87,67 @@ def isolated_store(monkeypatch) -> SceneRepository:
     return SceneRepository()
 
 
-def test_whole_scene_put_rejects_stale_or_running_reconstruction(
+def test_the_whole_document_write_path_no_longer_exists(
     isolated_store: SceneRepository,
 ) -> None:
+    # The legacy path was removed in the same cutover that introduced the
+    # dedicated commands: no client may publish a scene document again.
     current = isolated_store.put(_scene())
-    stale = deepcopy(current)
-    stale["payload"]["videoAsset"]["reconstruction"]["runId"] = "run-stale"
-
-    stale_response = _request(
-        "PUT",
-        "/api/projects/project-test/scenes/mutation-guard-scene",
-        json=stale,
-    )
-    assert stale_response.status_code == 409
-    assert "reconstruction changed" in stale_response.json()["detail"]
-
-    processing = deepcopy(current)
-    processing["payload"]["videoAsset"]["reconstruction"]["status"] = "processing"
-    isolated_store.put(processing)
-    running_response = _request(
-        "PUT",
-        "/api/projects/project-test/scenes/mutation-guard-scene",
-        json=processing,
-    )
-    assert running_response.status_code == 409
-    assert "Wait for reconstruction" in running_response.json()["detail"]
+    response = _request("PUT", SCENE_PATH, json=current)
+    assert response.status_code == 405
 
 
-def test_whole_scene_put_rejects_sequential_stale_client_on_unrelated_change(
+def test_a_stale_editor_saves_without_clobbering_a_concurrent_change(
     isolated_store: SceneRepository,
 ) -> None:
     initial = isolated_store.put(_scene())
-    stale_client = deepcopy(initial)
 
+    # Something else advances the scene while the editor holds an older copy.
     concurrent = isolated_store.get(initial["id"])
     assert concurrent is not None
     concurrent["title"] = "Concurrent title"
     isolated_store.put(concurrent)
 
-    # Runtime fields and reconstruction inputs are intentionally identical;
-    # only the document revision can detect this otherwise invisible stale PUT.
-    stale_client["payload"]["tracks"] = [{"id": "stale-client-track"}]
+    # The stale editor edits an unrelated domain. Under the old whole-document
+    # write this either lost the revision race or reverted the concurrent
+    # title; a command touches only its own field, so it does neither.
     response = _request(
         "PUT",
-        "/api/projects/project-test/scenes/mutation-guard-scene",
-        json=stale_client,
+        f"{SCENE_PATH}/tracks/auto-home-02/metadata",
+        json={"number": 9},
     )
 
-    assert response.status_code == 409
-    assert "reload and retry" in response.json()["detail"]
+    assert response.status_code == 200
     saved = isolated_store.get(initial["id"])
     assert saved is not None
+    assert saved["payload"]["tracks"][0]["number"] == 9
     assert saved["title"] == "Concurrent title"
-    assert saved["payload"]["tracks"] == []
+
+
+def test_commands_still_refuse_to_edit_a_running_reconstruction(
+    isolated_store: SceneRepository,
+) -> None:
+    processing = deepcopy(_scene(status="processing"))
+    isolated_store.put(processing)
+
+    for path, body in (
+        ("/title", {"title": "Renamed"}),
+        ("/event-bindings", {"bindings": []}),
+        ("/tracks/auto-home-02/metadata", {"number": 7}),
+    ):
+        response = _request("PUT", f"{SCENE_PATH}{path}", json=body)
+        assert response.status_code == 409, path
+        assert "Wait for reconstruction" in response.json()["detail"]
+
+
+def test_commands_fail_closed_on_targets_a_rebuild_retired(
+    isolated_store: SceneRepository,
+) -> None:
+    isolated_store.put(_scene())
+    response = _request(
+        "PUT",
+        f"{SCENE_PATH}/tracks/auto-away-99/metadata",
+        json={"number": 4},
+    )
+    assert response.status_code == 409
+    assert "Unknown track" in response.json()["detail"]

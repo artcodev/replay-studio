@@ -31,6 +31,7 @@ def _calibration(frame_index: int) -> FrameCalibration:
         matched_curves=0,
         completed_curve_count=0,
         reprojection_error=1.0,
+        reprojection_p95=2.0,
         ground_error_p50_metres=0.1,
         ground_error_p95_metres=0.2,
         pitch_side="right",
@@ -66,6 +67,9 @@ class FakeEngine:
             diagnostics=diagnostics,
         )
 
+    def recalibrate(self, frames) -> CalibrationBatchResult:
+        return self.calibrate(frames)
+
 
 class FakeRuntime:
     def __init__(self, engine: FakeEngine) -> None:
@@ -92,9 +96,15 @@ def test_service_decodes_frames_and_serializes_engine_dtos() -> None:
     assert result["calibratedFrameCount"] == 1
     assert result["frames"][0]["frameIndex"] == 7
     assert result["frames"][0]["pitchSide"] == "right"
+    assert result["frames"][0]["reprojectionP95"] == 2.0
     assert result["diagnostics"]["modelVersion"] == "fake-v1"
+    assert result["diagnostics"]["inferenceMode"] == "cache-aware"
     assert engine.received[0].width == 16
     assert engine.received[0].height == 9
+
+    refreshed = service.recalibrate("[8]", [_jpeg()])
+    assert refreshed["frames"][0]["frameIndex"] == 8
+    assert refreshed["diagnostics"]["inferenceMode"] == "forced-refresh"
 
 
 def test_service_rejects_mismatched_frame_indices_before_loading_engine() -> None:

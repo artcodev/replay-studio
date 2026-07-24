@@ -26,6 +26,8 @@ MODEL_FIELDS = frozenset(
         "hrnetCheckpointSha256",
         "modelLoadSeconds",
         "soccerNetCommit",
+        "torchVersion",
+        "mpsFallbackEnabled",
     }
 )
 READINESS_FIELDS = MODEL_FIELDS | {
@@ -119,6 +121,28 @@ def validate_model_payload(
         raise IdentityWorkerError(
             "Identity worker returned an unsupported model contract"
         )
+    device = payload.get("device")
+    batch_size = payload.get("batchSize")
+    torch_version = payload.get("torchVersion")
+    mps_fallback = payload.get("mpsFallbackEnabled")
+    if device is not None and (
+        not isinstance(device, str) or not device.strip()
+    ):
+        raise IdentityWorkerError("Identity worker returned an invalid device")
+    if batch_size is not None and (
+        isinstance(batch_size, bool)
+        or not isinstance(batch_size, int)
+        or batch_size < 1
+    ):
+        raise IdentityWorkerError("Identity worker returned an invalid batch size")
+    if torch_version is not None and not isinstance(torch_version, str):
+        raise IdentityWorkerError(
+            "Identity worker returned an invalid PyTorch version"
+        )
+    if mps_fallback is not None and not isinstance(mps_fallback, bool):
+        raise IdentityWorkerError(
+            "Identity worker returned an invalid MPS fallback flag"
+        )
     return payload
 
 
@@ -137,4 +161,15 @@ def project_model_contract(payload: Mapping[str, Any]) -> dict[str, object]:
         "dimension": int(payload["dimension"]),
         "normalized": True,
         "evidenceFingerprintVersion": payload["evidenceFingerprintVersion"],
+    }
+
+
+def project_runtime_contract(payload: Mapping[str, Any]) -> dict[str, object]:
+    """Observable inference runtime, deliberately separate from model identity."""
+
+    return {
+        "device": str(payload.get("device") or "unknown"),
+        "batchSize": int(payload.get("batchSize") or 0),
+        "torchVersion": payload.get("torchVersion"),
+        "mpsFallbackEnabled": bool(payload.get("mpsFallbackEnabled", False)),
     }

@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import {
   DEFAULT_THREE_VIEW_OPTIONS,
   THREE_VIEW_LAYER_ITEMS,
+  withInferredPositionRenderMode,
   withThreeViewOption,
   type ThreeViewOptions,
 } from './threeViewOptions'
@@ -16,7 +17,18 @@ describe('threeViewOptions', () => {
       allPaths: false,
       ball: true,
       analysisMarkers: true,
+      inferredPositions: 'transparent',
     })
+  })
+
+  it('updates the inferred-position render mode without touching toggles', () => {
+    const current: ThreeViewOptions = { ...DEFAULT_THREE_VIEW_OPTIONS }
+    const updated = withInferredPositionRenderMode(current, 'transparent')
+
+    expect(updated).not.toBe(current)
+    expect(updated.inferredPositions).toBe('transparent')
+    expect(current.inferredPositions).toBe('transparent')
+    expect(updated.models).toBe(true)
   })
 
   it('returns an immutable option update', () => {

@@ -30,7 +30,10 @@ def create_pnlcalib_engine(
         inference=PnLCalibInference(models),
         model_version=models.model_version,
         device=str(models.device),
-        batch_size=max(1, int(os.environ.get("PNLCALIB_BATCH_SIZE", "2"))),
+        # The pinned points+lines CPU runtime is only process-safe for a
+        # single-frame tensor. The service may accept a multi-frame HTTP
+        # request, but evaluates those frames sequentially here.
+        batch_size=max(1, int(os.environ.get("PNLCALIB_BATCH_SIZE", "1"))),
         cache=CalibrationResultCache(
             max_entries=resolved_cache_max_entries,
             ttl_seconds=cache_ttl_seconds,

@@ -300,6 +300,11 @@ configured runner.
 docker compose up --build
 ```
 
+That command is the all-Docker CPU mode. On Apple Silicon, the canonical
+three-worker MPS layout has a separate four-tab startup and recovery procedure:
+[`docs/MPS_LOCAL_OPERATIONS.md`](docs/MPS_LOCAL_OPERATIONS.md). Do not mix the
+plain CPU command with the MPS override.
+
 The one-shot `migrate` service upgrades PostgreSQL first; the API and both
 runners start only after it exits successfully. The API only publishes compact
 jobs and their telemetry. Each runner isolates work in child processes, so
@@ -516,6 +521,7 @@ remove the provider's attribution or licensing requirements.
 
 ## Research notes
 
+- [Unified application improvement project: architecture, vision models, pose and actions](docs/APPLICATION_IMPROVEMENT_PROJECT.md)
 - [Football data/API comparison](docs/FOOTBALL_DATA_APIS.md)
 - [SoccerNet, Roboflow Sports, and Game State roadmap](docs/GAME_STATE_RECONSTRUCTION_ROADMAP.md)
 - [Ball detection, temporal tracking, QA, and deployment](docs/BALL_TRACKING.md)

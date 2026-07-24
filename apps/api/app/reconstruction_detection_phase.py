@@ -1,8 +1,17 @@
 from __future__ import annotations
 
+"""Detection phase that consumes, but can never produce, calibration."""
+
+from dataclasses import replace
 from typing import Mapping
 
-from .reconstruction_calibration_selection import select_representative_calibration
+from .reconstruction_calibration_application import (
+    apply_snapshot_to_people,
+    calibration_impact,
+)
+from .reconstruction_calibration_snapshot import (
+    load_persisted_calibration_snapshot,
+)
 from .reconstruction_dense_ball_phase import (
     detect_dense_ball_phase,
     skipped_dense_ball_result,
@@ -12,38 +21,32 @@ from .reconstruction_detection_contract import (
     FrameAnalysisResult,
 )
 from .reconstruction_detection_result_projection import (
-    project_calibration_phase_result,
     project_frame_analysis_result,
 )
+from .reconstruction_errors import ReconstructionError
 from .reconstruction_progress import ReconstructionProgress
 from .reconstruction_reid_phase import extract_reid_evidence
-from .reconstruction_sampled_calibration import prepare_sampled_calibrations
 from .reconstruction_sampled_detection_preparation import (
     load_sampled_frames,
     prepare_sampled_detectors,
 )
-from .reconstruction_sampled_frame_detection import analyze_sampled_frames
-from .reconstruction_temporal_calibration_phase import (
-    solve_temporal_calibration_phase,
+from .reconstruction_sampled_frame_detection import (
+    analyze_sampled_detections,
 )
 
 
-def detect_and_calibrate_phase(
+def detect_with_persisted_calibration_phase(
     scene: dict,
     *,
     model_name: str,
-    reconstruction_request: Mapping,
     ball_backend: str,
     ball_detection_input: Mapping,
     ball_detection_profile: str = "automatic",
+    contact_point_profile: str = "bbox-bottom",
     progress: ReconstructionProgress,
-) -> tuple[FrameAnalysisResult, CalibrationPhaseResult]:
+) -> tuple[FrameAnalysisResult, CalibrationPhaseResult, dict]:
     frames = load_sampled_frames(scene, progress)
-    calibration_inputs = prepare_sampled_calibrations(
-        frames,
-        reconstruction_request,
-        progress,
-    )
+    snapshot = load_persisted_calibration_snapshot(scene, frames)
     runtime = prepare_sampled_detectors(
         scene,
         frames,
@@ -52,44 +55,39 @@ def detect_and_calibrate_phase(
         ball_detection_input=ball_detection_input,
         progress=progress,
     )
-    sampled = analyze_sampled_frames(
+    sampled = analyze_sampled_detections(
         scene,
         frames,
         runtime,
-        calibration_inputs,
         progress,
     )
-    temporal = solve_temporal_calibration_phase(
+    if sampled.frame_sizes != snapshot.frame_sizes:
+        raise ReconstructionError(
+            "Decoded frame sizes do not match the completed calibration artifact"
+        )
+
+    person_application = apply_snapshot_to_people(
         scene,
-        frames,
-        sampled.calibration.frame_sizes,
-        sampled.calibration.accepted_automatic_direct_by_sample,
-        sampled.calibration.accepted_manual_direct_by_sample,
-        sampled.calibration.camera_motion_edges,
-        sampled.calibration.camera_transforms,
-        sampled.calibration.frame_evidence,
         sampled.person_frames,
-        bool(calibration_inputs.manual_stabilized_by_sample),
-        progress,
+        snapshot,
+        contact_point_profile=contact_point_profile,
+        progress=progress,
     )
-    # ReID runs after the temporal solve: worker round-trips start only once
-    # camera quality is known (a calibration-preview can stop before them).
+
     identity_diagnostics, identity_warnings = extract_reid_evidence(
         frames,
         sampled.person_frames,
         progress,
     )
     if ball_detection_profile == "skip-manual-authoritative":
-        # The queued profile pinned the manual trajectory as authoritative:
-        # the most expensive phase is skipped explicitly, never silently.
         dense_ball = skipped_dense_ball_result(ball_detection_profile)
         progress.update(
             "detection",
             3,
             "Skipping dense ball detection",
             "The manual ball trajectory is authoritative for this run.",
-            62,
-            84,
+            38,
+            56,
             completed=1,
             total=1,
         )
@@ -102,41 +100,34 @@ def detect_and_calibrate_phase(
             generic_fallback_ball_frames=sampled.generic_ball_frames,
             detector_input=ball_detection_input,
             backend=ball_backend,
-            frame_sizes=sampled.calibration.frame_sizes,
-            temporal_calibration=temporal,
-            frame_evidence=sampled.calibration.frame_evidence,
-            camera_transforms=sampled.calibration.camera_transforms,
+            frame_sizes=snapshot.frame_sizes,
+            temporal_calibration=snapshot.temporal,
+            frame_evidence=snapshot.result.frame_evidence,
+            camera_transforms=snapshot.camera_transforms,
             progress=progress,
         )
-    selection = select_representative_calibration(
-        frames=frames,
-        frame_size=sampled.calibration.frame_size,
-        frame_evidence=sampled.calibration.frame_evidence,
-        accepted_frame_calibrations=sampled.calibration.accepted_frame_calibrations,
-        accepted_manual_direct_by_sample=(
-            sampled.calibration.accepted_manual_direct_by_sample
-        ),
-        camera_transforms=sampled.calibration.camera_transforms,
-        manual_stabilized_by_sample=calibration_inputs.manual_stabilized_by_sample,
-        manual_reference=calibration_inputs.manual_reference,
-        rejected_frame_count=sampled.calibration.rejected_frame_count,
-        temporal_recovered_frame_count=temporal.recovered_frame_count,
-        warnings=calibration_inputs.calibration_warnings,
+
+    calibration_result = replace(
+        snapshot.result,
+        metric_person_sample_count=person_application.metric_count,
+        metric_ball_sample_count=dense_ball.metric_sample_count,
+        contact_point_diagnostics=person_application.contact_point_diagnostics,
     )
-    return (
-        project_frame_analysis_result(
-            frames,
-            sampled,
-            runtime,
-            dense_ball,
-            identity_diagnostics,
-            identity_warnings,
-        ),
-        project_calibration_phase_result(
-            sampled,
-            calibration_inputs,
-            temporal,
-            dense_ball,
-            selection,
-        ),
+    frame_result = project_frame_analysis_result(
+        frames,
+        sampled,
+        runtime,
+        dense_ball,
+        identity_diagnostics,
+        identity_warnings,
     )
+    impact = calibration_impact(
+        snapshot,
+        person_application,
+        dense_ball,
+        contact_point_profile=contact_point_profile,
+    )
+    return frame_result, calibration_result, impact
+
+
+__all__ = ("detect_with_persisted_calibration_phase",)

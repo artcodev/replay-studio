@@ -29,7 +29,7 @@ class PitchCalibration:
     mean_line_score: float
     rectangle: str
     matched_curves: int = 0
-    method: str = "pitch-lines-ransac"
+    method: str = "unspecified"
     keypoint_count: int = 0
     inlier_count: int = 0
     reprojection_error: float | None = None
@@ -92,7 +92,7 @@ class PitchCalibration:
 
 @dataclass(frozen=True)
 class CalibrationAlignmentMetrics:
-    """Bidirectional image-space agreement between evidence and a camera fit."""
+    """Agreement expressed in a resolution-independent reference pixel grid."""
 
     precision: float
     recall: float
@@ -102,6 +102,8 @@ class CalibrationAlignmentMetrics:
     model_sample_count: int
     observed_sample_count: int
     tolerance_pixels: float
+    reference_width: int = 960
+    reference_height: int = 540
 
     def as_dict(self) -> dict:
         return {
@@ -113,4 +115,7 @@ class CalibrationAlignmentMetrics:
             "modelSampleCount": self.model_sample_count,
             "observedSampleCount": self.observed_sample_count,
             "tolerancePixels": round(self.tolerance_pixels, 2),
+            "residualUnit": "reference-pixel",
+            "referenceWidth": self.reference_width,
+            "referenceHeight": self.reference_height,
         }

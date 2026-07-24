@@ -3,6 +3,8 @@ import { projectScenePath } from './paths'
 import { sceneRequest } from './scenes'
 import type {
   PitchCalibrationAnchor,
+  CalibrationBorrowSource,
+  CalibrationDraftSource,
   PitchCalibrationDraft,
   PitchCalibrationPreset,
 } from '../../types/calibration'
@@ -22,15 +24,52 @@ export const calibrationClient = {
     projectScenePath(projectId, sceneId, '/pitch-calibration/preview'),
     { method: 'POST', body: JSON.stringify({ scene_time: sceneTime, preset, anchors }) },
   ),
-  apply: (
+  borrow: (
+    projectId: string,
+    sceneId: string,
+    sceneTime: number,
+    source: CalibrationBorrowSource,
+    preset?: PitchCalibrationPreset,
+  ) => request<PitchCalibrationDraft>(
+    projectScenePath(projectId, sceneId, '/pitch-calibration/borrow'),
+    {
+      method: 'POST',
+      body: JSON.stringify({
+        scene_time: sceneTime,
+        source,
+        preset,
+      }),
+    },
+  ),
+  saveDraft: (
     projectId: string,
     sceneId: string,
     sceneTime: number,
     preset: PitchCalibrationPreset,
     anchors: PitchCalibrationAnchor[],
-  ) => sceneRequest(projectId, projectScenePath(projectId, sceneId, '/pitch-calibration/apply'), {
+    source: CalibrationDraftSource,
+    acceptQualityWarning = false,
+  ) => sceneRequest(projectId, projectScenePath(projectId, sceneId, '/pitch-calibration/drafts'), {
     method: 'POST',
-    body: JSON.stringify({ scene_time: sceneTime, preset, anchors }),
+    body: JSON.stringify({
+      scene_time: sceneTime,
+      preset,
+      anchors,
+      source,
+      accept_quality_warning: acceptQualityWarning,
+    }),
+  }),
+  finalizeDrafts: (
+    projectId: string,
+    sceneId: string,
+  ) => sceneRequest(projectId, projectScenePath(projectId, sceneId, '/pitch-calibration/finalize'), {
+    method: 'POST',
+  }),
+  resetCalibration: (
+    projectId: string,
+    sceneId: string,
+  ) => sceneRequest(projectId, projectScenePath(projectId, sceneId, '/pitch-calibration/reset'), {
+    method: 'POST',
   }),
   setAttackingGoal: (projectId: string, sceneId: string, side: 'left' | 'right') => sceneRequest(
     projectId,

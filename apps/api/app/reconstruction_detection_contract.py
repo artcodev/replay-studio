@@ -41,3 +41,4 @@ class CalibrationPhaseResult:
     metric_person_sample_count: int
     metric_ball_sample_count: int
     warnings: list[str]
+    contact_point_diagnostics: dict | None = None

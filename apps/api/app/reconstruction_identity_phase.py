@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
 from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
@@ -23,10 +24,14 @@ from .reconstruction_jersey_resolution import (
     partition_local_jersey_evidence_for_resolver,
 )
 from .jersey_ocr_fusion import detect_jersey_number_switches
-from .reconstruction_identity_semantics import annotation_team
+from .reconstruction_identity_semantics import annotation_role, annotation_team
+from .reconstruction_coordinate_policy import METRIC_REQUIRED
 from .reconstruction_person_tracking import track_people
 from .reconstruction_progress import ReconstructionProgress
-from .reconstruction_scene_track_publisher import publish_scene_tracks
+from .reconstruction_scene_track_publisher import (
+    publish_provisional_canonical_tracks,
+    publish_scene_tracks,
+)
 from .reconstruction_team_classification import (
     include_reid_official_candidates,
     team_clusters,
@@ -60,6 +65,8 @@ def track_and_resolve_identity_phase(
     initial_warnings: list[str],
     *,
     jersey_ocr_profile: str = "automatic",
+    tracking_coordinate_policy: str = METRIC_REQUIRED,
+    image_fallback_sample_indices: Sequence[int] = (),
 ) -> IdentityPhaseResult:
     identity_warnings = list(initial_warnings)
     progress.update(
@@ -67,19 +74,28 @@ def track_and_resolve_identity_phase(
         4,
         "Linking observations into tracks",
         f"Associating detections across {len(frames)} frames.",
-        84,
-        91,
+        62,
+        86,
         completed=0,
         total=4,
     )
-    local_tracks = apply_track_identity_corrections(track_people(person_frames), scene)
+    short_horizon_association: dict = {}
+    local_tracks = apply_track_identity_corrections(
+        track_people(
+            person_frames,
+            coordinate_policy=tracking_coordinate_policy,
+            image_fallback_sample_indices=image_fallback_sample_indices,
+            diagnostics=short_horizon_association,
+        ),
+        scene,
+    )
     progress.update(
         "tracking",
         4,
         "Building local tracklets",
         f"Built {len(local_tracks)} local tracks; preparing team and role constraints.",
-        84,
-        91,
+        62,
+        86,
         completed=1,
         total=4,
     )
@@ -90,7 +106,11 @@ def track_and_resolve_identity_phase(
         if len(track.points) >= minimum or track.positive_annotation_ids
     ]
     preliminary_cluster_tracks = [
-        track for track in preliminary_stable_tracks if len(track.points) >= minimum
+        track
+        for track in preliminary_stable_tracks
+        if len(track.points) >= minimum
+        and track.role != "referee"
+        and annotation_role(track.manual_kind) != "referee"
     ]
     preliminary_mapping, _ = team_clusters(
         preliminary_cluster_tracks,
@@ -110,8 +130,8 @@ def track_and_resolve_identity_phase(
                 f"OCR crops {completed}/{total} · {recognized} readable "
                 "shirt-number observations."
             ),
-            84,
-            91,
+            62,
+            86,
             completed=1,
             total=4,
             eta_padding=2.0,
@@ -191,6 +211,9 @@ def track_and_resolve_identity_phase(
         resolver_jersey_evidence,
     )
     identity_resolution_diagnostics["manualSplits"] = split_identity_diagnostics
+    identity_resolution_diagnostics[
+        "shortHorizonAssociation"
+    ] = short_horizon_association
     identity_resolution_diagnostics["reid"] = deepcopy(identity_worker_diagnostics)
     identity_resolution_diagnostics["jerseyOcr"] = deepcopy(
         jersey_ocr_diagnostics
@@ -203,8 +226,8 @@ def track_and_resolve_identity_phase(
             f"Resolved {len(local_tracks)} local tracklets into "
             f"{len(canonical_tracks)} canonical people; ambiguous links remain provisional."
         ),
-        84,
-        91,
+        62,
+        86,
         completed=2,
         total=4,
     )
@@ -213,8 +236,19 @@ def track_and_resolve_identity_phase(
         for track in canonical_tracks
         if len(track.points) >= minimum or track.positive_annotation_ids
     ]
-    cluster_tracks = [track for track in stable_tracks if len(track.points) >= minimum]
-    mapping, colors = team_clusters(cluster_tracks, frame_size[0])
+    cluster_tracks = [
+        track
+        for track in stable_tracks
+        if len(track.points) >= minimum
+        and track.role != "referee"
+        and annotation_role(track.manual_kind) != "referee"
+    ]
+    team_classification_diagnostics: dict = {}
+    mapping, colors = team_clusters(
+        cluster_tracks,
+        frame_size[0],
+        diagnostics=team_classification_diagnostics,
+    )
     for track in stable_tracks:
         manual_team = annotation_team(track.manual_kind)
         if manual_team:
@@ -228,6 +262,9 @@ def track_and_resolve_identity_phase(
         "trackletIds": auto_official_tracklets,
         "source": "reid-role-votes",
     }
+    identity_resolution_diagnostics[
+        "teamClassification"
+    ] = team_classification_diagnostics
     assign_persistent_canonical_person_ids(canonical_tracks, scene, mapping)
     try:
         (
@@ -287,8 +324,8 @@ def track_and_resolve_identity_phase(
             f"Kept {len(stable_tracks)} renderable identities and preserved "
             f"{len(canonical_tracks)} video identities."
         ),
-        84,
-        91,
+        62,
+        86,
         completed=4,
         total=4,
         eta_padding=3.0,
@@ -298,12 +335,17 @@ def track_and_resolve_identity_phase(
         5,
         "Building metric 3D trajectories",
         "Projecting foot points and the ball onto the pitch, rejecting geometric outliers.",
-        91,
-        97,
+        86,
+        96,
         completed=0,
         total=2,
     )
     track_projection_diagnostics: dict = {}
+    track_projection_diagnostics["trackingAssociation"] = {
+        key: deepcopy(value)
+        for key, value in short_horizon_association.items()
+        if key != "frames"
+    }
     tracks = (
         publish_scene_tracks(
             canonical_tracks,
@@ -318,6 +360,23 @@ def track_and_resolve_identity_phase(
         if coordinate_mode != "unavailable"
         else []
     )
+    # A canonical person without a confident team/roster assignment is still a
+    # real detector-backed actor. Publish it as provisional identity rather than
+    # converting its whole trajectory into a translucent positional guess.
+    if coordinate_mode != "unavailable":
+        tracks = [
+            *tracks,
+            *publish_provisional_canonical_tracks(
+                canonical_tracks,
+                tracks,
+                mapping,
+                colors,
+                frame_size,
+                scene,
+                calibration,
+                coordinate_mode=coordinate_mode,
+            ),
+        ]
     tracks = apply_scene_track_identity_corrections(tracks, scene)
     canonical_people, canonical_identity_diagnostics = canonical_people_documents(
         canonical_tracks,

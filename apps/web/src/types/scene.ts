@@ -3,7 +3,7 @@ import type { FrameAnnotation, ModelComparisonReport } from './analysis'
 import type { CalibrationEvidence, PitchCalibrationAnchor, PitchCalibrationPreset, PitchOrientation } from './calibration'
 import type { CanonicalIdentityDiagnostics, CanonicalPerson } from './identity'
 import type { MultiPassSummary, SegmentLayout, VideoSegment } from './media'
-import type { BallDetectionBackend, BallTrajectoryMode, ProcessingStatus, QualityVerdict, ReconstructionArtifactManifest, ReconstructionModel, ReconstructionProgress, ReconstructionQuality, ReconstructionQualityReport } from './reconstruction'
+import type { BallDetectionBackend, BallTrajectoryMode, CalibrationArtifactInput, CalibrationProvenance, CalibrationReview, ContactPointProfile, ProcessingStatus, QualityVerdict, ReconstructionArtifactManifest, ReconstructionMode, ReconstructionModel, ReconstructionProgress, ReconstructionQuality, ReconstructionQualityReport, ReconstructionStage } from './reconstruction'
 import type { Keyframe, Track } from './tracking'
 
 export type Team = {
@@ -20,6 +20,12 @@ export type EventBinding = {
   type: string
 }
 
+export type SceneFrameExclusion = {
+  sourceFrameIndex: number
+  sceneTime: number
+  excludedAt?: string
+}
+
 export type SceneDocument = {
   id: string
   title: string
@@ -34,12 +40,28 @@ export type SceneDocument = {
       filename: string
       mediaUrl: string
       posterUrl: string
+      generationKey?: string
       fps: number
       analysisFps?: number
+      analysisFrameInput?: {
+        schemaVersion: number
+        source: 'uploaded-video'
+        coordinateSpace: 'source-video-pixels'
+        width: number
+        height: number
+        resize: 'none'
+        format: 'jpeg'
+        jpegQscale: number
+        chromaSampling: '4:4:4'
+        sourceFps?: number
+        averageFps?: number
+        sourceFrameCount?: number
+      }
       frameCount: number
       processingState: string
       sourceStart?: number
       sourceEnd?: number
+      frameExclusions?: SceneFrameExclusion[]
       parentSceneId?: string
       selectedSegmentId?: string
       primarySceneId?: string
@@ -58,16 +80,62 @@ export type SceneDocument = {
         currentInputFingerprint?: string
         inputState?: 'current' | 'stale' | 'unknown'
         inputStateReason?: 'reconstruction-input-changed' | string
+        resultState?: import('./reconstruction').ReconstructionResultState
         trackObservationSchemaVersion?: number
         status: 'queued' | 'processing' | 'ready' | 'cancelled' | 'failed'
+        mode?: ReconstructionMode
+        calibrationTrigger?: 'full-request' | 'manual-draft-finalize'
+        pendingCalibrationEditSession?: {
+          schemaVersion: 1
+          baseCalibrationInputFingerprint: string
+          baseDataFingerprint: string
+          baseArtifactSha256: string
+          editedSampleIndices: number[]
+          edits: Array<{
+            sampleIndex: number
+            sourceFrameIndex?: number | null
+            sceneTime: number
+            preset?: PitchCalibrationPreset | null
+            draftSource: import('./calibration').CalibrationDraftSource
+            savedAt: string
+          }>
+          createdAt: string
+          updatedAt: string
+        }
+        stage?: ReconstructionStage
+        calibrationReview?: CalibrationReview
+        calibrationInputFingerprint?: string
+        calibrationProvenance?: CalibrationProvenance
+        reconstructionProvenance?: {
+          schemaVersion: 1
+          producerRunId?: string | null
+          inputFingerprint?: string | null
+          producedAt?: string | null
+          calibrationProducerRunId?: string | null
+          calibrationDataFingerprint?: string | null
+          calibrationArtifactSha256?: string | null
+          identityTimelineArtifactSha256?: string | null
+        }
+        calibrationArtifactInput?: CalibrationArtifactInput
+        trackingCoordinatePolicy?: import('./reconstruction').TrackingCoordinatePolicy
+        calibrationFallbackConsent?: {
+          policy: 'explicit-image-fallback'
+          calibrationInputFingerprint: string
+          sampleIndices: number[]
+          confirmedAt?: string | null
+        }
         processingStatus?: ProcessingStatus
         qualityVerdict?: QualityVerdict
         qualityReport?: ReconstructionQualityReport
         quality?: ReconstructionQuality
         artifactManifest?: ReconstructionArtifactManifest
         calibration?: CalibrationEvidence
+        calibrationWarnings?: string[]
         progress?: ReconstructionProgress
         model?: ReconstructionModel
+        contactPointProfile?: ContactPointProfile
+        samplingFrameRate?: number
+        directCalibrationMaxGapSeconds?: number
         ballBackend?: BallDetectionBackend
         ballDetection?: {
           schemaVersion: number

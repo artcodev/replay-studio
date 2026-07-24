@@ -19,7 +19,7 @@ type SegmentLayoutEditorOptions = {
   saveState: Ref<string>
   error: Ref<string | null>
   projectId: () => string
-  saveScene: () => Promise<void>
+  saveSegmentLayout: () => Promise<void>
   seekTo: (time: number) => void
   writeRouteTime: (time: number) => void
   notifySceneMutation: () => void
@@ -30,6 +30,22 @@ export function useSegmentLayoutEditor(options: SegmentLayoutEditorOptions) {
   const selection = ref<string[]>([])
   const rebuilding = ref(false)
   const groupEditing = ref(false)
+  let autosaveTimer: ReturnType<typeof setTimeout> | null = null
+
+  // A group/role edit only lived in local state until the explicit save
+  // button; any scene refresh (job polling, navigation) silently reverted
+  // it. Persist edits shortly after they happen instead.
+  function scheduleAutosave() {
+    if (autosaveTimer !== null) clearTimeout(autosaveTimer)
+    autosaveTimer = setTimeout(() => {
+      autosaveTimer = null
+      void persistEdits()
+    }, 800)
+  }
+
+  async function persistEdits() {
+    await options.saveSegmentLayout()
+  }
   const layout = computed(() => options.sceneVideo.value?.segmentLayout ?? null)
   const groupOptions = computed(() => {
     const maximum = Math.max(
@@ -48,6 +64,7 @@ export function useSegmentLayoutEditor(options: SegmentLayoutEditorOptions) {
     if (video) normalizeSegmentLayout(video)
     options.notifySceneMutation()
     options.saveState.value = message
+    scheduleAutosave()
   }
 
   function assignGroup(segment: VideoSegment, value: string) {
@@ -76,12 +93,14 @@ export function useSegmentLayoutEditor(options: SegmentLayoutEditorOptions) {
     if (!video) return
     const newEvent = splitSegmentTail(video, selection.value)
     if (!newEvent) {
-      options.error.value = 'Select a continuous group tail, leaving its first segment in the original event.'
+      options.error.value = 'Select a continuous run of shots inside one event, leaving at least one other shot in it.'
       return
     }
     selection.value = []
+    if (layout.value) layout.value.status = 'edited'
     options.notifySceneMutation()
     options.saveState.value = `Created Event ${newEvent}; later events shifted`
+    scheduleAutosave()
   }
 
   function toggleGroupEditing() {
@@ -105,10 +124,14 @@ export function useSegmentLayoutEditor(options: SegmentLayoutEditorOptions) {
   async function confirm() {
     const video = options.sceneVideo.value
     if (!video?.segmentLayout) return
+    if (autosaveTimer !== null) {
+      clearTimeout(autosaveTimer)
+      autosaveTimer = null
+    }
     normalizeSegmentLayout(video, true)
     video.segmentLayout.status = 'confirmed'
     options.notifySceneMutation()
-    await options.saveScene()
+    await options.saveSegmentLayout()
   }
 
   async function saveGroupMap() {
@@ -138,6 +161,10 @@ export function useSegmentLayoutEditor(options: SegmentLayoutEditorOptions) {
   function reset() {
     selection.value = []
     groupEditing.value = false
+    if (autosaveTimer !== null) {
+      clearTimeout(autosaveTimer)
+      autosaveTimer = null
+    }
   }
 
   return {

@@ -23,6 +23,15 @@ from app.reconstruction import reconstruct_scene
 from app.reconstruction_errors import ReconstructionError, StaleReconstructionRun
 from app.reconstruction_errors import IdentityCorrectionError
 from app.reconstruction_queue import queue_reconstruction
+from app.reconstruction_calibration_fingerprint import calibration_input_fingerprint
+from app.reconstruction_calibration_snapshot import calibration_data_fingerprint
+from app.artifact_store import reconstruction_artifact_store
+from app.reconstruction_artifact_codec import materialized_artifacts
+from app.reconstruction_artifact_manifest import (
+    artifact_references,
+    merge_artifact_manifest,
+)
+from app.reconstruction_calibration_artifacts import publish_calibration_frames_artifact
 from app.reconstruction_run_repository import ReconstructionRunRepository
 from app.reconstruction_worker import captured_match_snapshot, reconstruct_scene_by_id
 from app.scene_document import (
@@ -40,13 +49,14 @@ class Persistence:
 
 
 def _scene(run_id: str = "run-old") -> dict:
-    return {
+    scene = {
         "id": "revision-scene",
         "title": "Revision guard",
         "duration": 4.0,
         "payload": {
             "videoAsset": {
                 "id": "asset-1",
+                "fps": 10.0,
                 "selectedSegmentId": "segment-1",
                 "sourceStart": 0.0,
                 "sourceEnd": 4.0,
@@ -67,6 +77,54 @@ def _scene(run_id: str = "run-old") -> dict:
             "ball": {"keyframes": [{"t": 1.0, "x": 0.0, "z": 0.0}]},
         },
     }
+    reconstruction = scene["payload"]["videoAsset"]["reconstruction"]
+    reconstruction["stage"] = "reconstruction"
+    reconstruction["trackingCoordinatePolicy"] = "metric-required"
+    reconstruction["calibrationInputFingerprint"] = calibration_input_fingerprint(
+        scene
+    )
+    reconstruction["calibration"] = {
+        "schemaVersion": 2,
+        "summary": {},
+        "manualFrameAnchors": [],
+        "frameEvidence": [],
+    }
+    reconstruction["pitchCalibration"] = {"status": "ready"}
+    reconstruction["pitchOrientation"] = {}
+    data_fingerprint = calibration_data_fingerprint(reconstruction)
+    published_calibration = publish_calibration_frames_artifact(
+        scene,
+        reconstruction,
+        artifact_references(reconstruction),
+        materialized_artifacts(reconstruction),
+        store=reconstruction_artifact_store(),
+    )
+    calibration_artifact = published_calibration.reference
+    reconstruction["artifactManifest"] = merge_artifact_manifest(
+        reconstruction.get("artifactManifest"),
+        calibrationFrames=calibration_artifact,
+    )
+    assert published_calibration.encoding is not None
+    reconstruction["calibration"] = (
+        published_calibration.encoding.compact_calibration
+    )
+    reconstruction["ballDetection"] = (
+        published_calibration.encoding.compact_ball_detection
+    )
+    reconstruction["calibrationProvenance"] = {
+        "schemaVersion": 1,
+        "runId": "calibration-run",
+        "producedAt": "2026-07-21T12:00:00+00:00",
+        "calibrationInputFingerprint": reconstruction[
+            "calibrationInputFingerprint"
+        ],
+        "dataFingerprint": data_fingerprint,
+        "artifact": calibration_artifact,
+        "totalFrames": 0,
+        "resolvedFrames": 0,
+        "unresolvedFrames": 0,
+    }
+    return scene
 
 
 @pytest.fixture
@@ -153,7 +211,7 @@ def test_queue_assigns_unique_run_revision_and_input_fingerprint(monkeypatch):
         {"status": "ready", "runRevision": 7}
     )
     monkeypatch.setattr(
-        "app.reconstruction_queue.frame_paths", lambda _: [("frame", 0.0)]
+        "app.reconstruction_queue.frame_paths", lambda _, **_kwargs: [("frame", 0.0)]
     )
     monkeypatch.setattr(
         "app.reconstruction_queue.reconstruction_runs.enqueue_reconstruction",
@@ -176,7 +234,7 @@ def test_queue_assigns_unique_run_revision_and_input_fingerprint(monkeypatch):
 def test_queue_inherits_skip_profile_only_while_manual_ball_is_authoritative(
     monkeypatch,
 ):
-    monkeypatch.setattr("app.reconstruction_queue.frame_paths", lambda _: [])
+    monkeypatch.setattr("app.reconstruction_queue.frame_paths", lambda _, **_kwargs: [])
     monkeypatch.setattr(
         "app.reconstruction_queue.reconstruction_runs.enqueue_reconstruction",
         lambda value, **_kwargs: value,
@@ -388,7 +446,7 @@ def test_queue_compare_and_swap_rejects_a_stale_scene_snapshot(
         isolated_store.runs,
     )
     monkeypatch.setattr(
-        "app.reconstruction_queue.frame_paths", lambda _: [("frame", 0.0)]
+        "app.reconstruction_queue.frame_paths", lambda _, **_kwargs: [("frame", 0.0)]
     )
 
     with pytest.raises(StaleReconstructionRun):

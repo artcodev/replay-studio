@@ -7,6 +7,11 @@ CALIBRATION_PASS_MAX_GAP_SECONDS = 0.60
 CALIBRATION_REVIEW_MAX_GAP_SECONDS = 1.00
 CALIBRATION_PASS_REPROJECTION_P95 = 8.0
 CALIBRATION_REVIEW_REPROJECTION_P95 = 15.0
+# PnLCalib's ground-plane residual is measured in the coordinate space that
+# reconstruction actually consumes. A frame can align many white-line pixels
+# while a tail of semantic keypoints is still displaced by more than a metre;
+# such a direct anchor is too distorted to drive player trajectories.
+CALIBRATION_REVIEW_GROUND_ERROR_P95_METRES = 1.0
 CALIBRATION_SHOT_REVIEW_REPROJECTION_P95 = 20.0
 CALIBRATION_PASS_SIDE_AGREEMENT = 0.90
 CALIBRATION_REVIEW_SIDE_AGREEMENT = 0.80

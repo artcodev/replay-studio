@@ -6,8 +6,11 @@ import FrameDetectionOverlay from './FrameDetectionOverlay.vue'
 import PitchCalibrationOverlay from './PitchCalibrationOverlay.vue'
 import PitchCalibrationPanel from './PitchCalibrationPanel.vue'
 import ReconstructionProgressPanel from './ReconstructionProgressPanel.vue'
+import SelectedTrackProjectionOverlay from './SelectedTrackProjectionOverlay.vue'
 import ThreeScenePane from './ThreeScenePane.vue'
 import VideoReviewPane from './VideoReviewPane.vue'
+import VideoOverlayMenu from '../VideoOverlayMenu.vue'
+import type { VideoOverlayOptions } from '../../lib/videoOverlayOptions'
 import VideoSelectionStatus from './VideoSelectionStatus.vue'
 import { VIDEO_REVIEW_MAX_SCALE, VIDEO_REVIEW_MIN_SCALE } from '../../lib/videoReviewTransform'
 import type { PathProjectionContext } from '../../lib/pathProjection'
@@ -20,9 +23,12 @@ import type { usePlayerActionEditor } from '../../composables/usePlayerActionEdi
 import type { useReconstructionController } from '../../composables/useReconstructionController'
 import type { useVideoReviewViewport } from '../../composables/useVideoReviewViewport'
 import type { FrameAnalysis } from '../../types/analysis'
+import type { CalibrationFrameEvidence } from '../../types/calibration'
+import type { CanonicalPerson } from '../../types/identity'
 import type { SceneDocument, SceneVideoAsset } from '../../types/scene'
 import type { Keyframe, Track } from '../../types/tracking'
 import type { ThreeRenderQuality, ThreeViewOptions } from '../../lib/threeViewOptions'
+import { projectPitchMarkings } from '../../lib/pitchProjection'
 
 type ViewMode = 'video' | 'split' | '3d'
 type ViewportApi = { cameraPreset: (name: 'broadcast' | 'orbit' | 'tactical' | 'goal') => void }
@@ -44,12 +50,14 @@ const props = defineProps<{
   view: {
     mode: Ref<ViewMode>
     options: Ref<ThreeViewOptions>
+    videoOverlayOptions: Ref<VideoOverlayOptions>
     renderQuality: Ref<ThreeRenderQuality>
     activeTab: Ref<'binding' | 'qa' | 'events'>
     viewport: Ref<ViewportApi | null>
   }
   selection: {
     selectedTrack: ComputedRef<Track | null>
+    selectedCanonicalPerson: ComputedRef<CanonicalPerson | null>
     selectedTrackId: Ref<string | null>
     selectedFramePersonId: Ref<string | null>
     editMode: Ref<boolean>
@@ -61,6 +69,7 @@ const props = defineProps<{
   }
   analysis: {
     frameCount: ComputedRef<number>
+    calibrationFrames: ComputedRef<CalibrationFrameEvidence[]>
     videoPathUsesReferenceCamera: ComputedRef<boolean>
     videoPathProjectionContext: ComputedRef<PathProjectionContext | null>
     videoPathUnavailableReason: ComputedRef<string | null>
@@ -86,13 +95,56 @@ const scene = computed(() => {
 
 const referenceCaption = computed(() => {
   const reconstruction = props.reconstruction
-  if (reconstruction.running.value) {
+  // The calibration stage reports its progress inside its own modal, not here.
+  if (reconstruction.running.value && reconstruction.stage.value !== 'calibration') {
     return `Original clip · ${reconstruction.progress.value?.overallPercent ?? 0}% · ${reconstruction.progress.value?.label ?? 'STARTING ANALYSIS'}`
   }
   return scene.value.payload.tracks.length
     ? `Original clip · AUTO ${scene.value.payload.tracks.length} · ${props.analysis.calibrationLabel.value}`
     : 'Original clip'
 })
+
+const storedCalibrationFrame = computed<CalibrationFrameEvidence | null>(() => {
+  const frames = props.analysis.calibrationFrames.value
+  if (!frames.length) return null
+  return frames.reduce((nearest, frame) => (
+    Math.abs(frame.sceneTime - props.playback.currentTime.value)
+      < Math.abs(nearest.sceneTime - props.playback.currentTime.value)
+      ? frame
+      : nearest
+  ))
+})
+const storedCalibrationFrameSize = computed(() => ({
+  width: storedCalibrationFrame.value?.frameWidth
+    ?? props.playback.sourceVideo.value?.videoWidth
+    ?? 960,
+  height: storedCalibrationFrame.value?.frameHeight
+    ?? props.playback.sourceVideo.value?.videoHeight
+    ?? 540,
+}))
+const storedCalibrationMarkings = computed(() => {
+  const frame = storedCalibrationFrame.value
+  if (!frame) return []
+  if (frame.markings?.length) return frame.markings
+  return projectPitchMarkings(
+    frame.imageToPitch,
+    storedCalibrationFrameSize.value.width,
+    storedCalibrationFrameSize.value.height,
+  )
+})
+const projectionDebugObservations = computed(() => (
+  props.selection.selectedTrack.value?.observations
+  ?? props.selection.selectedCanonicalPerson.value?.observations
+  ?? []
+))
+const projectionDebugLabel = computed(() => (
+  props.selection.selectedTrack.value?.label
+  ?? props.selection.selectedCanonicalPerson.value?.displayName
+  ?? null
+))
+const contactPointProfile = computed(() => (
+  scene.value.payload.videoAsset?.reconstruction?.contactPointProfile ?? 'bbox-bottom'
+))
 
 function bindVideoReviewViewport(element: HTMLDivElement | null) {
   props.videoReview.viewport.value = element
@@ -126,7 +178,7 @@ function bindThreeViewport(value: ViewportApi | null) {
     }"
   >
     <ReconstructionProgressPanel
-      v-if="reconstruction.running.value"
+      v-if="reconstruction.running.value && reconstruction.stage.value !== 'calibration'"
       :progress="reconstruction.progress.value"
       :phases="reconstruction.phases.value"
       :frame-count="analysis.frameCount.value"
@@ -168,16 +220,27 @@ function bindThreeViewport(value: ViewportApi | null) {
         :subject-label="selection.pathSubject.value?.label"
       />
       <PitchCalibrationOverlay
+        v-if="view.videoOverlayOptions.value.pitchCalibration || calibration.draft.value"
         :draft="calibration.activeDraft.value"
         :diagnostics="calibration.diagnostics.value"
-        :qa-frame="calibration.activeQaFrame.value"
-        :qa-frame-size="calibration.qaFrameSize.value"
-        :qa-markings="calibration.qaMarkings.value"
+        :qa-frame="calibration.activeQaFrame.value ?? storedCalibrationFrame"
+        :qa-frame-size="calibration.activeQaFrame.value ? calibration.qaFrameSize.value : storedCalibrationFrameSize"
+        :qa-markings="calibration.activeQaFrame.value ? calibration.qaMarkings.value : storedCalibrationMarkings"
         @overlay-element="bindCalibrationOverlay"
         @update-drag="calibration.updateDraggedAnchor"
         @finish-drag="calibration.finishAnchorDrag"
         @start-anchor-drag="calibration.startAnchorDrag"
         @nudge-anchor="calibration.nudgeAnchor"
+      />
+      <SelectedTrackProjectionOverlay
+        :enabled="view.videoOverlayOptions.value.projectionDebug"
+        :label="projectionDebugLabel"
+        :observations="projectionDebugObservations"
+        :calibration-frames="analysis.calibrationFrames.value"
+        :pitch="scene.payload.pitch"
+        :current-time="playback.currentTime.value"
+        :frame-size="storedCalibrationFrameSize"
+        :contact-point-profile="contactPointProfile"
       />
       <FrameDetectionOverlay
         v-if="frameAnalysis.activeAnalysis.value && !calibration.draft.value && view.activeTab.value !== 'qa'"
@@ -188,6 +251,7 @@ function bindThreeViewport(value: ViewportApi | null) {
         :canonical-id="frameAnalysis.framePersonCanonicalId"
         :person-label="frameAnalysis.framePersonLabel"
         :selection-description="analysis.framePersonSelectionDescription"
+        :overlay-options="view.videoOverlayOptions.value"
         @overlay-element="bindFrameAnalysisOverlay"
         @start-drag="frameAnnotations.startDrag"
         @update-drag="frameAnnotations.updateDrag"
@@ -231,6 +295,12 @@ function bindThreeViewport(value: ViewportApi | null) {
           @calibrate-again="calibration.open(calibration.preset.value)"
           @return-to-frame="playback.seekTo(calibration.draft.value!.sceneTime)"
           @apply="calibration.apply"
+        />
+      </template>
+      <template #overlay-controls>
+        <VideoOverlayMenu
+          v-model="view.videoOverlayOptions.value"
+          :disabled="Boolean(calibration.draft.value)"
         />
       </template>
     </VideoReviewPane>

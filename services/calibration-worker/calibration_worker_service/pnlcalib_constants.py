@@ -2,7 +2,7 @@ INPUT_WIDTH = 960
 INPUT_HEIGHT = 540
 KEYPOINT_THRESHOLD = 0.1611
 LINE_THRESHOLD = 0.3434
-CACHE_SCHEMA_VERSION = "pnlcalib-points-lines-v2"
+CACHE_SCHEMA_VERSION = "pnlcalib-points-lines-v3"
 
 
 # Official PnLCalib line-channel order. Goal-frame segments remain useful

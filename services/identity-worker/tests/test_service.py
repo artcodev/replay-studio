@@ -19,7 +19,10 @@ from identity_worker_service.provider_contract import (
     ProviderEmbedding,
     ProviderUnavailable,
 )
-from identity_worker_service.prtreid_provider import PRTReIDProvider
+from identity_worker_service.prtreid_provider import (
+    PRTReIDProvider,
+    resolve_torch_device,
+)
 
 
 class FakeProvider:
@@ -74,6 +77,45 @@ class FakeProvider:
 class UnavailableProvider(FakeProvider):
     def load(self) -> None:
         raise ProviderUnavailable("checkpoint is missing")
+
+
+class _FakeMpsBackend:
+    def __init__(self, *, built: bool, available: bool) -> None:
+        self._built = built
+        self._available = available
+
+    def is_built(self) -> bool:
+        return self._built
+
+    def is_available(self) -> bool:
+        return self._available
+
+
+class _FakeTorchRuntime:
+    def __init__(self, *, built: bool, available: bool) -> None:
+        self.backends = type(
+            "Backends",
+            (),
+            {"mps": _FakeMpsBackend(built=built, available=available)},
+        )()
+        self.cuda = type("Cuda", (), {"is_available": lambda _self: False})()
+
+    @staticmethod
+    def device(value: str) -> str:
+        return value
+
+
+def test_mps_device_fails_closed_when_metal_is_unavailable():
+    runtime = _FakeTorchRuntime(built=True, available=False)
+
+    with pytest.raises(ProviderUnavailable, match="Metal/MPS is unavailable"):
+        resolve_torch_device(runtime, "mps")
+
+
+def test_mps_device_is_preserved_when_metal_is_available():
+    runtime = _FakeTorchRuntime(built=True, available=True)
+
+    assert resolve_torch_device(runtime, "mps") == "mps"
 
 
 def test_production_provider_never_loads_without_verified_assets(monkeypatch, tmp_path):
@@ -364,6 +406,9 @@ def test_identical_second_request_is_served_without_provider_call():
     assert second.json()["diagnostics"]["cacheHitCount"] == 1
     assert second.json()["diagnostics"]["cacheMissCount"] == 0
     assert second.json()["diagnostics"]["providerInferenceCount"] == 0
+    assert first.json()["diagnostics"]["providerCallCount"] == 1
+    assert first.json()["diagnostics"]["providerInferenceSeconds"] >= 0
+    assert first.json()["diagnostics"]["requestSeconds"] >= 0
     assert second.json()["items"][0]["cacheHit"] is True
 
 

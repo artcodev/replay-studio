@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from hashlib import sha256
 import os
 from pathlib import Path
+import platform
 import sys
 from typing import Any
 
@@ -84,10 +85,23 @@ def load_pnlcalib_runtime(root: Path | None = None) -> PnLCalibRuntime:
     )
 
 
-def model_version(*weights_paths: Path) -> str:
-    """Build a process-local model identity without rereading large weights."""
+def model_version(*weights_paths: Path, device: torch.device | None = None) -> str:
+    """Build the cache identity for weights, tensor contract and runtime.
 
-    identity = [CACHE_SCHEMA_VERSION, str(INPUT_WIDTH), str(INPUT_HEIGHT)]
+    CPU kernels and numerical results can differ across PyTorch versions and
+    architectures.  Reusing an x86/Rosetta answer after moving to native arm64
+    would make the supposedly fresh performance cutover invisible to both
+    cache layers, so runtime identity is part of the model contract.
+    """
+
+    identity = [
+        CACHE_SCHEMA_VERSION,
+        str(INPUT_WIDTH),
+        str(INPUT_HEIGHT),
+        str(torch.__version__),
+        platform.machine(),
+        str(device or "cpu"),
+    ]
     for path in weights_paths:
         stat = path.stat()
         identity.extend([str(path.resolve()), str(stat.st_size), str(stat.st_mtime_ns)])
@@ -106,19 +120,44 @@ def _load_model(
         config = _attr_dict(yaml.safe_load(handle))
     model = factory(config)
     try:
-        state = torch.load(weights_path, map_location=device, weights_only=True)
+        # Deserialize on CPU first. Loading a large state dict directly onto
+        # MPS has historically been less predictable and provides no startup
+        # benefit; the fully constructed module is moved exactly once below.
+        state = torch.load(weights_path, map_location="cpu", weights_only=True)
     except TypeError:
-        state = torch.load(weights_path, map_location=device)
+        state = torch.load(weights_path, map_location="cpu")
     model.load_state_dict(state)
     model.to(device)
     model.eval()
     return model
 
 
+def resolve_pnlcalib_device(requested: str | None = None) -> torch.device:
+    name = (requested or os.environ.get("PNLCALIB_DEVICE", "cpu")).strip().lower()
+    if name == "mps":
+        if not torch.backends.mps.is_built():
+            raise RuntimeError(
+                "PNLCALIB_DEVICE=mps was requested, but this PyTorch build has no MPS support"
+            )
+        if not torch.backends.mps.is_available():
+            raise RuntimeError(
+                "PNLCALIB_DEVICE=mps was requested, but the Metal device is unavailable"
+            )
+    elif name.startswith("cuda") and not torch.cuda.is_available():
+        raise RuntimeError(
+            f"PNLCALIB_DEVICE={name} was requested, but CUDA is unavailable"
+        )
+    elif name != "cpu":
+        raise RuntimeError(
+            f"Unsupported PNLCALIB_DEVICE={name}; expected cpu, mps, or cuda"
+        )
+    return torch.device(name)
+
+
 def load_pnlcalib_models() -> LoadedPnLCalibModels:
     root = plugin_root()
     runtime = load_pnlcalib_runtime(root)
-    device = torch.device(os.environ.get("PNLCALIB_DEVICE", "cpu"))
+    device = resolve_pnlcalib_device()
     keypoint_weights = Path(
         os.environ.get("PNLCALIB_KEYPOINT_WEIGHTS", "/models/pnl_SV_kp")
     )
@@ -126,7 +165,7 @@ def load_pnlcalib_models() -> LoadedPnLCalibModels:
         os.environ.get("PNLCALIB_LINE_WEIGHTS", "/models/pnl_SV_lines")
     )
     model_root = root / "pnlcalib"
-    version = model_version(keypoint_weights, line_weights)
+    version = model_version(keypoint_weights, line_weights, device=device)
     return LoadedPnLCalibModels(
         runtime=runtime,
         device=device,

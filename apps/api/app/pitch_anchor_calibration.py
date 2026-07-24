@@ -59,6 +59,7 @@ def calibration_from_anchors(
         mean_line_score=0.0,
         rectangle=preset,
         matched_curves=1 if preset == "center-circle" else 0,
+        method="manual-pitch-anchors",
         keypoint_count=len(anchors),
         inlier_count=inlier_count,
         reprojection_error=float(np.median(image_residuals[inlier_mask])),

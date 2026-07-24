@@ -22,13 +22,17 @@ from .reconstruction_person_detection_contract import Detection
 from .reconstruction_inputs import source_frame_index
 from .reconstruction_motion import camera_motion_estimate
 from .reconstruction_progress import ReconstructionProgress
+from .reconstruction_pnlcalib_retry import PnlCalibAttemptResolution
+from .direct_calibration_sampling import (
+    resolve_direct_calibration_max_gap_seconds,
+)
 from .reconstruction_sampled_frame_contract import (
     SampledCalibrationAnalysis,
     SampledCalibrationInputs,
 )
 
 
-def _manual_calibration_inputs(
+def manual_calibration_inputs(
     frames: list[tuple[Path, float]],
     overrides: list[dict],
 ) -> tuple[dict[int, PitchCalibration], dict[int, dict]]:
@@ -80,6 +84,11 @@ def prepare_sampled_calibrations(
     progress: ReconstructionProgress,
 ) -> SampledCalibrationInputs:
     overrides = manual_pitch_calibration_overrides(reconstruction_request)
+    direct_calibration_max_gap_seconds = (
+        resolve_direct_calibration_max_gap_seconds(
+            reconstruction_request.get("directCalibrationMaxGapSeconds")
+        )
+    )
 
     def calibration_progress(
         backend: str,
@@ -88,11 +97,6 @@ def prepare_sampled_calibrations(
         fraction: float,
         calibrated: int,
     ) -> None:
-        backend_label = (
-            "PnLCalib points + lines"
-            if backend == "pnlcalib"
-            else "Local semantic-keypoint fallback"
-        )
         manual_detail = (
             f" · {len(overrides)} manual frame anchor(s) will override matching samples"
             if overrides
@@ -101,22 +105,43 @@ def prepare_sampled_calibrations(
         progress.update(
             "calibration",
             2,
-            "Calibrating the pitch",
-            f"{backend_label} · {completed}/{total} frames · "
-            f"{calibrated} valid homographies{manual_detail}.",
-            4,
-            62,
+            "Run direct PnLCalib",
+            f"Pass 1 · infer neural field points and lines · {completed}/{total} "
+            f"frames · {calibrated} valid homographies{manual_detail}. "
+            "Rejected frames may receive up to two explicit retry passes next.",
+            8,
+            56,
             completed=completed,
             total=total,
             fraction=fraction,
             eta_padding=max(6.0, len(frames) * 0.25),
         )
 
+    def worker_batch_progress(batch) -> None:
+        if progress.run_log is None:
+            return
+        per_frame = batch.request_seconds / max(1, batch.batch_size)
+        progress.run_log.event(
+            "pnlcalib-worker-batch-finished",
+            retryStage="initial-cache-aware",
+            completed=batch.completed,
+            total=batch.total,
+            validHomographies=batch.valid,
+            batchSize=batch.batch_size,
+            requestSeconds=round(batch.request_seconds, 3),
+            effectiveSecondsPerFrame=round(per_frame, 3),
+            workerDiagnostics=batch.diagnostics,
+        )
+
     frame_calibrations, warnings = automatic_frame_calibrations(
         frames,
         calibration_progress,
+        on_worker_batch=worker_batch_progress,
+        direct_calibration_max_gap_seconds=(
+            direct_calibration_max_gap_seconds
+        ),
     )
-    manual_stabilized, manual_by_sample = _manual_calibration_inputs(
+    manual_stabilized, manual_by_sample = manual_calibration_inputs(
         frames,
         overrides,
     )
@@ -155,6 +180,7 @@ class SampledCalibrationAccumulator:
         scene_time: float,
         image: np.ndarray,
         people: list[Detection],
+        automatic_observation: PnlCalibAttemptResolution | None = None,
     ) -> None:
         self._frame_size = (image.shape[1], image.shape[0])
         self._frame_sizes[sample_index] = self._frame_size
@@ -179,23 +205,27 @@ class SampledCalibrationAccumulator:
             )
         self._camera_transforms[source_index] = self._camera_transform.copy()
 
-        automatic = self._inputs.frame_calibrations.get(source_index)
-        if automatic is not None:
-            automatic = canonicalize_penalty_side(
+        if automatic_observation is not None:
+            automatic = automatic_observation.calibration
+            automatic_evidence = automatic_observation.evidence
+        else:
+            automatic = self._inputs.frame_calibrations.get(source_index)
+            if automatic is not None:
+                automatic = canonicalize_penalty_side(
+                    automatic,
+                    self._frame_size[0],
+                )
+            automatic_evidence = frame_calibration_evidence(
+                self._scene,
+                sample_index,
+                scene_time,
+                image,
                 automatic,
-                self._frame_size[0],
+                projection_source="direct" if automatic is not None else "none",
+                people=people,
+                pitch=self._scene["payload"]["pitch"],
+                source_frame_index=source_index,
             )
-        automatic_evidence = frame_calibration_evidence(
-            self._scene,
-            sample_index,
-            scene_time,
-            image,
-            automatic,
-            projection_source="direct",
-            people=people,
-            pitch=self._scene["payload"]["pitch"],
-            source_frame_index=source_index,
-        )
         selected, evidence, selected_is_manual = (
             automatic,
             automatic_evidence,
@@ -226,15 +256,18 @@ class SampledCalibrationAccumulator:
                 source_frame_index=source_index,
                 manual=True,
             )
-            if (
-                manual_evidence["status"] == "accepted"
-                or automatic_evidence["status"] != "accepted"
-            ):
-                selected, evidence, selected_is_manual = (
-                    manual,
-                    manual_evidence,
-                    True,
-                )
+            # A persisted manual anchor is an explicit operator correction for
+            # this exact sample. It must win even when the automatic candidate
+            # passed its frame-local gates; otherwise editing a slightly drifted
+            # green frame is a no-op. A rejected manual observation intentionally
+            # leaves the frame unresolved instead of silently reverting to the
+            # automatic candidate. The latter remains attached below strictly as
+            # diagnostic evidence.
+            selected, evidence, selected_is_manual = (
+                manual,
+                manual_evidence,
+                True,
+            )
             evidence["manualObservation"] = {
                 "kind": "manual",
                 **calibration_attempt_payload(manual_evidence),
@@ -247,6 +280,11 @@ class SampledCalibrationAccumulator:
                 evidence["manualObservation"],
                 evidence["automaticObservation"],
             ]
+            evidence["observationChoice"] = {
+                "selectedKind": "manual",
+                "reason": "operator-frame-override",
+                "automaticCandidateStatus": automatic_evidence.get("status"),
+            }
         evidence["cameraMotion"] = {
             **camera_payload,
             "currentToReference": matrix_payload(self._camera_transform),
@@ -280,5 +318,6 @@ class SampledCalibrationAccumulator:
 
 __all__ = [
     "SampledCalibrationAccumulator",
+    "manual_calibration_inputs",
     "prepare_sampled_calibrations",
 ]

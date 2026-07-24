@@ -29,6 +29,12 @@ from .pipeline_domain import (
     validate_compact,
 )
 from .project_models import AnalysisRunRow
+from .reconstruction_calibration_fingerprint import calibration_input_fingerprint
+from .reconstruction_coordinate_policy import (
+    METRIC_REQUIRED,
+    resolve_full_run_coordinate_authorization,
+)
+from .reconstruction_errors import ReconstructionError
 from .project_resource_repository import (
     ProjectResourceConflict,
     ProjectResourceNotFound,
@@ -102,6 +108,20 @@ class ModelComparisonPipelineService:
             if reconstruction.get("status") in {"queued", "processing"}:
                 raise PipelineJobConflict(
                     "Wait for reconstruction to finish before comparing models"
+                )
+            try:
+                coordinate_policy, _ = resolve_full_run_coordinate_authorization(
+                    reconstruction,
+                    calibration_input_fingerprint=calibration_input_fingerprint(
+                        scene
+                    ),
+                )
+            except ReconstructionError as exc:
+                raise PipelineJobConflict(str(exc)) from exc
+            if coordinate_policy != METRIC_REQUIRED:
+                raise PipelineJobConflict(
+                    "Resolve every calibration frame before comparing tracking "
+                    "continuity; model comparison does not use image fallback"
                 )
 
             existing = session.scalar(

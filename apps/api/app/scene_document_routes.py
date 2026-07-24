@@ -8,9 +8,22 @@ from .reconstruction_series import (
     reconstruction_series_window,
 )
 from . import project_resource_access
-from .scene_contracts import SceneDocument
-from .scene_document import reconstruction_input_fingerprint
-from .scene_repository import scenes
+from .reconstruction_errors import ReconstructionError
+from .scene_contracts import (
+    SceneDocument,
+    SceneEventBindingsRequest,
+    SceneTitleRequest,
+    SegmentLayoutRequest,
+    TrackMetadataRequest,
+    TrackTrajectoryRequest,
+)
+from .scene_metadata_command import (
+    set_scene_event_bindings,
+    set_scene_title,
+    set_track_metadata,
+)
+from .segment_layout_command import set_scene_segment_layout
+from .track_trajectory_corrections import set_track_trajectory
 
 
 router = APIRouter(prefix="/api/projects/{project_id}/scenes", tags=["scenes"])
@@ -56,37 +69,98 @@ def get_scene_reconstruction_series(
         ) from exc
 
 
-@router.put("/{scene_id}", response_model=SceneDocument)
-def update_scene(project_id: str, scene_id: str, scene: SceneDocument):
-    if scene_id != scene.id:
-        raise HTTPException(status_code=400, detail="Scene id does not match URL")
-    current = project_resource_access.project_scene_or_404(project_id, scene_id)
-    incoming = scene.model_dump()
-    current_reconstruction = (
-        current.get("payload", {}).get("videoAsset", {}).get("reconstruction") or {}
-    )
-    incoming_reconstruction = (
-        incoming.get("payload", {}).get("videoAsset", {}).get("reconstruction") or {}
-    )
-    if current_reconstruction.get("status") in {"queued", "processing"}:
-        raise HTTPException(
-            status_code=409,
-            detail="Wait for reconstruction to finish before saving the scene",
+# The generic whole-document PUT was retired: every editor write is a
+# dedicated command below, so no client ever round-trips a scene document
+# and the revision fence no longer arbitrates between the UI and the
+# reconstruction runner.
+
+
+@router.put("/{scene_id}/title", response_model=SceneDocument)
+def update_scene_title(project_id: str, scene_id: str, request: SceneTitleRequest):
+    scene = project_resource_access.project_scene_or_404(project_id, scene_id)
+    try:
+        return set_scene_title(scene, request.title)
+    except ReconstructionError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@router.put("/{scene_id}/event-bindings", response_model=SceneDocument)
+def update_scene_event_bindings(
+    project_id: str,
+    scene_id: str,
+    request: SceneEventBindingsRequest,
+):
+    scene = project_resource_access.project_scene_or_404(project_id, scene_id)
+    try:
+        return set_scene_event_bindings(
+            scene,
+            [binding.model_dump() for binding in request.bindings],
         )
-    runtime_fields = ("runId", "runRevision", "inputFingerprint", "status")
-    if any(
-        current_reconstruction.get(field) != incoming_reconstruction.get(field)
-        for field in runtime_fields
-    ):
-        raise HTTPException(
-            status_code=409,
-            detail="The scene reconstruction changed; reload before saving",
+    except ReconstructionError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@router.put("/{scene_id}/tracks/{track_id}/metadata", response_model=SceneDocument)
+def update_scene_track_metadata(
+    project_id: str,
+    scene_id: str,
+    track_id: str,
+    request: TrackMetadataRequest,
+):
+    scene = project_resource_access.project_scene_or_404(project_id, scene_id)
+    try:
+        return set_track_metadata(
+            scene,
+            track_id,
+            label=request.label,
+            number=request.number,
         )
-    if reconstruction_input_fingerprint(current) != reconstruction_input_fingerprint(
-        incoming
-    ):
-        raise HTTPException(
-            status_code=409,
-            detail="Reconstruction inputs must be edited through their dedicated endpoints",
+    except ReconstructionError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@router.put("/{scene_id}/segment-layout", response_model=SceneDocument)
+def update_scene_segment_layout(
+    project_id: str,
+    scene_id: str,
+    request: SegmentLayoutRequest,
+):
+    """Publish event grouping onto the current scene.
+
+    The client sends only the layout, never a whole scene document, so an
+    editor holding an older revision still saves: grouping is idempotent and
+    outside the reconstruction fingerprint.
+    """
+    scene = project_resource_access.project_scene_or_404(project_id, scene_id)
+    try:
+        return set_scene_segment_layout(
+            scene,
+            [entry.model_dump(exclude_none=True) for entry in request.segments],
+            request.status,
         )
-    return scenes.put(incoming)
+    except ReconstructionError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@router.put("/{scene_id}/tracks/{track_id}/trajectory", response_model=SceneDocument)
+def update_scene_track_trajectory(
+    project_id: str,
+    scene_id: str,
+    track_id: str,
+    request: TrackTrajectoryRequest,
+):
+    """Publish a durable manual trajectory correction for one player.
+
+    The correction is anchored to the track's canonical identity so it
+    survives a rebuild; a track without one is refused rather than accepting
+    an edit the next run would drop (TD-TRACK-01).
+    """
+    scene = project_resource_access.project_scene_or_404(project_id, scene_id)
+    try:
+        return set_track_trajectory(
+            scene,
+            track_id,
+            [keyframe.model_dump() for keyframe in request.keyframes],
+        )
+    except ReconstructionError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc

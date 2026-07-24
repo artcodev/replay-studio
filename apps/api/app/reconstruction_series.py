@@ -6,6 +6,10 @@ from copy import deepcopy
 from math import isfinite
 from typing import Any, Mapping
 
+from .track_trajectory_corrections import (
+    apply_track_trajectory_correction,
+    track_trajectory_corrections,
+)
 from .artifact_store import ArtifactStore
 from .reconstruction_artifact_hydration import load_dense_reconstruction_artifacts
 
@@ -92,6 +96,15 @@ def reconstruction_series_window(
     )
     loaded = load_dense_reconstruction_artifacts(reconstruction, store=store)
     identity = loaded.get("identityTimeline") or {}
+    # Durable manual trajectory corrections are authoritative over model
+    # keyframes and are anchored to the canonical identity, so they survive a
+    # rebuild that renumbers render tracks.
+    corrections = track_trajectory_corrections(scene)
+    canonical_by_track = {
+        str(item.get("id")): str(item.get("canonicalPersonId") or "")
+        for item in scene.get("payload", {}).get("tracks") or []
+        if isinstance(item, Mapping)
+    }
     tracks = []
     for track in identity.get("tracks") or []:
         if not isinstance(track, Mapping):
@@ -99,12 +112,18 @@ def reconstruction_series_window(
         identifier = str(track.get("id") or "")
         if track_id is not None and identifier != track_id:
             continue
+        manual = corrections.get(canonical_by_track.get(identifier, ""), [])
+        published_keyframes = (
+            apply_track_trajectory_correction(track.get("keyframes") or [], manual)
+            if manual
+            else track.get("keyframes") or []
+        )
         tracks.append(
             {
                 "id": identifier,
                 "keyframes": [
                     deepcopy(item)
-                    for item in track.get("keyframes") or []
+                    for item in published_keyframes
                     if isinstance(item, Mapping)
                     and _in_window(
                         item,

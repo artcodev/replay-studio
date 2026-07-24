@@ -17,6 +17,14 @@ class PnLCalibInference:
         self._models = models
         self._projector = CalibrationProjector(models.runtime)
 
+    def _synchronize(self) -> None:
+        """Make asynchronous accelerator timings and failures observable."""
+
+        if self._models.device.type == "mps":
+            torch.mps.synchronize()
+        elif self._models.device.type == "cuda":
+            torch.cuda.synchronize(self._models.device)
+
     def infer(
         self,
         frames: list[DecodedFrame],
@@ -26,17 +34,21 @@ class PnLCalibInference:
         batch = torch.stack([frame.tensor for frame in frames])
         if self._models.device.type != "cpu":
             batch = batch.to(self._models.device)
+        self._synchronize()
         timings.tensor_assembly_seconds += perf_counter() - started
 
         started = perf_counter()
         heatmaps = self._models.keypoint_model(batch)
+        self._synchronize()
         timings.keypoint_inference_seconds += perf_counter() - started
 
         started = perf_counter()
         line_heatmaps = self._models.line_model(batch)
+        self._synchronize()
         timings.line_inference_seconds += perf_counter() - started
 
         started = perf_counter()
+        self._synchronize()
         runtime = self._models.runtime
         keypoint_coords = runtime.decode_keypoints(heatmaps[:, :-1])
         line_coords = runtime.decode_lines(line_heatmaps[:, :-1])
@@ -50,6 +62,7 @@ class PnLCalibInference:
             threshold=LINE_THRESHOLD,
             ground_plane_only=False,
         )
+        self._synchronize()
         timings.heatmap_decode_seconds += perf_counter() - started
 
         started = perf_counter()

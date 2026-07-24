@@ -10,7 +10,7 @@ from .pitch_calibration_orientation import canonicalize_penalty_side
 from .pitch_calibration_quality import calibration_alignment_error
 from .pitch_geometry import ANCHOR_PRESETS
 from .reconstruction_calibration_draft import calibration_draft
-from .reconstruction_calibration_frame_context import calibration_frame_context
+from .reconstruction_calibration_frame_context import sampled_frame_context
 
 
 def preview_scene_pitch_calibration(
@@ -19,7 +19,7 @@ def preview_scene_pitch_calibration(
     preset: str,
     anchors: list[dict],
 ) -> dict:
-    frame_index, frame_time, image, _ = calibration_frame_context(scene, scene_time)
+    frame_index, frame_time, image = sampled_frame_context(scene, scene_time)
     resolved_anchors = deepcopy(anchors)
     rough = calibration_from_anchors(resolved_anchors, preset, confidence=0.9)
     canonical = canonicalize_penalty_side(rough, image.shape[1])

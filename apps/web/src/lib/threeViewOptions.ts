@@ -9,7 +9,28 @@ export type ThreeViewOptionKey =
   | 'ball'
   | 'analysisMarkers'
 
-export type ThreeViewOptions = Record<ThreeViewOptionKey, boolean>
+// How positions inferred inside an observed track window are rendered.
+export type InferredPositionRenderMode = 'transparent' | 'normal' | 'hidden'
+
+export type ThreeViewOptions = Record<ThreeViewOptionKey, boolean> & {
+  inferredPositions: InferredPositionRenderMode
+}
+
+export type InferredPositionRenderModeItem = Readonly<{
+  value: InferredPositionRenderMode
+  label: string
+  detail: string
+}>
+
+export const INFERRED_POSITION_RENDER_MODE_ITEMS: ReadonlyArray<InferredPositionRenderModeItem> = Object.freeze([
+  { value: 'transparent', label: 'Transparent', detail: 'Fade positions inferred across detection gaps' },
+  { value: 'normal', label: 'Normal', detail: 'Draw inferred gaps like observed positions' },
+  { value: 'hidden', label: 'Hidden', detail: 'Hide players during inferred gaps' },
+])
+
+export function isInferredPositionRenderMode(value: unknown): value is InferredPositionRenderMode {
+  return value === 'transparent' || value === 'normal' || value === 'hidden'
+}
 
 export type ThreeViewLayerItem = Readonly<{
   key: ThreeViewOptionKey
@@ -35,6 +56,7 @@ export const DEFAULT_THREE_VIEW_OPTIONS: Readonly<ThreeViewOptions> = Object.fre
   allPaths: false,
   ball: true,
   analysisMarkers: true,
+  inferredPositions: 'transparent',
 })
 
 export function withThreeViewOption(
@@ -43,4 +65,11 @@ export function withThreeViewOption(
   enabled: boolean,
 ): ThreeViewOptions {
   return { ...options, [key]: enabled }
+}
+
+export function withInferredPositionRenderMode(
+  options: ThreeViewOptions,
+  mode: InferredPositionRenderMode,
+): ThreeViewOptions {
+  return { ...options, inferredPositions: mode }
 }

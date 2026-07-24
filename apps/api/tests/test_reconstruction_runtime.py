@@ -8,7 +8,6 @@ from app.pitch_anchor_calibration import calibration_from_anchors
 from app.pitch_calibration_contract import PitchCalibration
 from app.pitch_calibration_orientation import canonicalize_penalty_side
 from app.pitch_geometry import projected_pitch_markings
-from app.reconstruction_calibration_apply import apply_scene_pitch_calibration
 from app.reconstruction_pitch_side_command import set_scene_pitch_side
 from app.reconstruction_errors import IdentityCorrectionError, ReconstructionError
 from app.reconstruction_person_detection_contract import Detection
@@ -109,6 +108,18 @@ def test_goalkeeper_candidate_survives_third_kit_cluster():
         _track(6, 480),
     ]
     mapping = {1: "home", 2: "away", 3: "away", 4: "home"}
+    metric_x_by_track = {
+        1: -20.0,
+        2: 18.0,
+        3: 24.0,
+        4: -15.0,
+        5: 49.0,
+    }
+    for track in tracks:
+        for point in track.points:
+            if track.id in metric_x_by_track:
+                point["pitchX"] = metric_x_by_track[track.id]
+                point["pitchZ"] = 0.0
 
     result = _include_goalkeeper_candidates(tracks, mapping, 960)
 
@@ -151,7 +162,9 @@ def _queue_draft(
             frame_count=frame_count,
             run_id=run_id,
             match_snapshot_ref=None,
+            sampling_frame_rate=25.0,
             ball_detection_profile=ball_detection_profile,
+            calibration_artifact_input={"schemaVersion": 1},
         ),
     )
 
@@ -225,7 +238,9 @@ def test_jersey_ocr_profile_is_pinned_validated_and_fenced(monkeypatch):
             frame_count=0,
             run_id="run-a",
             match_snapshot_ref=None,
+            sampling_frame_rate=25.0,
             jersey_ocr_profile="off",
+            calibration_artifact_input={"schemaVersion": 1},
         ),
     )
     reconstruction = draft["payload"]["videoAsset"]["reconstruction"]
@@ -253,7 +268,157 @@ def test_jersey_ocr_profile_is_pinned_validated_and_fenced(monkeypatch):
                 frame_count=0,
                 run_id="run-a",
                 match_snapshot_ref=None,
+                sampling_frame_rate=25.0,
                 jersey_ocr_profile="disabled",
+            ),
+        )
+
+
+def test_contact_point_profile_is_pinned_validated_and_fenced():
+    draft = prepare_reconstruction_queue_draft(
+        _profile_scene(),
+        ReconstructionQueueInputs(
+            model="yolo26m.pt",
+            ball_backend="generic-ultralytics",
+            ball_detection_input={"schemaVersion": 1},
+            frame_count=0,
+            run_id="run-a",
+            match_snapshot_ref=None,
+            sampling_frame_rate=25.0,
+            contact_point_profile="pose-feet",
+            calibration_artifact_input={"schemaVersion": 1},
+        ),
+    )
+    reconstruction = draft["payload"]["videoAsset"]["reconstruction"]
+    assert reconstruction["contactPointProfile"] == "pose-feet"
+
+    baseline = _queue_draft(_profile_scene(), run_id="run-a")
+    assert (
+        reconstruction["inputFingerprint"]
+        != baseline["payload"]["videoAsset"]["reconstruction"]["inputFingerprint"]
+    )
+    # The bbox default stays out of the digest: pre-profile scenes keep their
+    # fingerprints.
+    baseline_reconstruction = baseline["payload"]["videoAsset"]["reconstruction"]
+    with_field = reconstruction_input_fingerprint(baseline)
+    baseline_reconstruction.pop("contactPointProfile")
+    assert reconstruction_input_fingerprint(baseline) == with_field
+
+    with pytest.raises(ReconstructionError, match="Unknown contact point profile"):
+        prepare_reconstruction_queue_draft(
+            _profile_scene(),
+            ReconstructionQueueInputs(
+                model="yolo26m.pt",
+                ball_backend="generic-ultralytics",
+                ball_detection_input={"schemaVersion": 1},
+                frame_count=0,
+                run_id="run-a",
+                match_snapshot_ref=None,
+                sampling_frame_rate=25.0,
+                contact_point_profile="pose",
+            ),
+        )
+
+
+def test_calibrate_mode_engages_the_stage_and_retains_the_published_review():
+    scene = _profile_scene()
+    # Published evidence remains available while a replacement computes. Its
+    # fingerprint, not its mere presence, decides whether it is current.
+    scene["payload"]["videoAsset"]["reconstruction"] = {
+        "stage": "calibration",
+        "calibrationReview": {"status": "confirmed", "inputFingerprint": "sha256:old"},
+    }
+    draft = prepare_reconstruction_queue_draft(
+        scene,
+        ReconstructionQueueInputs(
+            model="yolo26m.pt",
+            ball_backend="generic-ultralytics",
+            ball_detection_input={"schemaVersion": 1},
+            frame_count=0,
+            run_id="run-a",
+            match_snapshot_ref=None,
+            sampling_frame_rate=25.0,
+            mode="calibrate",
+        ),
+    )
+    reconstruction = draft["payload"]["videoAsset"]["reconstruction"]
+    assert reconstruction["mode"] == "calibrate"
+    assert reconstruction["stage"] == "calibration"
+    assert reconstruction["calibrationReview"] == {
+        "status": "confirmed",
+        "inputFingerprint": "sha256:old",
+    }
+
+
+def test_full_mode_leaves_the_calibration_stage_behind():
+    scene = _profile_scene()
+    review = {
+        "status": "ready",
+        "calibrationInputFingerprint": "sha256:calibration",
+        "frames": [{"sampleIndex": 0, "resolved": True}],
+    }
+    scene["payload"]["videoAsset"]["reconstruction"] = {
+        "stage": "calibration",
+        "calibrationReview": review,
+    }
+    draft = prepare_reconstruction_queue_draft(
+        scene,
+        ReconstructionQueueInputs(
+            model="yolo26m.pt",
+            ball_backend="generic-ultralytics",
+            ball_detection_input={"schemaVersion": 1},
+            frame_count=0,
+            run_id="run-a",
+            match_snapshot_ref=None,
+            sampling_frame_rate=25.0,
+            mode="full",
+            calibration_artifact_input={"schemaVersion": 1},
+        ),
+    )
+    reconstruction = draft["payload"]["videoAsset"]["reconstruction"]
+    assert reconstruction["mode"] == "full"
+    assert reconstruction["stage"] == "reconstruction"
+    assert reconstruction["calibrationReview"] == review
+
+
+def test_reconstruction_mode_is_never_part_of_the_input_fingerprint():
+    # Mode is a runtime directive, not a user-controlled scene input.
+    def _draft(mode: str) -> dict:
+        return prepare_reconstruction_queue_draft(
+            _profile_scene(),
+            ReconstructionQueueInputs(
+                model="yolo26m.pt",
+                ball_backend="generic-ultralytics",
+                ball_detection_input={"schemaVersion": 1},
+                frame_count=0,
+                run_id="run-a",
+                match_snapshot_ref=None,
+                sampling_frame_rate=25.0,
+                mode=mode,
+                calibration_artifact_input=(
+                    {"schemaVersion": 1} if mode == "full" else None
+                ),
+            ),
+        )
+
+    calibrate = _draft("calibrate")["payload"]["videoAsset"]["reconstruction"]
+    full = _draft("full")["payload"]["videoAsset"]["reconstruction"]
+    assert calibrate["inputFingerprint"] == full["inputFingerprint"]
+
+
+def test_unknown_reconstruction_mode_is_rejected():
+    with pytest.raises(ReconstructionError, match="Unknown reconstruction mode"):
+        prepare_reconstruction_queue_draft(
+            _profile_scene(),
+            ReconstructionQueueInputs(
+                model="yolo26m.pt",
+                ball_backend="generic-ultralytics",
+                ball_detection_input={"schemaVersion": 1},
+                frame_count=0,
+                run_id="run-a",
+                match_snapshot_ref=None,
+                sampling_frame_rate=25.0,
+                mode="preview",
             ),
         )
 
@@ -368,7 +533,6 @@ def test_queue_draft_preserves_last_good_result_and_records_previous():
         "pending",
         "pending",
         "pending",
-        "pending",
     ]
     assert reconstruction["previousResult"] == {
         "completedAt": "yesterday",
@@ -382,29 +546,33 @@ def test_queue_draft_preserves_last_good_result_and_records_previous():
 def test_reconstruction_progress_exposes_completed_current_and_pending_phases():
     scene = {
         "id": "progress-scene",
-        "payload": {"videoAsset": {"reconstruction": {"status": "processing"}}},
+        "payload": {
+            "videoAsset": {
+                "reconstruction": {
+                    "status": "processing",
+                    "mode": "calibrate",
+                }
+            }
+        },
     }
     payload = ReconstructionProgress(scene).update(
         "calibration",
         2,
         "Calibrating the pitch",
         "PnLCalib · 4/8 frames.",
-        4,
-        62,
+        8,
+        56,
         completed=4,
         total=8,
     )
 
     assert payload["phasePercent"] == 50
-    assert payload["overallPercent"] == 33
+    assert payload["overallPercent"] == 32
     assert payload["completed"] == 4
     assert payload["total"] == 8
     assert [item["status"] for item in payload["phases"]] == [
         "completed",
         "current",
-        "pending",
-        "pending",
-        "pending",
         "pending",
     ]
 
@@ -474,9 +642,11 @@ def test_queue_command_publishes_artifacts_before_atomic_enqueue(monkeypatch):
         "duration": 2.0,
         "revision": 4,
         "payload": {
-            "videoAsset": {
-                "id": "asset-queue-command",
-                "selectedSegmentId": "segment-1",
+                "videoAsset": {
+                    "id": "asset-queue-command",
+                    "fps": 25.0,
+                    "analysisFps": 25.0,
+                    "selectedSegmentId": "segment-1",
                 "reconstruction": {"status": "ready", "model": "yolo26m.pt"},
             },
             "tracks": [],
@@ -486,10 +656,17 @@ def test_queue_command_publishes_artifacts_before_atomic_enqueue(monkeypatch):
     expected_fingerprint = reconstruction_input_fingerprint(scene)
     events: list[str] = []
 
-    monkeypatch.setattr("app.reconstruction_queue.frame_paths", lambda _: [])
+    monkeypatch.setattr(
+        "app.reconstruction_queue.frame_paths",
+        lambda _, **_kwargs: [],
+    )
     monkeypatch.setattr(
         "app.reconstruction_queue.ball_detection_input",
-        lambda backend: {"schemaVersion": 1, "backend": backend},
+        lambda *_: pytest.fail("calibration must not resolve ball detector input"),
+    )
+    monkeypatch.setattr(
+        "app.reconstruction_queue.require_model_weights_available",
+        lambda *_: pytest.fail("calibration must not validate person model weights"),
     )
     monkeypatch.setattr(
         "app.reconstruction_queue.hydrate_scene_reconstruction",
@@ -526,7 +703,7 @@ def test_queue_command_publishes_artifacts_before_atomic_enqueue(monkeypatch):
 
     monkeypatch.setattr("app.reconstruction_queue.reconstruction_runs", Runs())
 
-    queued = queue_reconstruction(scene, match_snapshot=None)
+    queued = queue_reconstruction(scene, mode="calibrate", match_snapshot=None)
 
     assert events == ["hydrate", "publish", "enqueue"]
     assert scene["payload"]["videoAsset"]["reconstruction"]["status"] == "ready"

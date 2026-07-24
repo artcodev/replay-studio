@@ -288,7 +288,9 @@ def test_person_detection_has_direct_capability_owners() -> None:
     )
     cache_imports = _imports("person_base_detection_cache.py")
     assert "person_detection_cache" in cache_imports
-    assert "app.ultralytics_person_inference" in cache_imports
+    assert "person_detection_provider_contract" in cache_imports
+    assert "person_detection_candidate_selection" in cache_imports
+    assert "ultralytics_person_inference" not in cache_imports
 
 
 def test_ball_tracking_has_one_way_algorithm_dependencies() -> None:
@@ -730,7 +732,11 @@ def test_identity_worker_client_has_strict_capability_owners() -> None:
     assert _imported_names(
         "identity_worker_client.py",
         "identity_worker_model_contract",
-    ) == {"project_model_contract", "validate_readiness_payload"}
+    ) == {
+        "project_model_contract",
+        "project_runtime_contract",
+        "validate_readiness_payload",
+    }
     assert _imported_names(
         "identity_worker_client.py",
         "identity_worker_batch_validation",

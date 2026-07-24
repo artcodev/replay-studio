@@ -5,8 +5,13 @@ from __future__ import annotations
 import numpy as np
 
 from .pitch_calibration_contract import PitchCalibration
-from .pitch_calibration_quality import calibration_alignment_metrics
+from .pitch_calibration_quality import (
+    CALIBRATION_QA_REFERENCE_HEIGHT,
+    CALIBRATION_QA_REFERENCE_WIDTH,
+    calibration_alignment_metrics,
+)
 from .reconstruction_calibration_policy import (
+    CALIBRATION_REVIEW_GROUND_ERROR_P95_METRES,
     CALIBRATION_REVIEW_REPROJECTION_P95,
     METRIC_CALIBRATION_THRESHOLD,
     PARTIAL_VIEW_ALIGNMENT_F1_MINIMUM,
@@ -95,7 +100,11 @@ def direct_calibration_qa(
         )
     )
 
-    confidence_pass = calibration.confidence >= METRIC_CALIBRATION_THRESHOLD
+    # A manual anchor set is a direct human-provided correspondence, so its
+    # metric confidence — which is derived from automatic line alignment — is
+    # not a meaningful gate. Trust the operator; the homography-validity and
+    # anchor-reprojection gates still apply.
+    confidence_pass = manual or calibration.confidence >= METRIC_CALIBRATION_THRESHOLD
     if not confidence_pass:
         rejection_reasons.append("confidence-below-metric-threshold")
     gates.append(
@@ -118,10 +127,8 @@ def direct_calibration_qa(
     candidate_p95 = calibration.reprojection_p95
     if candidate_p95 is None:
         candidate_p95 = calibration.reprojection_error
-    is_line_fallback = calibration.method == "pitch-lines-ransac"
     raw_partial_view_support = (
         not manual
-        and not is_line_fallback
         and candidate_p95 is not None
         and float(candidate_p95) <= 25.0
         and calibration.reprojection_error is not None
@@ -156,6 +163,9 @@ def direct_calibration_qa(
             threshold={
                 "atMostPixels": CALIBRATION_REVIEW_REPROJECTION_P95,
                 "partialViewAtMostPixels": 25.0,
+                "coordinateSpace": "reference-image-pixels",
+                "referenceWidth": CALIBRATION_QA_REFERENCE_WIDTH,
+                "referenceHeight": CALIBRATION_QA_REFERENCE_HEIGHT,
             },
             reason=None if raw_reprojection_pass else "reprojection-error-too-high",
         )
@@ -165,7 +175,11 @@ def direct_calibration_qa(
     alignment = alignment_metrics.as_dict() if alignment_metrics is not None else None
     semantic_pass = semantic_alignment_passes_review(alignment_metrics)
     if alignment_metrics is None:
-        rejection_reasons.append("semantic-line-alignment-unscored")
+        # Manual anchors stand on their own: a frame with too few visible white
+        # markings to score an overlay is exactly where the operator steps in,
+        # so absence of a line score must not reject a manual calibration.
+        if not manual:
+            rejection_reasons.append("semantic-line-alignment-unscored")
     elif not semantic_pass:
         rejection_reasons.append("semantic-line-alignment-poor")
     gates.append(
@@ -186,6 +200,9 @@ def direct_calibration_qa(
                 "partialViewResidualP95AtMostPixels": PARTIAL_VIEW_REPROJECTION_P95_LIMIT,
                 "partialViewResidualP50AtMostPixels": PARTIAL_VIEW_REPROJECTION_P50_LIMIT,
                 "partialViewF1AtLeast": PARTIAL_VIEW_ALIGNMENT_F1_MINIMUM,
+                "coordinateSpace": "reference-image-pixels",
+                "referenceWidth": CALIBRATION_QA_REFERENCE_WIDTH,
+                "referenceHeight": CALIBRATION_QA_REFERENCE_HEIGHT,
             },
             reason=(
                 "semantic-line-alignment-unscored"
@@ -207,42 +224,21 @@ def direct_calibration_qa(
                 threshold={"atLeast": 4},
             )
         )
-    elif is_line_fallback:
-        line_support_pass = calibration.supported_lines >= 4
-        curve_support_pass = calibration.matched_curves >= 1
-        if not line_support_pass:
-            rejection_reasons.append("insufficient-supported-lines")
-        if not curve_support_pass:
-            rejection_reasons.append("missing-curve-evidence")
-        gates.extend(
-            [
-                calibration_quality_gate(
-                    "supported-pitch-lines",
-                    "Supported pitch markings",
-                    "pass" if line_support_pass else "fail",
-                    value=calibration.supported_lines,
-                    threshold={"atLeast": 4},
-                    reason=(
-                        None if line_support_pass else "insufficient-supported-lines"
-                    ),
-                ),
-                calibration_quality_gate(
-                    "curve-evidence",
-                    "Penalty arc or centre-circle evidence",
-                    "pass" if curve_support_pass else "fail",
-                    value=calibration.matched_curves,
-                    threshold={"atLeast": 1},
-                    reason=None if curve_support_pass else "missing-curve-evidence",
-                ),
-            ]
-        )
     else:
         keypoint_pass = detected_keypoints >= 6
         inlier_pass = inlier_ratio is not None and inlier_ratio >= 0.65
+        ground_error_p95 = calibration.ground_error_p95
+        ground_error_pass = (
+            ground_error_p95 is None
+            or float(ground_error_p95)
+            <= CALIBRATION_REVIEW_GROUND_ERROR_P95_METRES
+        )
         if not keypoint_pass:
             rejection_reasons.append("insufficient-detected-keypoints")
         if not inlier_pass:
             rejection_reasons.append("insufficient-keypoint-inlier-ratio")
+        if not ground_error_pass:
+            rejection_reasons.append("semantic-keypoint-ground-error-too-high")
         gates.extend(
             [
                 calibration_quality_gate(
@@ -267,6 +263,30 @@ def direct_calibration_qa(
                     threshold={"atLeast": 0.65},
                     reason=(
                         None if inlier_pass else "insufficient-keypoint-inlier-ratio"
+                    ),
+                ),
+                calibration_quality_gate(
+                    "semantic-keypoint-ground-error-p95",
+                    "Semantic keypoint ground residual p95",
+                    (
+                        "not-available"
+                        if ground_error_p95 is None
+                        else "pass"
+                        if ground_error_pass
+                        else "fail"
+                    ),
+                    value=(
+                        round(float(ground_error_p95), 4)
+                        if ground_error_p95 is not None
+                        else None
+                    ),
+                    threshold={
+                        "atMostMetres": CALIBRATION_REVIEW_GROUND_ERROR_P95_METRES
+                    },
+                    reason=(
+                        None
+                        if ground_error_pass
+                        else "semantic-keypoint-ground-error-too-high"
                     ),
                 ),
             ]

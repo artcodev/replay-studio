@@ -14,23 +14,67 @@ def project_metric_point(
     calibration: PitchCalibration,
     pitch: dict,
 ) -> tuple[float, float] | None:
-    projected = calibration.image_to_pitch @ np.array([x, y, 1.0], dtype=np.float64)
+    position, _ = project_metric_point_with_diagnostics(
+        x,
+        y,
+        calibration,
+        pitch,
+    )
+    return position
+
+
+def project_metric_point_with_diagnostics(
+    x: float,
+    y: float,
+    calibration: PitchCalibration,
+    pitch: dict,
+) -> tuple[tuple[float, float] | None, dict]:
+    projected = calibration.image_to_pitch @ np.array(
+        [x, y, 1.0],
+        dtype=np.float64,
+    )
     if abs(float(projected[2])) < 1e-8:
-        return None
+        return None, {"status": "rejected", "reason": "singular-projection"}
     pitch_x = float(projected[0] / projected[2])
     pitch_z = float(projected[1] / projected[2])
+    raw = {"x": pitch_x, "z": pitch_z}
+    if not np.isfinite([pitch_x, pitch_z]).all():
+        return None, {
+            "status": "rejected",
+            "reason": "non-finite-projection",
+        }
     half_length = float(pitch["length"]) / 2.0
     half_width = float(pitch["width"]) / 2.0
-    if not np.isfinite([pitch_x, pitch_z]).all():
-        return None
     if not (-half_length - 4.0 <= pitch_x <= half_length + 4.0):
-        return None
+        return None, {
+            "status": "rejected",
+            "reason": "outside-pitch-length",
+            "rawPitch": raw,
+            "acceptedRange": {
+                "minimum": -half_length - 4.0,
+                "maximum": half_length + 4.0,
+            },
+        }
     if not (-half_width - 4.0 <= pitch_z <= half_width + 4.0):
-        return None
-    return (
+        return None, {
+            "status": "rejected",
+            "reason": "outside-pitch-width",
+            "rawPitch": raw,
+            "acceptedRange": {
+                "minimum": -half_width - 4.0,
+                "maximum": half_width + 4.0,
+            },
+        }
+    accepted = (
         max(-half_length, min(half_length, pitch_x)),
         max(-half_width, min(half_width, pitch_z)),
     )
+    return accepted, {
+        "status": "accepted",
+        "reason": None,
+        "rawPitch": raw,
+        "pitch": {"x": accepted[0], "z": accepted[1]},
+    }
 
 
 def attach_metric_positions(
@@ -46,7 +90,28 @@ def attach_metric_positions(
     if calibration is None:
         return
     for detection in people:
-        position = project_metric_point(detection.x, detection.y, calibration, pitch)
+        # A pose-derived contact point supersedes the bbox bottom-centre; it
+        # was gated against implausible poses at extraction time.
+        foot_x = (
+            detection.contact_image_x
+            if detection.contact_image_x is not None
+            else detection.x
+        )
+        foot_y = (
+            detection.contact_image_y
+            if detection.contact_image_y is not None
+            else detection.y
+        )
+        position, projection_diagnostics = project_metric_point_with_diagnostics(
+            foot_x,
+            foot_y,
+            calibration,
+            pitch,
+        )
+        detection.metric_projection_reason = projection_diagnostics.get("reason")
+        raw_pitch = projection_diagnostics.get("rawPitch") or {}
+        detection.raw_pitch_x = raw_pitch.get("x")
+        detection.raw_pitch_z = raw_pitch.get("z")
         if position is not None:
             detection.pitch_x, detection.pitch_z = position
             detection.projection_source = projection_source

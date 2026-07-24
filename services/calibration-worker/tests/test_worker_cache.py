@@ -38,6 +38,7 @@ def _calibration(frame_index: int) -> FrameCalibration:
         matched_curves=0,
         completed_curve_count=0,
         reprojection_error=1.0,
+        reprojection_p95=2.0,
         ground_error_p50_metres=0.1,
         ground_error_p95_metres=0.2,
         pitch_side="left",
@@ -139,6 +140,21 @@ def test_failed_calibration_is_cached_too() -> None:
     assert inference.calls == [["unusable"]]
     assert second.diagnostics.cache_hit_count == 1
     assert second.diagnostics.cache_miss_count == 0
+
+
+def test_recalibrate_bypasses_and_replaces_a_warm_cache_entry() -> None:
+    engine, inference = _engine({"same": _calibration(1)})
+    engine.calibrate([_frame(1, "same")])
+    inference.results_by_hash["same"] = None
+
+    refreshed = engine.recalibrate([_frame(2, "same")])
+    warm = engine.calibrate([_frame(3, "same")])
+
+    assert refreshed.frames == ()
+    assert refreshed.diagnostics.cache_hit_count == 0
+    assert inference.calls == [["same"], ["same"]]
+    assert warm.frames == ()
+    assert warm.diagnostics.cache_hit_count == 1
 
 
 def test_cache_expires_entries_and_evicts_the_least_recently_used() -> None:

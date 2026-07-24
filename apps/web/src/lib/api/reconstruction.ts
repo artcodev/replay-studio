@@ -6,7 +6,9 @@ import type {
   BallDetectionBackend,
   BallDetectionProfile,
   BallTrajectoryMode,
+  ContactPointProfile,
   JerseyOcrProfile,
+  ReconstructionMode,
   ReconstructionModel,
 } from '../../types/reconstruction'
 import type { Keyframe } from '../../types/tracking'
@@ -19,6 +21,10 @@ export const reconstructionClient = {
     ballBackend: BallDetectionBackend,
     ballDetectionProfile: BallDetectionProfile = 'automatic',
     jerseyOcrProfile: JerseyOcrProfile = 'automatic',
+    contactPointProfile: ContactPointProfile = 'bbox-bottom',
+    mode: ReconstructionMode = 'full',
+    frameRate: number | null = null,
+    directCalibrationMaxGapSeconds: number | null = null,
   ) => sceneRequest(projectId, projectScenePath(projectId, sceneId, '/reconstruct'), {
     method: 'POST',
     body: JSON.stringify({
@@ -26,8 +32,20 @@ export const reconstructionClient = {
       ball_backend: ballBackend,
       ball_detection_profile: ballDetectionProfile,
       jersey_ocr_profile: jerseyOcrProfile,
+      contact_point_profile: contactPointProfile,
+      mode,
+      frame_rate: frameRate,
+      direct_calibration_max_gap_seconds: directCalibrationMaxGapSeconds,
     }),
   }),
+  confirmCalibrationReview: (
+    projectId: string,
+    sceneId: string,
+  ) => sceneRequest(
+    projectId,
+    projectScenePath(projectId, sceneId, '/pitch-calibration/confirm-review'),
+    { method: 'POST' },
+  ),
   updateBallTrajectory: (
     projectId: string,
     sceneId: string,

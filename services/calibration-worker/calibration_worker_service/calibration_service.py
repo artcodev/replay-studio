@@ -23,6 +23,18 @@ class CalibrationService:
         return self._runtime.get_engine().readiness().to_wire()
 
     def calibrate(self, frame_indices: str, payloads: list[bytes]) -> dict:
+        return self._execute(frame_indices, payloads, fresh=False)
+
+    def recalibrate(self, frame_indices: str, payloads: list[bytes]) -> dict:
+        return self._execute(frame_indices, payloads, fresh=True)
+
+    def _execute(
+        self,
+        frame_indices: str,
+        payloads: list[bytes],
+        *,
+        fresh: bool,
+    ) -> dict:
         request_started = perf_counter()
         try:
             indices = json.loads(frame_indices)
@@ -43,7 +55,11 @@ class CalibrationService:
             acquire_started = perf_counter()
             engine = self._runtime.get_engine()
             engine_acquire_seconds = perf_counter() - acquire_started
-            result = engine.calibrate(decoded)
+            result = (
+                engine.recalibrate(decoded)
+                if fresh
+                else engine.calibrate(decoded)
+            )
         except Exception as exc:
             raise CalibrationInferenceError(
                 f"PnLCalib inference failed: {exc}"
@@ -54,6 +70,7 @@ class CalibrationService:
             "decodeSeconds": round(decode_seconds, 6),
             "engineAcquireSeconds": round(engine_acquire_seconds, 6),
             "totalSeconds": round(perf_counter() - request_started, 6),
+            "inferenceMode": "forced-refresh" if fresh else "cache-aware",
         }
         return {
             "backend": BACKEND_NAME,

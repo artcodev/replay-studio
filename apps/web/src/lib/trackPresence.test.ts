@@ -10,30 +10,29 @@ const track: Track = {
   number: 7,
   externalPlayerId: null,
   presence: {
-    policy: 'continuous-latent',
-    coverage: 1,
+    policy: 'observed-window-with-latent-gaps',
+    coverage: 0.25,
     observationCount: 2,
-    inferredKeyframeCount: 3,
+    inferredKeyframeCount: 1,
     observedStart: 1,
     observedEnd: 2,
     observedSpanRatio: 0.25,
     sampleCadenceSeconds: 0.2,
   },
   keyframes: [
-    { t: 0, x: 1, z: 1, confidence: 0.18, observed: false, presenceState: 'inferred-before-first', positionUncertaintyMetres: 5 },
     { t: 1, x: 2, z: 2, confidence: 0.9, observed: true, presenceState: 'observed', positionUncertaintyMetres: 1 },
     { t: 1.5, x: 3, z: 3, confidence: 0.18, observed: false, presenceState: 'inferred-gap', positionUncertaintyMetres: 4 },
     { t: 2, x: 4, z: 4, confidence: 0.85, observed: true, presenceState: 'observed', positionUncertaintyMetres: 1.5 },
-    { t: 4, x: 5, z: 5, confidence: 0.18, observed: false, presenceState: 'inferred-after-last', positionUncertaintyMetres: 8 },
   ],
 }
 
 describe('track presence inspector data', () => {
-  it('distinguishes observed and all inferred phases at the current time', () => {
-    expect(trackPresenceAtTime(track, 0).label).toBe('INFERRED · BEFORE')
+  it('distinguishes the observed window from internal inference', () => {
+    expect(trackPresenceAtTime(track, 0).label).toBe('NOT OBSERVED')
     expect(trackPresenceAtTime(track, 1).label).toBe('OBSERVED')
     expect(trackPresenceAtTime(track, 1.5).label).toBe('INFERRED · GAP')
-    expect(trackPresenceAtTime(track, 4).label).toBe('INFERRED · AFTER')
+    expect(trackPresenceAtTime(track, 4).label).toBe('NOT OBSERVED')
+    expect(trackPresenceAtTime(track, 4).uncertaintyMetres).toBeNull()
   })
 
   it('interpolates uncertainty without changing presence semantics', () => {
@@ -50,13 +49,14 @@ describe('track presence inspector data', () => {
   })
 
   it('reports the observed and inferred sample mix from track presence metadata', () => {
-    expect(trackPresenceSummary(track)).toEqual({
-      timelineCoverage: 1,
-      observedSampleRatio: 0.4,
-      inferredSampleRatio: 0.6,
+    const summary = trackPresenceSummary(track)
+    expect(summary).toMatchObject({
+      timelineCoverage: 0.25,
       observedSpanRatio: 0.25,
       observationCount: 2,
-      inferredKeyframeCount: 3,
+      inferredKeyframeCount: 1,
     })
+    expect(summary.observedSampleRatio).toBeCloseTo(2 / 3)
+    expect(summary.inferredSampleRatio).toBeCloseTo(1 / 3)
   })
 })

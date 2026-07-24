@@ -72,7 +72,10 @@ def _prepare(job: PipelineJob) -> dict:
         try:
             queue_reconstruction(child, match_snapshot=snapshot)
         except ReconstructionError as exc:
-            return _failed(scene, str(exc))
+            return _failed(
+                scene,
+                f"Source camera scene {child_scene_id}: {exc}",
+            )
 
     statuses = reconstruction_jobs.statuses(scene_ids)
     missing = [scene_id for scene_id in scene_ids if scene_id not in statuses]

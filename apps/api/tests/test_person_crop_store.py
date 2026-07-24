@@ -167,19 +167,6 @@ def test_detection_pass_attaches_crop_identity(tmp_path, monkeypatch):
         lambda _image, people, _annotations: people,
     )
 
-    class Accumulator:
-        def __init__(self, *_args) -> None:
-            pass
-
-        def add_frame(self, **_values) -> None:
-            pass
-
-        def result(self):
-            return SimpleNamespace()
-
-    monkeypatch.setattr(
-        sampled_detection, "SampledCalibrationAccumulator", Accumulator
-    )
     store_directory = tmp_path / "person-crops"
     monkeypatch.setattr(
         sampled_detection,
@@ -189,15 +176,15 @@ def test_detection_pass_attaches_crop_identity(tmp_path, monkeypatch):
 
     runtime = SimpleNamespace(
         model=object(),
+        person_provider=object(),
         person_cache_directory=tmp_path,
         person_detector_input={"fingerprint": "detector-v1"},
         person_cache_diagnostics={"errors": [], "hits": 1},
     )
-    sampled_detection.analyze_sampled_frames(
+    sampled_detection.analyze_sampled_detections(
         {"payload": {"videoAsset": {}}},
         [(frame_path, 0.0)],
         runtime,
-        SimpleNamespace(),
         SimpleNamespace(update=lambda *args, **kwargs: None),
     )
 

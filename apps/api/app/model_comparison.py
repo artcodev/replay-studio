@@ -108,9 +108,13 @@ def _run_model(scene: dict, model_name: str) -> tuple[dict, list[list[dict]]]:
     frames = _frame_paths(scene)
     if not frames:
         raise ValueError("No sampled frames are available for model comparison")
-    model = _load_model(model_name)
     pitch = scene["payload"]["pitch"]
     calibration = _saved_pitch_calibration(scene)
+    if calibration is None:
+        raise ValueError(
+            "Pitch calibration is required before comparing tracking continuity"
+        )
+    model = _load_model(model_name)
     person_frames: list[tuple[list[Detection], float]] = []
     observations: list[list[dict]] = []
     frame_counts: list[int] = []
@@ -135,10 +139,18 @@ def _run_model(scene: dict, model_name: str) -> tuple[dict, list[list[dict]]]:
         if previous_image is not None:
             camera_transform = camera_transform @ _camera_step(previous_image, result.orig_img)
         _stabilize_detections(people, balls, camera_transform)
-        current_observations = [
-            _observation(person, frame_index, pitch, frame_size, calibration)
-            for person in people
-        ]
+        current_observations = []
+        for person in people:
+            observation = _observation(
+                person,
+                frame_index,
+                pitch,
+                frame_size,
+                calibration,
+            )
+            person.pitch_x, person.pitch_z = observation["pitch"]
+            person.projection_source = "saved-pitch-calibration"
+            current_observations.append(observation)
         observations.append(current_observations)
         person_frames.append((people, time))
         frame_counts.append(len(people))

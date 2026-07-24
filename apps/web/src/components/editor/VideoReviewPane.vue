@@ -68,6 +68,9 @@ function bindVideo(element: Element | ComponentPublicInstance | null) {
       </div>
     </div>
 
+    <div class="video-review-overlay-controls">
+      <slot name="overlay-controls" />
+    </div>
     <div class="video-review-controls" role="group" aria-label="Video review zoom controls">
       <button
         type="button"

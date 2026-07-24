@@ -8,7 +8,6 @@ from app.pitch_anchor_calibration import calibration_from_anchors
 from app.pitch_calibration_contract import PitchCalibration
 from app.pitch_calibration_orientation import canonicalize_penalty_side
 from app.pitch_geometry import projected_pitch_markings
-from app.reconstruction_calibration_apply import apply_scene_pitch_calibration
 from app.reconstruction_pitch_side_command import set_scene_pitch_side
 from app.reconstruction_errors import IdentityCorrectionError, ReconstructionError
 from app.reconstruction_person_detection_contract import Detection
